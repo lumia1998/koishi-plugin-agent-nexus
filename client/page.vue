@@ -1,25 +1,55 @@
 <template>
     <div class="nexus-page">
-        <div class="toolbar">
-            <div class="title">AgentNexus</div>
+        <div class="hero">
+            <div class="hero-copy">
+                <div class="title-row">
+                    <div class="title">AgentNexus</div>
+                    <el-tag size="small" effect="plain" :type="overview.connected ? 'success' : 'info'">
+                        {{ overview.connected ? 'SSH 就绪' : '待连接' }}
+                    </el-tag>
+                </div>
+                <div class="subtitle">
+                    SSH Code Agent 网关 · 扫描远端 Agent · 同步 Skills · 终端调试
+                </div>
+            </div>
             <div class="actions">
-                <el-button size="small" :loading="loading" @click="reload">刷新</el-button>
+                <el-button size="small" :loading="loading" @click="reload">刷新状态</el-button>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">主机</div>
+                <div class="stat-value">{{ overview.hostLabel }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">可用 Agent</div>
+                <div class="stat-value">{{ overview.agentCount }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Skills</div>
+                <div class="stat-value">{{ status.skills.total || 0 }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">活跃会话</div>
+                <div class="stat-value">{{ status.activeSessions || 0 }}</div>
             </div>
         </div>
 
         <div class="tabs">
-            <div
+            <button
                 v-for="tab in tabs"
                 :key="tab"
                 class="tab"
                 :class="{ active: active === tab }"
+                type="button"
                 @click="active = tab"
             >
                 {{ tabLabel[tab] }}
-            </div>
+            </button>
         </div>
 
-        <div class="content" v-loading="loading">
+        <div class="content" :class="{ terminal: active === 'terminal' }" v-loading="loading">
             <computer-panel
                 v-if="active === 'computer'"
                 :config="config"
@@ -44,7 +74,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage } from 'element-plus'
 import ComputerPanel from './components/computer-panel.vue'
@@ -88,6 +118,18 @@ const status = ref<NexusStatus>({
     activeSessions: 0
 })
 
+const overview = computed(() => {
+    const host = status.value.hosts[0]
+    const agents = host?.agents || []
+    const agentCount = agents.filter((item) => item.installed).length
+    const connected = !!host && (host.sessionCount > 0 || agentCount > 0)
+    return {
+        connected,
+        agentCount,
+        hostLabel: host ? `${host.host}` : '未配置'
+    }
+})
+
 async function reload() {
     loading.value = true
     try {
@@ -98,6 +140,33 @@ async function reload() {
         ElMessage.error(err?.message || String(err))
     } finally {
         loading.value = false
+    }
+}
+
+async function autoConnectAndScan() {
+    const hostId =
+        config.value.defaultHostId ||
+        config.value.hosts.find((host) => host.enabled)?.id ||
+        config.value.hosts[0]?.id
+    if (!hostId || connecting.value) return
+
+    const hostStatus = status.value.hosts.find((item) => item.id === hostId)
+    const hasAgents = (hostStatus?.agents || []).some((agent) => agent.installed)
+    if (hostStatus && hostStatus.sessionCount > 0 && hasAgents) return
+
+    connecting.value = true
+    try {
+        await send('agent-nexus/testHost', hostId)
+        status.value = await send('agent-nexus/scanAgents', hostId)
+    } catch {
+        // keep silent on page-load auto connect; manual button still surfaces errors
+    } finally {
+        connecting.value = false
+        try {
+            const data = await send('agent-nexus/getConsoleData')
+            config.value = data.config
+            status.value = data.status
+        } catch {}
     }
 }
 
@@ -185,77 +254,157 @@ async function refreshSkills(hostId?: string) {
     }
 }
 
-onMounted(reload)
+onMounted(async () => {
+    await reload()
+    await autoConnectAndScan()
+})
 </script>
 
 <style scoped>
 .nexus-page {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 18px;
     width: min(100%, 1440px);
     min-height: 100%;
     margin: 0 auto;
-    padding: 24px clamp(24px, 4vw, 56px) 40px;
+    padding: 24px clamp(20px, 4vw, 56px) 40px;
     box-sizing: border-box;
 }
-.toolbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-}
-.title {
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-}
+
+.hero,
+.stats,
+.tabs,
+.title-row,
 .actions {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: 12px;
 }
+
+.hero {
+    justify-content: space-between;
+}
+
+.title-row {
+    gap: 10px;
+}
+
+.title {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--k-text-dark);
+}
+
+.subtitle {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--k-text-light);
+}
+
+.stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.stat-card {
+    min-width: 0;
+    padding: 14px 16px;
+    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 18%);
+}
+
+.stat-label {
+    font-size: 12px;
+    color: var(--k-text-light);
+}
+
+.stat-value {
+    margin-top: 8px;
+    overflow: hidden;
+    font-size: 16px;
+    font-weight: 650;
+    color: var(--k-text-dark);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .tabs {
-    display: flex;
     gap: 8px;
-    border-bottom: 1px solid var(--k-color-border, #3333);
-    padding-bottom: 8px;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 24%);
     overflow-x: auto;
 }
+
 .tab {
     flex: 0 0 auto;
-    padding: 7px 14px;
-    border-radius: 8px;
+    border: 0;
+    border-radius: 10px;
+    padding: 9px 16px;
+    background: transparent;
+    color: var(--k-text-light);
     cursor: pointer;
-    opacity: 0.75;
+    font: inherit;
+    font-size: 13px;
+    transition: 0.18s ease;
 }
+
+.tab:hover {
+    color: var(--k-text-dark);
+    background: color-mix(in srgb, var(--k-page-bg), transparent 20%);
+}
+
 .tab.active {
-    background: var(--k-color-primary, #409eff22);
-    opacity: 1;
-    font-weight: 600;
+    color: var(--k-text-dark);
+    background: color-mix(in srgb, var(--k-color-primary), transparent 86%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--k-color-primary), transparent 72%);
+    font-weight: 650;
 }
+
 .content {
     flex: 1;
     min-height: 0;
     min-width: 0;
 }
 
+.content.terminal {
+    overflow: visible;
+}
+
+@media (max-width: 900px) {
+    .stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
 @media (max-width: 720px) {
     .nexus-page {
-        gap: 12px;
+        gap: 14px;
         padding: 16px 14px 28px;
     }
 
-    .toolbar {
+    .hero {
         align-items: flex-start;
         flex-direction: column;
     }
 
-    .actions {
+    .actions,
+    .tabs {
         width: 100%;
     }
 
     .actions :deep(.el-button) {
-        flex: 1;
+        width: 100%;
+    }
+
+    .stats {
+        grid-template-columns: 1fr 1fr;
     }
 }
 </style>

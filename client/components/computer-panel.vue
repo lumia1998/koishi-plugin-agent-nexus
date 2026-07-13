@@ -7,12 +7,8 @@
                     连接一台远端机器，AgentNexus 会自动发现可用的 Code Agent。
                 </div>
             </div>
-            <el-tag
-                size="small"
-                effect="plain"
-                :type="connected ? 'success' : 'info'"
-            >
-                {{ connected ? '已连接' : '未连接' }}
+            <el-tag size="small" effect="plain" :type="statusTagType">
+                {{ statusLabel }}
             </el-tag>
         </div>
 
@@ -20,15 +16,15 @@
             <div class="connection-grid">
                 <div class="field host-field">
                     <div class="field-label">主机地址</div>
-                    <el-input v-model="host" placeholder="192.168.1.10" />
+                    <el-input v-model="host" placeholder="192.168.1.10" clearable />
                 </div>
                 <div class="field port-field">
                     <div class="field-label">端口</div>
-                    <el-input-number v-model="port" :min="1" :max="65535" />
+                    <el-input-number v-model="port" :min="1" :max="65535" controls-position="right" />
                 </div>
                 <div class="field">
                     <div class="field-label">账号</div>
-                    <el-input v-model="username" placeholder="root" />
+                    <el-input v-model="username" placeholder="root" clearable />
                 </div>
                 <div class="field">
                     <div class="field-label">密码</div>
@@ -36,7 +32,7 @@
                         v-model="password"
                         type="password"
                         show-password
-                        :placeholder="hasSavedHost ? '留空保持原密码' : 'SSH 密码或 env:VAR'"
+                        :placeholder="hasSavedHost ? '留空保持原密码' : 'SSH 密码'"
                         @keyup.enter="connect"
                     />
                 </div>
@@ -60,18 +56,25 @@
                         连接成功后自动扫描。亮起的 Agent 会进入自动路由候选。
                     </div>
                 </div>
+                <div class="section-meta">{{ availableCount }}/{{ kinds.length }} 可用</div>
             </div>
 
-            <div class="agent-tags">
+            <div class="agent-grid">
                 <div
                     v-for="kind in kinds"
                     :key="kind"
-                    class="agent-tag"
+                    class="agent-card"
                     :class="{ available: agent(kind)?.installed }"
                 >
-                    <span class="status-dot" />
-                    <span class="agent-name">{{ labels[kind] }}</span>
-                    <span class="agent-version">{{ agent(kind)?.version || '未发现' }}</span>
+                    <div class="agent-top">
+                        <span class="status-dot" />
+                        <span class="agent-name">{{ labels[kind] }}</span>
+                        <el-tag size="small" effect="plain" :type="agent(kind)?.installed ? 'success' : 'info'">
+                            {{ agent(kind)?.installed ? '已安装' : '未发现' }}
+                        </el-tag>
+                    </div>
+                    <div class="agent-version">{{ agent(kind)?.version || '等待扫描' }}</div>
+                    <div class="agent-path">{{ agent(kind)?.path || 'PATH 中未找到可执行文件' }}</div>
                 </div>
             </div>
 
@@ -84,6 +87,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { AgentKind, NexusConfig, NexusStatus } from '../../src/types'
 
 const props = defineProps<{
@@ -122,15 +126,29 @@ watch(
 
 const hasSavedHost = computed(() => !!props.config.hosts[0])
 const hostStatus = computed(() => props.status.hosts[0])
-const connected = computed(() => !!hostStatus.value?.sessionCount || availableCount.value > 0)
 const availableCount = computed(() => kinds.filter((kind) => agent(kind)?.installed).length)
+const connected = computed(() => !!hostStatus.value?.sessionCount || availableCount.value > 0)
+const statusLabel = computed(() => {
+    if (props.connecting) return '连接中'
+    if (connected.value) return '已连接'
+    if (hasSavedHost.value) return '已保存'
+    return '未连接'
+})
+const statusTagType = computed(() => {
+    if (props.connecting) return 'warning'
+    if (connected.value) return 'success'
+    return 'info'
+})
 
 function agent(kind: AgentKind) {
     return hostStatus.value?.agents.find((item) => item.kind === kind)
 }
 
 function connect() {
-    if (!host.value.trim() || !username.value.trim()) return
+    if (!host.value.trim() || !username.value.trim()) {
+        ElMessage.warning('请填写主机地址和账号')
+        return
+    }
     emit('connect', {
         host: host.value.trim(),
         port: port.value || 22,
@@ -144,36 +162,53 @@ function connect() {
 .computer-panel {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 20px;
 }
 
 .panel-head,
 .section-head,
-.connection-footer {
+.connection-footer,
+.agent-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 18px;
+    gap: 16px;
+}
+
+.panel-title,
+.section-title {
+    font-weight: 650;
+    color: var(--k-text-dark);
 }
 
 .panel-title {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--k-text-dark);
+    font-size: 18px;
+}
+
+.section-title {
+    font-size: 15px;
 }
 
 .panel-description,
 .section-description,
 .connection-copy,
-.scan-hint {
-    margin-top: 5px;
+.scan-hint,
+.agent-version,
+.agent-path,
+.section-meta {
     font-size: 13px;
-    line-height: 1.6;
+    line-height: 1.55;
     color: var(--k-text-light);
 }
 
+.panel-description,
+.section-description {
+    margin-top: 5px;
+}
+
 .connection-card,
-.agents-section {
+.agents-section,
+.agent-card {
     border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 18%);
     border-radius: 14px;
     background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 18%);
@@ -193,7 +228,7 @@ function connect() {
 .field-label {
     margin-bottom: 7px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--k-text-dark);
 }
 
@@ -214,37 +249,28 @@ function connect() {
     padding: 20px;
 }
 
-.section-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--k-text-dark);
+.agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 12px;
+    margin-top: 16px;
 }
 
-.agent-tags {
+.agent-card {
     display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 18px;
-}
-
-.agent-tag {
-    display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 8px;
-    min-width: 150px;
-    padding: 11px 13px;
-    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 25%);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--k-page-bg), transparent 12%);
-    opacity: 0.48;
-    transition: 0.2s ease;
+    min-width: 0;
+    padding: 14px;
+    opacity: 0.58;
+    transition: 0.18s ease;
 }
 
-.agent-tag.available {
-    border-color: color-mix(in srgb, var(--el-color-success), transparent 45%);
-    background: color-mix(in srgb, var(--el-color-success-light-9), transparent 15%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--el-color-success), transparent 78%);
+.agent-card.available {
     opacity: 1;
+    border-color: color-mix(in srgb, var(--el-color-success), transparent 45%);
+    background: color-mix(in srgb, var(--el-color-success-light-9), transparent 12%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--el-color-success), transparent 78%);
 }
 
 .status-dot {
@@ -260,20 +286,32 @@ function connect() {
     box-shadow: 0 0 8px color-mix(in srgb, var(--el-color-success), transparent 30%);
 }
 
+.agent-top {
+    justify-content: flex-start;
+}
+
 .agent-name {
+    flex: 1;
+    min-width: 0;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--k-text-dark);
 }
 
-.agent-version {
-    margin-left: auto;
-    max-width: 110px;
+.agent-version,
+.agent-path {
     overflow: hidden;
-    font-size: 11px;
-    color: var(--k-text-light);
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.agent-path {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+.scan-hint {
+    margin-top: 14px;
 }
 
 @media (max-width: 980px) {
@@ -284,6 +322,7 @@ function connect() {
 
 @media (max-width: 640px) {
     .panel-head,
+    .section-head,
     .connection-footer {
         align-items: flex-start;
         flex-direction: column;
@@ -294,10 +333,6 @@ function connect() {
     }
 
     .connection-footer :deep(.el-button) {
-        width: 100%;
-    }
-
-    .agent-tag {
         width: 100%;
     }
 }

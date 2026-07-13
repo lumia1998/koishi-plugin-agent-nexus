@@ -34,7 +34,7 @@
             <section v-for="skill in filteredSkills" :key="skill.id" class="skill-card">
                 <div class="skill-top">
                     <div class="skill-brand">
-                        <div class="skill-icon">S</div>
+                        <div class="skill-icon">{{ skillInitial(skill.name) }}</div>
                         <div class="skill-copy">
                             <div class="skill-title">{{ skill.name }}</div>
                             <div class="skill-source">{{ skill.sourceId || '远端中心目录' }}</div>
@@ -49,7 +49,7 @@
                     </el-tag>
                 </div>
 
-                <div class="skill-path">{{ skill.path }}</div>
+                <div class="skill-path" :title="skill.path">{{ skill.path }}</div>
 
                 <div class="skill-footer">
                     <div class="agent-tags">
@@ -69,7 +69,11 @@
             </section>
         </div>
 
-        <el-empty v-else description="没有找到已同步的 Skill。" />
+        <div v-else class="empty-card">
+            <div class="empty-title">还没有同步任何 Skill</div>
+            <div class="empty-copy">导入包含 `SKILL.md` 的 Git 仓库后，会自动软链到已安装 Agent。</div>
+            <el-button type="primary" @click="showImport = true">从仓库导入</el-button>
+        </div>
 
         <el-dialog
             v-model="showImport"
@@ -113,6 +117,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { NexusConfig, NexusStatus } from '../../src/types'
 
 const props = defineProps<{
@@ -155,8 +160,15 @@ const filteredSkills = computed(() => {
     )
 })
 
+function skillInitial(value: string) {
+    return (value || 'S').trim().charAt(0).toUpperCase() || 'S'
+}
+
 async function sync() {
-    if (!repoUrl.value.trim()) return
+    if (!repoUrl.value.trim()) {
+        ElMessage.warning('请填写仓库 URL')
+        return
+    }
     syncing.value = true
     try {
         await new Promise<void>((resolve) => {
@@ -186,7 +198,7 @@ async function sync() {
 .skills-panel {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 18px;
     min-width: 0;
 }
 
@@ -210,15 +222,21 @@ async function sync() {
 
 .panel-title {
     font-size: 18px;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--k-text-dark);
+}
+
+.panel-description,
+.skill-source,
+.muted,
+.empty-copy {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--k-text-light);
 }
 
 .panel-description {
     margin-top: 5px;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--k-text-light);
 }
 
 .catalog-controls {
@@ -239,21 +257,25 @@ async function sync() {
     gap: 14px;
 }
 
-.skill-card {
+.skill-card,
+.empty-card {
     min-width: 0;
-    padding: 18px;
     border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 18%);
     border-radius: 14px;
     background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 18%);
 }
 
+.skill-card {
+    padding: 18px;
+}
+
 .skill-icon {
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     flex: 0 0 auto;
-    border-radius: 10px;
+    border-radius: 11px;
     background: color-mix(in srgb, var(--k-color-primary), transparent 84%);
     color: var(--k-color-primary);
     font-size: 14px;
@@ -266,7 +288,7 @@ async function sync() {
 
 .skill-title {
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--k-text-dark);
 }
 
@@ -274,14 +296,13 @@ async function sync() {
 .muted {
     margin-top: 3px;
     font-size: 12px;
-    color: var(--k-text-light);
 }
 
 .skill-path {
     margin: 16px 0;
     padding: 10px 12px;
     overflow: hidden;
-    border-radius: 9px;
+    border-radius: 10px;
     background: color-mix(in srgb, var(--k-page-bg), #000 3%);
     color: var(--k-text-light);
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -292,6 +313,19 @@ async function sync() {
 
 .agent-tags {
     flex-wrap: wrap;
+}
+
+.empty-card {
+    display: grid;
+    justify-items: start;
+    gap: 10px;
+    padding: 28px 24px;
+}
+
+.empty-title {
+    font-size: 16px;
+    font-weight: 650;
+    color: var(--k-text-dark);
 }
 
 @media (max-width: 900px) {
