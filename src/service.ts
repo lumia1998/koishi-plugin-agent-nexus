@@ -48,7 +48,6 @@ import {
 } from './utils/config'
 import { registerNexusCommands } from './commands'
 import type { Config } from './config'
-import { mimeType } from './utils/mime'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -61,7 +60,7 @@ interface ManagedTerminal {
 }
 
 export class AgentNexusService extends Service {
-    static readonly inject = ['chatluna']
+    static readonly inject = ['chatluna', 'chatluna_storage']
 
     private pool: SshSessionPool
     private proxy: NexusTerminalProxy
@@ -501,35 +500,13 @@ export class AgentNexusService extends Service {
                 if (!isRemotePathWithinRoot(canonicalPath, publishRoot)) {
                     throw new Error(`File is outside the publish root: ${publishRoot}`)
                 }
-                const storage = (this.ctx as any).chatluna_storage
-                if (storage?.createTempFileFromStream) {
-                    const asset = await session.openAsset(canonicalPath)
-                    const file = await storage.createTempFileFromStream(
-                        asset.stream,
-                        name,
-                        { size: asset.size, mimeType: asset.mimeType }
-                    )
-                    out.push({ path: remotePath, name, url: file.url })
-                } else {
-                    const asset = await session.openAsset(canonicalPath)
-                    if ((asset.size || 0) > 2 * 1024 * 1024) {
-                        asset.stream.destroy()
-                        out.push({
-                            path: remotePath,
-                            name,
-                            error: 'chatluna_storage unavailable and file too large'
-                        })
-                    } else {
-                        asset.stream.destroy()
-                        const buf = await session.readFile(canonicalPath)
-                        const b64 = buf.toString('base64')
-                        out.push({
-                            path: remotePath,
-                            name,
-                            url: `data:${mimeType(name)};base64,${b64}`
-                        })
-                    }
-                }
+                const asset = await session.openAsset(canonicalPath)
+                const file = await this.ctx.chatluna_storage.createTempFileFromStream(
+                    asset.stream,
+                    name,
+                    { size: asset.size, mimeType: asset.mimeType }
+                )
+                out.push({ path: remotePath, name, url: file.url })
             } catch (err) {
                 out.push({
                     path: remotePath,

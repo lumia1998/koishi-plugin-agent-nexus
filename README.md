@@ -32,8 +32,8 @@ npm install koishi-plugin-agent-nexus
 
 也可以通过 Koishi 插件市场搜索 `agent-nexus` 安装。
 
-AgentNexus 需要 ChatLuna。Console 页面和交互终端还需要 Koishi 的
-`console` 与 `server` 服务。
+AgentNexus 需要 ChatLuna 和 `koishi-plugin-chatluna-storage-service`。
+Console 页面和交互终端还需要 Koishi 的 `console` 与 `server` 服务。
 
 ## 快速开始
 
@@ -96,7 +96,7 @@ Console 不会回传已保存的密码或私钥；编辑已有连接时对应字
 | `nexus_list_skills` | 查看远端已同步的 Skills |
 
 `nexus_delegate` 支持指定 Agent、远端工作目录、模型、超时和是否自动发布产物。
-不指定 Agent 时会从当前可用 Agent 中自动选择。
+不指定 Agent 时会从当前可用 Agent 中自动选择；不指定 `publishFiles` 时默认发布产物并返回 Storage URL。
 
 ## Skills
 
@@ -122,26 +122,22 @@ Console 不会回传已保存的密码或私钥；编辑已有连接时对应字
 
 ## 文件回传与 Storage
 
-`koishi-plugin-chatluna-storage-service` **不是必需依赖**。
-
-未安装 Storage 时：
-
-- SSH、Agent 扫描、Skills、委托执行和终端均可正常使用
-- 小于 2 MiB 的文件会返回 `data:` URL
-- 大于 2 MiB 的文件无法生成临时访问地址
-
-如果需要稳定回传图片、文档、压缩包或大文件，建议安装：
+`koishi-plugin-chatluna-storage-service` 是必需依赖。请安装并在 AgentNexus 之前启用：
 
 ```bash
 npm install koishi-plugin-chatluna-storage-service
 ```
+
+所有远端文件都会通过 SFTP 流式同步到 ChatLuna Storage，不受文件大小限制。
+直接命令调用会使用 Storage URL 发送 `h.image` 或 `h.file`；ChatLuna 工具调用则在工具结果中返回 URL。
+没有产生文件时不会上传或发送文件，也不会显示内部的 `<nexus_files>` 标记。
 
 ## 非交互命令
 
 AgentNexus 当前使用以下 CLI 方式：
 
 ```bash
-hermes chat -q "..."
+hermes chat -Q -q "..."
 openclaw agent --local --agent default --query "..."
 claude -p "..." --output-format json --dangerously-skip-permissions
 opencode run --format json --auto "..."

@@ -64,8 +64,8 @@ export abstract class CodeAgentAdapter {
         timedOut: boolean,
         command: string
     ): AgentResult {
-        const text = this.parseText(stdout, stderr)
         const files = extractPaths(stdout + '\n' + stderr)
+        const text = cleanAgentText(this.parseText(stdout, stderr))
         const images = files.filter((p) =>
             /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(p)
         )
@@ -112,6 +112,13 @@ function pickText(stdout: string, stderr: string) {
     } catch {}
 
     return out
+}
+
+export function cleanAgentText(text: string) {
+    return text
+        .replace(/<nexus_files>[\s\S]*?<\/nexus_files>/gi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
 }
 
 const FILE_EXT =

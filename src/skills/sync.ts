@@ -18,10 +18,11 @@ export function appendFileHint(prompt: string) {
 
 完成后：
 1) 把最终答案写在最后
-2) 若产生文件或图片，用绝对路径列出：
+2) 仅当产生文件或图片时，用绝对路径列出：
 ${NEXUS_MARKER}
 /abs/path/to/file
-</nexus_files>`
+</nexus_files>
+没有产生文件时不要输出上述标签。`
 }
 
 export async function syncSkillSource(

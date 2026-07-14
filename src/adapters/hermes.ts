@@ -9,6 +9,6 @@ export class HermesAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, _options: DelegateOptions) {
-        return `hermes chat -q ${promptExpr}`
+        return `hermes chat -Q -q ${promptExpr}`
     }
 }

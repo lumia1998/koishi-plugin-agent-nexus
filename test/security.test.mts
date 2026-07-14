@@ -11,8 +11,9 @@ import {
 } from '../src/utils/security.ts'
 import { ClaudeAdapter } from '../src/adapters/claude.ts'
 import { CodexAdapter } from '../src/adapters/codex.ts'
+import { HermesAdapter } from '../src/adapters/hermes.ts'
 import { OpenCodeAdapter } from '../src/adapters/opencode.ts'
-import { extractPaths, parseJsonLines } from '../src/adapters/base.ts'
+import { cleanAgentText, extractPaths, parseJsonLines } from '../src/adapters/base.ts'
 import { syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
@@ -125,6 +126,44 @@ test('parses JSONL agent output into readable text', () => {
     assert.equal(parseJsonLines(text), 'first\nsecond')
 })
 
+test('runs Hermes one-shot queries without CLI presentation output', () => {
+    const command = new HermesAdapter().buildInnerCommand('"$PROMPT"', {
+        prompt: '',
+        runtime: {
+            openclawAgent: 'default',
+            claudeSkipPermissions: false,
+            codexBypassSandbox: false,
+            opencodeAuto: true,
+            defaultTimeoutMs: 1000
+        }
+    })
+    assert.equal(command, 'hermes chat -Q -q "$PROMPT"')
+})
+
+test('removes internal file manifests from user-visible agent text', () => {
+    assert.equal(
+        cleanAgentText(`完成。\n\n<nexus_files>\n（无文件产生）\n</nexus_files>`),
+        '完成。'
+    )
+    assert.equal(
+        cleanAgentText(`完成。\n<nexus_files>\n/workspace/report.pdf\n</nexus_files>\n请查收。`),
+        '完成。\n\n请查收。'
+    )
+})
+
+test('extracts files before hiding the internal manifest from replies', () => {
+    const adapter = new HermesAdapter()
+    const result = adapter.parseResult(
+        `报告已生成。\n<nexus_files>\n/workspace/report.pdf\n</nexus_files>`,
+        '',
+        0,
+        false,
+        'hermes chat'
+    )
+    assert.equal(result.text, '报告已生成。')
+    assert.deepEqual(result.files, ['/workspace/report.pdf'])
+})
+
 test('only extracts explicitly declared or markdown-linked local files', () => {
     const text = `Visit https://example.com/a.png and import foo/bar.ts.
 ![result](./out/result.png)
@@ -135,7 +174,7 @@ https://example.com/remote.zip
     assert.deepEqual(extractPaths(text), ['/workspace/report.pdf', './out/result.png'])
 })
 
-test('uses file-specific MIME types for data URLs and storage', () => {
+test('uses file-specific MIME types for storage uploads', () => {
     assert.equal(mimeType('/tmp/a.png'), 'image/png')
     assert.equal(mimeType('/tmp/a.pdf'), 'application/pdf')
     assert.equal(mimeType('/tmp/a.unknown'), 'application/octet-stream')

@@ -41,7 +41,7 @@ chatluna/packages/extension-agent/src/computer/
 | Tools | file_read/write/edit、bash、grep… | **nexus_delegate / publish / list_*** |
 | 终端 | xterm + WebSocket PTY | 同样做（SSH shell） |
 | Skills | materialize 到 sandbox | 中心仓 + symlink 到各 agent |
-| 产物发布 | file_publish + storage | SFTP + chatluna_storage / fallback |
+| 产物发布 | file_publish + storage | SFTP + chatluna_storage |
 
 结论：AgentNexus **不完整复刻 computer**，定位是：
 
@@ -53,7 +53,7 @@ chatluna/packages/extension-agent/src/computer/
 
 | Agent | 非交互命令 | 备注 |
 |---|---|---|
-| **Hermes** | `hermes chat -q "..."` | stdout 文本 |
+| **Hermes** | `hermes chat -Q -q "..."` | 静默 stdout 文本 |
 | **OpenClaw** | `openclaw agent --local --agent default --query "..."` | 用户确认命令 |
 | **Claude Code** | `claude -p "..." --output-format json` | 可加 skip-permissions（需显式开关） |
 | **OpenCode** | `opencode run --format json --auto "..."` | `--auto` 可配置 |

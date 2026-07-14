@@ -6,7 +6,7 @@ declare module 'koishi-plugin-chatluna-storage-service'
 declare module 'koishi' {
     interface Context {
         chatluna?: any
-        chatluna_storage?: {
+        chatluna_storage: {
             createTempFileFromStream(
                 stream: NodeJS.ReadableStream,
                 name: string,

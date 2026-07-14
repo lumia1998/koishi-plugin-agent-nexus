@@ -54,7 +54,7 @@ The remote agent runs non-interactively. Produced files can be auto-published.`
                 model: input.model,
                 timeoutMs: input.timeoutMs,
                 openclawAgent: input.openclawAgent,
-                publishFiles: input.publishFiles
+                publishFiles: input.publishFiles ?? true
             })
 
             const lines = [
