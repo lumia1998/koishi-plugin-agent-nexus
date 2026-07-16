@@ -137,7 +137,7 @@ npm install koishi-plugin-chatluna-storage-service
 AgentNexus 当前使用以下 CLI 方式：
 
 ```bash
-hermes chat -Q -q "..."
+hermes -z "..."
 openclaw agent --local --agent default --message "..." --json
 claude -p "..." --output-format json --dangerously-skip-permissions
 opencode run --format json --auto "..."

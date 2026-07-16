@@ -145,7 +145,7 @@ const labels: Record<AgentKind, string> = {
     codex: 'Codex'
 }
 const descriptions: Record<AgentKind, string> = {
-    hermes: '通过 hermes chat 非交互执行任务，适合通用问答和工具调用。',
+    hermes: '通过 hermes -z 非交互执行任务，适合通用问答和工具调用。',
     openclaw: '使用远端 OpenClaw local agent 处理任务和 Skills。',
     claude: '调用 Claude Code print 模式，适合复杂代码分析与修改。',
     opencode: '调用 OpenCode run 模式，可使用远端项目上下文执行任务。',

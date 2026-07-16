@@ -138,7 +138,7 @@ test('runs Hermes one-shot queries without CLI presentation output', () => {
             defaultTimeoutMs: 1000
         }
     })
-    assert.equal(command, 'hermes chat -Q -q "$PROMPT"')
+    assert.equal(command, 'hermes -z "$PROMPT"')
 })
 
 test('uses Claude Code single-result JSON without session persistence', () => {
@@ -242,7 +242,7 @@ test('extracts files before hiding the internal manifest from replies', () => {
         '',
         0,
         false,
-        'hermes chat'
+        'hermes -z'
     )
     assert.equal(result.text, '报告已生成。')
     assert.deepEqual(result.files, ['/workspace/report.pdf'])

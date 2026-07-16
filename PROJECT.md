@@ -53,7 +53,7 @@ chatluna/packages/extension-agent/src/computer/
 
 | Agent | 非交互命令 | 备注 |
 |---|---|---|
-| **Hermes** | `hermes chat -Q -q "..."` | 静默 stdout 文本 |
+| **Hermes** | `hermes -z "..."` | 静默 stdout 文本 |
 | **OpenClaw** | `openclaw agent --local --agent default --message "..." --json` | JSON 结果 |
 | **Claude Code** | `claude -p "..." --output-format json` | 可加 skip-permissions（需显式开关） |
 | **OpenCode** | `opencode run --format json --auto "..."` | `--auto` 可配置 |
