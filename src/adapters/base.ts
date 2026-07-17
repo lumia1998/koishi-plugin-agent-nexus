@@ -1,4 +1,9 @@
-import type { AgentKind, AgentResult, AgentRuntimeOptions } from '../types'
+import type {
+    AgentKind,
+    AgentProviderState,
+    AgentResult,
+    AgentRuntimeOptions
+} from '../types'
 import type { SshSession } from '../ssh/session'
 import { wrapPromptCommand } from '../utils/shell'
 
@@ -9,6 +14,8 @@ export interface DelegateOptions {
     timeoutMs?: number
     openclawAgent?: string
     runtime: AgentRuntimeOptions
+    sessionMode?: 'oneshot' | 'managed'
+    providerState?: AgentProviderState
 }
 
 export abstract class CodeAgentAdapter {

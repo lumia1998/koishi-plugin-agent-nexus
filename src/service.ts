@@ -16,6 +16,7 @@ import type {
     SshHostConfig,
     TerminalInfo
 } from './types'
+import type { SessionIdentity } from './sessions/types'
 import { createDefaultNexusConfig, createHost } from './config'
 import { SshSessionPool } from './ssh/pool'
 import type { SshSession, TerminalHandle } from './ssh/session'
@@ -48,6 +49,13 @@ import {
 } from './utils/config'
 import { registerNexusCommands } from './commands'
 import type { Config } from './config'
+import { MemorySessionStorage } from './sessions/storage'
+import { SessionManager } from './sessions/manager'
+import {
+    AgentRunner,
+    type SessionInvocationContext,
+    type SessionRunOutcome
+} from './runtime/runner'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -68,12 +76,16 @@ export class AgentNexusService extends Service {
     private agentCache = new Map<string, DetectedAgent[]>()
     private skillCache = new Map<string, SkillInfo[]>()
     private toolDispose: (() => void)[] = []
+    private commandDispose?: () => void
     private reconnectTimer?: NodeJS.Timeout
+    private sessionCleanupTimer?: NodeJS.Timeout
     private reconnecting = false
     private nexusConfig: NexusConfig
     private dataPath: string
     private activeByHost = new Map<string, number>()
     private hostErrors = new Map<string, string>()
+    readonly sessionManager: SessionManager
+    private agentRunner: AgentRunner
 
     constructor(
         ctx: Context,
@@ -84,11 +96,21 @@ export class AgentNexusService extends Service {
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
         this.nexusConfig = createDefaultNexusConfig(pluginConfig)
         this.proxy = new NexusTerminalProxy(ctx, this)
+        this.sessionManager = new SessionManager(new MemorySessionStorage())
+        this.agentRunner = new AgentRunner(this.sessionManager, (input) =>
+            this.delegate(input)
+        )
     }
 
     async start() {
         await this.loadConfig()
-        registerNexusCommands(this.ctx, this, this.pluginConfig)
+        await this.sessionManager.recoverTasks()
+        this.commandDispose?.()
+        this.commandDispose = registerNexusCommands(
+            this.ctx,
+            this,
+            this.pluginConfig
+        )
         this.pool.startIdleCleanup((hostId) => {
             const host = this.nexusConfig.hosts.find((h) => h.id === hostId)
             return host?.idleTimeoutMs ?? 15 * 60 * 1000
@@ -99,15 +121,27 @@ export class AgentNexusService extends Service {
         this.reconnectTimer = setInterval(() => {
             void this.ensureEnabledConnections()
         }, 30000)
+        this.sessionCleanupTimer = setInterval(() => {
+            void this.sessionManager.cleanupExpired().catch((err) => {
+                this.ctx.logger.warn(
+                    `[agent-nexus] session cleanup failed: ${getErrorMessage(err)}`
+                )
+            })
+        }, 60000)
         await this.refreshConsoleData()
     }
 
     async stop() {
+        this.agentRunner.shutdown()
+        this.commandDispose?.()
+        this.commandDispose = undefined
         for (const d of this.toolDispose) d()
         this.toolDispose = []
         this.proxy.stop()
         if (this.reconnectTimer) clearInterval(this.reconnectTimer)
         this.reconnectTimer = undefined
+        if (this.sessionCleanupTimer) clearInterval(this.sessionCleanupTimer)
+        this.sessionCleanupTimer = undefined
         this.pool.stopIdleCleanup()
         await this.closeAllTerminals()
         await this.pool.clear()
@@ -115,6 +149,64 @@ export class AgentNexusService extends Service {
 
     getConfig() {
         return redactNexusConfig(this.nexusConfig)
+    }
+
+    runInSession(
+        identity: SessionIdentity,
+        input: DelegateInput,
+        context?: SessionInvocationContext
+    ): Promise<SessionRunOutcome> {
+        return this.agentRunner.run(
+            identity,
+            { ...input, sessionMode: input.sessionMode ?? 'managed' },
+            context
+        )
+    }
+
+    resumeSession(
+        identity: SessionIdentity,
+        message: string,
+        signal?: AbortSignal,
+        context?: SessionInvocationContext
+    ): Promise<SessionRunOutcome> {
+        return this.agentRunner.resume(identity, message, signal, context)
+    }
+
+    cancelSessions(identity: SessionIdentity) {
+        return this.agentRunner.cancel(identity)
+    }
+
+    hasWaitingSession(identity: SessionIdentity) {
+        return this.agentRunner.hasWaiting(identity)
+    }
+
+    async startInteractiveSession(
+        identity: SessionIdentity,
+        input: Omit<DelegateInput, 'prompt' | 'signal'>
+    ) {
+        const host = this.resolveHost(input.hostId)
+        const ssh = await this.pool.getOrCreate(host)
+        const agent = await this.resolveAgent(host, ssh.sessionId, input.agent)
+        const session = await this.agentRunner.startInteractive(
+            identity,
+            {
+                ...input,
+                hostId: host.id,
+                agent,
+                publishFiles: input.publishFiles ?? true,
+                sessionMode: 'managed'
+            },
+            this.pluginConfig.interactiveSessionTtlMs
+        )
+        return { session, hostId: host.id, hostName: host.name, agent }
+    }
+
+    endInteractiveSession(
+        identity: SessionIdentity,
+        agent?: AgentKind | 'auto',
+        hostId?: string
+    ) {
+        return this.agentRunner.endInteractive(identity, agent, hostId)
     }
 
     async saveConfig(cfg: NexusConfig) {
@@ -444,7 +536,9 @@ export class AgentNexusService extends Service {
                 model: input.model,
                 timeoutMs,
                 openclawAgent: input.openclawAgent,
-                runtime: this.nexusConfig.runtime
+                runtime: this.nexusConfig.runtime,
+                sessionMode: input.sessionMode,
+                providerState: input.providerState
             })
 
             const exec = await session.exec(command, {

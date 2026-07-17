@@ -107,6 +107,13 @@ export interface DelegateInput {
     openclawAgent?: string
     publishFiles?: boolean
     signal?: AbortSignal
+    sessionMode?: 'oneshot' | 'managed'
+    providerState?: AgentProviderState
+}
+
+export interface AgentProviderState {
+    sessionId?: string
+    [key: string]: unknown
 }
 
 export interface AgentResult {
@@ -119,6 +126,7 @@ export interface AgentResult {
     timedOut: boolean
     command: string
     truncated?: boolean
+    providerState?: AgentProviderState
 }
 
 export interface PublishResult {

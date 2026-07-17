@@ -130,6 +130,11 @@ AgentNexus (Koishi 插件)
 
 ### P1（下一步）
 
+- [x] Nexus Session Runtime：多会话、状态优先解析、TTL、暂停/恢复
+- [x] SessionStorage 抽象与首版内存 Map 实现
+- [x] ChatLuna conversation 隔离及直接消息选择/确认续接
+- [x] `nexus <agent> <设备>` 交互模式、可配置空闲 TTL 与 `-q` 退出
+- [x] Hermes native session checkpoint：quiet query + session_id + resume
 - [ ] 真实 SSH 联调（Linux 远端优先）
 - [ ] OpenClaw 在不同安装形态下的探测增强
 - [ ] Skill 同步失败重试 / 增量更新状态展示
@@ -139,6 +144,7 @@ AgentNexus (Koishi 插件)
 ### P2（增强）
 
 - [ ] 多主机并行、更细会话隔离
+- [ ] SQLite / Redis SessionStorage，支持跨进程重启恢复
 - [ ] 后台长任务（类似 chatluna background job，挂到终端 tab）
 - [ ] 统一结构化 JSON 结果 schema
 - [ ] Windows 远端适配（路径/symlink/shell）
@@ -173,6 +179,14 @@ koishi-plugin-AgentNexus/
 │   │   ├── opencode.ts
 │   │   ├── codex.ts
 │   │   └── index.ts
+│   ├── sessions/
+│   │   ├── types.ts          # 会话、消息、pendingAction 类型
+│   │   ├── storage.ts        # SessionStorage + 内存实现
+│   │   └── manager.ts        # 多会话解析、TTL、清理与恢复入口
+│   ├── runtime/
+│   │   ├── protocol.ts       # waiting/confirm/select 控制协议
+│   │   ├── prompt.ts         # 从 Nexus 状态重建无状态 Agent prompt
+│   │   └── runner.ts         # 执行、暂停、原子恢复与取消
 │   ├── skills/sync.ts         # git 同步 + symlink
 │   ├── tools/
 │   │   ├── base.ts

@@ -1,6 +1,8 @@
 import z from 'zod'
 import { NexusToolBase } from './base'
 import { truncateText } from '../utils/shell'
+import type { DelegateInput } from '../types'
+import type { SessionIdentity } from '../sessions/types'
 
 export class NexusDelegateTool extends NexusToolBase {
     name = 'nexus_delegate'
@@ -8,7 +10,9 @@ export class NexusDelegateTool extends NexusToolBase {
     description = `Delegate a complex task to a remote code agent over SSH.
 Supported agents: hermes, openclaw, claude, opencode, codex.
 Use this for multi-step coding, crawling skills, repo operations, and long agent workflows.
-The remote agent runs non-interactively. Produced files can be auto-published.`
+The remote agent runs non-interactively, while AgentNexus preserves task state and pending user actions.
+When a previous call asks for a choice, confirmation, or input, call this tool again with the user's answer.
+Produced files can be auto-published.`
 
     schema = z.object({
         prompt: z.string().describe('Task instruction for the code agent'),
@@ -44,9 +48,9 @@ The remote agent runs non-interactively. Produced files can be auto-published.`
         timeoutMs?: number
         openclawAgent?: string
         publishFiles?: boolean
-    }) {
+    }, _runManager?: unknown, parentConfig?: any) {
         try {
-            const result = await this.nexus.delegate({
+            const delegateInput: DelegateInput = {
                 prompt: input.prompt,
                 agent: input.agent,
                 hostId: input.hostId,
@@ -54,8 +58,23 @@ The remote agent runs non-interactively. Produced files can be auto-published.`
                 model: input.model,
                 timeoutMs: input.timeoutMs,
                 openclawAgent: input.openclawAgent,
-                publishFiles: input.publishFiles ?? true
-            })
+                publishFiles: input.publishFiles ?? true,
+                signal: parentConfig?.signal
+            }
+            const identity = toolSessionIdentity(parentConfig)
+            const outcome = identity
+                ? await this.nexus.runInSession(identity, delegateInput, {
+                      requestId: parentConfig?.configurable?.session?.messageId
+                  })
+                : undefined
+            if (outcome?.kind === 'cancelled') {
+                return outcome.reply || 'Agent task cancelled.'
+            }
+            if (outcome && !outcome.result) {
+                return outcome.reply || 'Agent session is not ready.'
+            }
+            const result =
+                outcome?.result ?? (await this.nexus.delegate(delegateInput))
 
             const lines = [
                 `Agent: ${result.agent}`,
@@ -81,5 +100,20 @@ The remote agent runs non-interactively. Produced files can be auto-published.`
         } catch (err) {
             return this.formatError(err)
         }
+    }
+}
+
+function toolSessionIdentity(parentConfig: any): SessionIdentity | undefined {
+    const configurable = parentConfig?.configurable
+    const session = configurable?.session
+    const userId = String(configurable?.userId ?? session?.userId ?? '').trim()
+    if (!userId) return undefined
+    return {
+        userId,
+        channelId: configurable?.conversationId
+            ? `${String(session?.channelId ?? '')}#chatluna:${String(configurable.conversationId)}`
+            : String(session?.channelId ?? ''),
+        platform: String(session?.platform ?? 'chatluna'),
+        selfId: String(session?.selfId ?? '')
     }
 }

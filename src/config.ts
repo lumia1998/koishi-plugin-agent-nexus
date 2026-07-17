@@ -15,6 +15,7 @@ export interface Config {
     commandAuthority: number
     maxConcurrentPerHost: number
     maxConcurrentPerUser: number
+    interactiveSessionTtlMs: number
     maxOutputBytes: number
     commandUsers: string[]
     commandChannels: string[]
@@ -42,6 +43,11 @@ export const Config: Schema<Config> = Schema.object({
         .max(8)
         .default(1)
         .description('每个用户允许同时执行的直接命令数'),
+    interactiveSessionTtlMs: Schema.number()
+        .min(60000)
+        .max(86400000)
+        .default(15 * 60 * 1000)
+        .description('交互模式空闲超时（毫秒）；超时后自动退出'),
     maxOutputBytes: Schema.number()
         .min(65536)
         .max(67108864)

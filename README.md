@@ -55,6 +55,56 @@ nexus.codex <任务>
 nexus.cancel
 ```
 
+也可以进入指定设备和 Agent 的交互模式。点号与空格写法都支持：
+
+```text
+nexus hermes 开发机
+# 等价于 nexus.hermes 开发机
+
+搜索漫画
+2
+下载到当前目录
+
+nexus hermes 开发机 -q
+```
+
+进入后，该用户在当前 Bot、平台和频道中的普通消息都会交给绑定的 Agent，
+不再需要重复输入命令与设备名。`-q` 主动退出；默认空闲 15 分钟自动退出，
+可通过插件配置 `interactiveSessionTtlMs` 调整。
+
+## Session Runtime
+
+AgentNexus 会在自身维护任务会话，不依赖 Hermes、Claude Code、Codex 等 CLI
+保存上下文。每次远端调用仍是新的非交互进程，但 Nexus 会把消息历史、任务状态、
+Skill 状态和待处理动作重新编译进下一次 prompt。
+
+对于 Hermes，Session Runtime 会使用 `hermes chat --quiet --yolo -q` 创建原生
+Hermes session，并保存 stderr 中的 `session_id`；后续调用通过 `--resume` 继续
+Hermes 的 Tool/Skill transcript。Nexus 仍负责用户路由、TTL、并发、确认和取消，
+Hermes session 只作为 provider checkpoint。普通 `delegate()` one-shot 调用仍使用
+`hermes -z`。
+
+当 Agent 或 Skill 需要用户输入时，可以返回结构化控制结果：
+
+```json
+{
+  "status": "waiting_confirm",
+  "prompt": "请选择漫画",
+  "options": [
+    { "id": 1, "label": "漫画A", "value": { "comicId": "a" } },
+    { "id": 2, "label": "漫画B", "value": { "comicId": "b" } }
+  ],
+  "data": { "skill": "search_comic" }
+}
+```
+
+直接命令产生唯一待处理会话时，用户下一条普通消息（例如 `2`）会恢复该任务；
+也可以再次使用对应的 `nexus.*` 命令。ChatLuna 工具会按 conversation 隔离会话，
+下一轮应再次调用 `nexus_delegate` 并把用户答案作为 `prompt`。
+
+当前内置 `MemorySessionStorage` 使用进程内 Map；接口已抽象，可后续替换为 SQLite
+或 Redis。插件重启后内存会话不会保留。
+
 只配置一台设备时，直接写任务即可。配置多台设备时，在任务前加上 **Computer
 页面里的设备名称**：
 
@@ -77,6 +127,7 @@ nexus.claudecode build-server 跑测试
 -m <model>      模型名称
 -t <seconds>    超时时间（秒）
 -a <name>       OpenClaw Agent 名称
+-q              退出当前 Agent 交互会话（也支持放在设备名之后）
 ```
 
 SSH 配置保存后，插件会维持所有已启用设备的连接，并每 30 秒检查断线状态。
@@ -137,7 +188,9 @@ npm install koishi-plugin-chatluna-storage-service
 AgentNexus 当前使用以下 CLI 方式：
 
 ```bash
-hermes -z "..."
+hermes -z "..."                                      # 普通 one-shot delegate
+hermes chat --quiet --yolo -q "..."                  # Nexus managed session 首轮
+hermes chat --quiet --yolo --resume <id> -q "..."    # 后续恢复
 openclaw agent --local --agent default --message "..." --json
 claude -p "..." --output-format json --dangerously-skip-permissions
 opencode run --format json --auto "..."

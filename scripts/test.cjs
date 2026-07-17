@@ -6,11 +6,11 @@ const { spawnSync } = require('child_process')
 
 const root = path.join(__dirname, '..')
 const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-nexus-test-'))
-const outfile = path.join(outdir, 'security.test.cjs')
+const outfile = path.join(outdir, 'index.test.cjs')
 
 try {
     esbuild.buildSync({
-        entryPoints: [path.join(root, 'test/security.test.mts')],
+        entryPoints: [path.join(root, 'test/index.test.mts')],
         bundle: true,
         platform: 'node',
         target: 'node18',
