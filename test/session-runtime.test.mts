@@ -36,7 +36,10 @@ test('applies state-specific session TTLs and keeps running sessions alive', asy
 
     now += 30 * 60 * 1000
     assert.equal(await manager.cleanupExpired(), 1)
-    assert.equal(await manager.get(session.id), undefined)
+    const archived = await manager.get(session.id)
+    assert.equal(archived?.status, 'failed')
+    assert.equal(archived?.endReason, 'expired')
+    assert.equal(archived?.endedAt, now)
 })
 
 test('supports a per-session idle TTL without expiring active runs', async () => {
@@ -144,6 +147,32 @@ test('restores interrupted running tasks behind an explicit retry confirmation',
     assert.equal(recovered[0].pendingAction?.type, 'confirm')
 })
 
+test('cancels an interrupted task without invoking the agent again', async () => {
+    const manager = new SessionManager(new MemorySessionStorage(), {
+        createId: () => 'session-1'
+    })
+    await manager.create({
+        userId: 'u1',
+        channelId: 'c1',
+        platform: 'test',
+        agent: 'hermes',
+        status: 'running'
+    })
+    await manager.recoverTasks()
+    let calls = 0
+    const runner = new AgentRunner(manager, async () => {
+        calls += 1
+        return resultFixture('should not run')
+    })
+    const result = await runner.resume(
+        { userId: 'u1', channelId: 'c1', platform: 'test' },
+        '取消'
+    )
+    assert.equal(result.kind, 'cancelled')
+    assert.equal(result.session?.endReason, 'cancelled')
+    assert.equal(calls, 0)
+})
+
 test('parses skill wait responses and resolves numbered choices', () => {
     const raw = JSON.stringify({
         status: 'waiting_confirm',
@@ -163,6 +192,24 @@ test('parses skill wait responses and resolves numbered choices', () => {
     assert.equal(selected.matched, true)
     assert.equal(selected.label, '2. 漫画B')
     assert.deepEqual(selected.value, { id: 2, title: '漫画B' })
+})
+
+test('keeps visible skill results when a wait control only contains a prompt', async () => {
+    const manager = new SessionManager(new MemorySessionStorage(), {
+        createId: () => 'session-visible-results'
+    })
+    const runner = new AgentRunner(manager, async () =>
+        resultFixture(`1. 本子A\n2. 本子B\n\n<nexus_session>\n{"status":"waiting_confirm","prompt":"回复序号或禁漫ID下载花火的本子"}\n</nexus_session>`)
+    )
+    const outcome = await runner.run(
+        { userId: 'u1', channelId: 'c1', platform: 'test' },
+        { agent: 'hermes', prompt: '找一个花火的本子' }
+    )
+    assert.equal(outcome.kind, 'waiting')
+    assert.match(outcome.reply || '', /1\. 本子A/)
+    assert.match(outcome.reply || '', /2\. 本子B/)
+    assert.match(outcome.reply || '', /回复序号或禁漫ID/)
+    assert.doesNotMatch(outcome.reply || '', /nexus_session/)
 })
 
 test('runner preserves Nexus context across one-shot agent processes', async () => {
@@ -507,6 +554,17 @@ test('builds and parses Hermes managed chat session commands', () => {
     )
     assert.equal(result.text, '搜索结果')
     assert.equal(result.providerState?.sessionId, '20260717_120000_a1b2c3')
+    const mixed = adapter.parseResult(
+        '回复序号',
+        '\u001b[36msession_id: mixed-session\u001b[0m\n1. 本子A\n2. 本子B',
+        0,
+        false,
+        first
+    )
+    assert.match(mixed.text, /1\. 本子A/)
+    assert.match(mixed.text, /回复序号/)
+    assert.equal(mixed.providerState?.sessionId, 'mixed-session')
+    assert.match(mixed.raw, /2\. 本子B/)
     assert.equal(
         cleanHermesCliNoise(
             '\u001b[1;31mWarning: Unknown toolsets: messaging\u001b[0m\n正常回复'

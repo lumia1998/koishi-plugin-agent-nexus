@@ -7,6 +7,7 @@ import type {
 import { SessionManager } from '../sessions/manager'
 import type {
     NexusSession,
+    SessionEndReason,
     SessionIdentity
 } from '../sessions/types'
 import {
@@ -16,7 +17,8 @@ import {
 import {
     formatPendingAction,
     parseAgentControl,
-    resolvePendingAction
+    resolvePendingAction,
+    stripAgentControl
 } from './protocol'
 
 export type DelegateResult = AgentResult & {
@@ -49,6 +51,11 @@ type StoredExecution = Omit<DelegateInput, 'prompt' | 'signal'>
 
 export class AgentRunner {
     private active = new Map<string, AbortController>()
+    private abortReasons = new Map<string, SessionEndReason>()
+    private completions = new Map<
+        string,
+        { promise: Promise<void>; resolve: () => void }
+    >()
 
     constructor(
         private sessions: SessionManager,
@@ -157,7 +164,7 @@ export class AgentRunner {
             throw new Error('当前 Agent 任务仍在执行，请等待完成或使用 nexus.cancel。')
         }
         for (const session of activeSessions) {
-            await this.sessions.delete(session.id)
+            await this.sessions.archive(session, 'failed', 'replaced')
         }
 
         return this.sessions.create({
@@ -199,8 +206,17 @@ export class AgentRunner {
         let ended = 0
         for (const session of sessions) {
             const controller = this.active.get(session.id)
-            if (controller) controller.abort()
-            else await this.sessions.delete(session.id)
+            if (controller) {
+                this.abortReasons.set(session.id, 'user_exit')
+                controller.abort()
+                await this.sessions.archive(
+                    markCancelled(session, 'user_exit'),
+                    'completed',
+                    'user_exit'
+                )
+            } else {
+                await this.sessions.archive(session, 'completed', 'user_exit')
+            }
             ended += 1
         }
         return ended
@@ -248,23 +264,41 @@ export class AgentRunner {
         for (const session of sessions) {
             const controller = this.active.get(session.id)
             if (controller) {
+                this.abortReasons.set(session.id, 'cancelled')
                 controller.abort()
+                await this.sessions.archive(
+                    markCancelled(session, 'cancelled'),
+                    'failed',
+                    'cancelled'
+                )
                 cancelled += 1
                 continue
             }
             const claimed = await this.sessions.claim(
                 session.id,
                 [session.status],
-                (draft) => markCancelled(draft)
+                (draft) => markCancelled(draft, 'cancelled')
             )
             if (claimed) cancelled += 1
         }
         return cancelled
     }
 
-    shutdown() {
-        const controllers = Array.from(this.active.values())
-        for (const controller of controllers) controller.abort()
+    async shutdown(timeoutMs = 5000) {
+        const controllers = Array.from(this.active.entries())
+        for (const [sessionId, controller] of controllers) {
+            this.abortReasons.set(sessionId, 'cancelled')
+            controller.abort()
+        }
+        const pending = controllers
+            .map(([sessionId]) => this.completions.get(sessionId)?.promise)
+            .filter((promise): promise is Promise<void> => Boolean(promise))
+        if (pending.length) {
+            await Promise.race([
+                Promise.allSettled(pending),
+                new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
+            ])
+        }
         return controllers.length
     }
 
@@ -294,10 +328,14 @@ export class AgentRunner {
             const resolved = resolvePendingAction(session.pendingAction, message)
             if (!resolved.matched) {
                 if (context.passive) return { kind: 'not_found' }
-                const refreshed = await this.sessions.update(session)
+                const refreshed = await this.sessions.claim(
+                    session.id,
+                    [session.status],
+                    (draft) => draft
+                )
                 return {
                     kind: 'invalid_input',
-                    session: refreshed,
+                    session: refreshed ?? session,
                     reply: resolved.error ?? formatPendingAction(session.pendingAction)
                 }
             }
@@ -308,6 +346,34 @@ export class AgentRunner {
                 label: resolved.label,
                 value: resolved.value,
                 data: session.pendingAction.data
+            }
+            if (
+                session.pendingAction.type === 'confirm' &&
+                Boolean(
+                    session.pendingAction.data &&
+                        typeof session.pendingAction.data === 'object' &&
+                        'interruptedAt' in session.pendingAction.data
+                ) &&
+                resolved.value === false
+            ) {
+                const cancelled = await this.sessions.claim(
+                    session.id,
+                    [session.status],
+                    (draft) => {
+                        draft.messages.push({
+                            role: 'user',
+                            content: message,
+                            createdAt: Date.now()
+                        })
+                        return markCancelled(draft, 'cancelled')
+                    }
+                )
+                return {
+                    kind: 'cancelled',
+                    session: cancelled ?? session,
+                    reply: '已取消重启后待恢复的任务。',
+                    created: false
+                }
             }
         }
 
@@ -356,6 +422,14 @@ export class AgentRunner {
         if (input.signal?.aborted) controller.abort()
         else input.signal?.addEventListener('abort', abort, { once: true })
         this.active.set(session.id, controller)
+        let complete!: () => void
+        const completion = new Promise<void>((resolve) => {
+            complete = resolve
+        })
+        this.completions.set(session.id, {
+            promise: completion,
+            resolve: complete
+        })
 
         try {
             const useNativeContinuation =
@@ -373,7 +447,12 @@ export class AgentRunner {
             const control = parseAgentControl(result)
 
             if (controller.signal.aborted || result.exitCode === 130) {
-                session = await this.sessions.update(markCancelled(session))
+                const reason = this.abortReasons.get(session.id) ?? 'cancelled'
+                session = await this.sessions.archive(
+                    markCancelled(session, reason),
+                    reason === 'user_exit' ? 'completed' : 'failed',
+                    reason
+                )
                 return {
                     kind: 'cancelled',
                     session,
@@ -388,7 +467,7 @@ export class AgentRunner {
                 control?.status === 'waiting_input'
             ) {
                 const pendingAction = control.pendingAction!
-                const reply = formatPendingAction(pendingAction)
+                const reply = waitingReply(result.text, pendingAction)
                 session.status = control.status
                 session.pendingAction = pendingAction
                 session.taskId = control.taskId ?? session.taskId
@@ -451,7 +530,12 @@ export class AgentRunner {
             }
         } catch (error) {
             if (controller.signal.aborted) {
-                session = await this.sessions.update(markCancelled(session))
+                const reason = this.abortReasons.get(session.id) ?? 'cancelled'
+                session = await this.sessions.archive(
+                    markCancelled(session, reason),
+                    reason === 'user_exit' ? 'completed' : 'failed',
+                    reason
+                )
                 return {
                     kind: 'cancelled',
                     session,
@@ -472,6 +556,10 @@ export class AgentRunner {
             if (this.active.get(session.id) === controller) {
                 this.active.delete(session.id)
             }
+            this.abortReasons.delete(session.id)
+            const tracked = this.completions.get(session.id)
+            tracked?.resolve()
+            this.completions.delete(session.id)
         }
     }
 }
@@ -553,15 +641,31 @@ function asProviderState(value: unknown): AgentProviderState | undefined {
     return value as AgentProviderState
 }
 
-function markCancelled(session: NexusSession) {
+function markCancelled(session: NexusSession, reason: SessionEndReason) {
     const { resumeAction: _used, ...data } = session.data ?? {}
     session.status = 'failed'
     session.pendingAction = undefined
-    session.data = { ...data, lastError: 'cancelled' }
+    session.endReason = reason
+    session.data = { ...data, lastError: reason }
     session.messages.push({
         role: 'assistant',
-        content: 'Agent 任务已中止。',
+        content: reason === 'user_exit' ? '交互会话已退出。' : 'Agent 任务已中止。',
         createdAt: Date.now()
     })
     return session
+}
+
+function waitingReply(text: string, action: NexusSession['pendingAction']) {
+    const visible = stripAgentControl(text)
+    const pending = formatPendingAction(action!)
+    if (!visible) return pending
+    if (visible.includes(pending)) return visible
+    if (visible.includes(action!.prompt)) return visible
+    if (
+        action!.options?.length &&
+        action!.options.every((option) => visible.includes(option.label))
+    ) {
+        return [visible, action!.prompt].filter(Boolean).join('\n')
+    }
+    return [visible, pending].filter(Boolean).join('\n')
 }

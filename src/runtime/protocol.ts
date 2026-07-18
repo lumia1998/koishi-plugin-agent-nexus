@@ -34,6 +34,19 @@ export function parseAgentControl(result: Pick<AgentResult, 'raw' | 'text'>) {
     return undefined
 }
 
+export function stripAgentControl(text: string) {
+    let output = text.replace(
+        /<nexus_session>\s*[\s\S]*?\s*<\/nexus_session>/gi,
+        ''
+    )
+    output = output.replace(
+        /```(?:json)?\s*([\s\S]*?)\s*```/gi,
+        (block, content: string) => (isControlJson(content) ? '' : block)
+    )
+    if (isControlJson(output.trim())) return ''
+    return output.replace(/\n{3,}/g, '\n\n').trim()
+}
+
 export function resolvePendingAction(
     action: PendingAction,
     message: string
@@ -131,7 +144,16 @@ function controlCandidates(raw: string, text: string) {
             values.add(trimmed)
         }
     }
-    return Array.from(values)
+    return Array.from(values).reverse()
+}
+
+function isControlJson(value: string) {
+    if (!value) return false
+    try {
+        return !!normalizeControl(JSON.parse(value))
+    } catch {
+        return false
+    }
 }
 
 function normalizeControl(value: any): AgentControl | undefined {

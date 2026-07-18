@@ -8,6 +8,7 @@ import type {
     SshHostConfig
 } from '../types'
 import { randomUUID } from 'crypto'
+import type { SessionHistoryQuery } from '../sessions/types'
 
 export const name = 'agent-nexus-webui'
 export const inject = ['console', 'agent_nexus']
@@ -19,12 +20,34 @@ export function apply(ctx: Context) {
     })
 
     const nexus = () => ctx.agent_nexus as AgentNexusService
-    const fileAuthority = { authority: nexus().commandAuthority }
+    const commandAuthority = { authority: nexus().commandAuthority }
 
     ctx.console.addListener('agent-nexus/getConfig', async () => nexus().getConfig())
     ctx.console.addListener('agent-nexus/getStatus', async () => nexus().getStatus())
     ctx.console.addListener('agent-nexus/getConsoleData', async () =>
         nexus().getConsoleData()
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/listSessionHistory',
+        async (query: SessionHistoryQuery = {}) =>
+            nexus().listSessionHistory(query),
+        commandAuthority
+    )
+    ctx.console.addListener(
+        'agent-nexus/getSessionHistory',
+        async (id: string) => nexus().getSessionHistory(id),
+        commandAuthority
+    )
+    ctx.console.addListener(
+        'agent-nexus/deleteSessionHistory',
+        async (id: string) => nexus().deleteSessionHistory(id),
+        commandAuthority
+    )
+    ctx.console.addListener(
+        'agent-nexus/retrySessionSummary',
+        async (id: string) => nexus().retrySessionSummary(id),
+        commandAuthority
     )
 
     ctx.console.addListener('agent-nexus/saveConfig', async (cfg: NexusConfig) => {
@@ -83,14 +106,14 @@ export function apply(ctx: Context) {
         'agent-nexus/listFiles',
         async (input: { hostId?: string; path?: string } = {}) =>
             nexus().listRemoteFiles(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/previewFile',
         async (input: { hostId?: string; path: string }) =>
             nexus().previewRemoteFile(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
@@ -100,42 +123,42 @@ export function apply(ctx: Context) {
             path: string
             contentBase64: string
         }) => nexus().uploadRemoteFile(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/saveTextFile',
         async (input: { hostId?: string; path: string; content: string }) =>
             nexus().saveRemoteText(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/createDirectory',
         async (input: { hostId?: string; parent: string; name: string }) =>
             nexus().createRemoteDirectory(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/renameFile',
         async (input: { hostId?: string; path: string; newName: string }) =>
             nexus().renameRemoteFile(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/deleteFile',
         async (input: { hostId?: string; path: string }) =>
             nexus().deleteRemoteFile(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
         'agent-nexus/downloadFile',
         async (input: { hostId?: string; path: string }) =>
             nexus().downloadRemoteFile(input),
-        fileAuthority
+        commandAuthority
     )
 
     ctx.console.addListener(
@@ -175,6 +198,18 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/getConfig'(): Promise<import('../types').NexusConfig>
         'agent-nexus/getStatus'(): Promise<import('../types').NexusStatus>
         'agent-nexus/getConsoleData'(): Promise<import('../types').NexusConsoleData>
+        'agent-nexus/listSessionHistory'(
+            query?: import('../sessions/types').SessionHistoryQuery
+        ): Promise<import('../sessions/types').SessionHistoryPage>
+        'agent-nexus/getSessionHistory'(
+            id: string
+        ): Promise<import('../sessions/types').SessionHistoryDetail>
+        'agent-nexus/deleteSessionHistory'(
+            id: string
+        ): Promise<{ success: boolean }>
+        'agent-nexus/retrySessionSummary'(
+            id: string
+        ): Promise<{ success: boolean }>
         'agent-nexus/saveConfig'(cfg: import('../types').NexusConfig): Promise<{ success: boolean }>
         'agent-nexus/saveHost'(
             input: Partial<import('../types').SshHostConfig> & { setAsDefault?: boolean }

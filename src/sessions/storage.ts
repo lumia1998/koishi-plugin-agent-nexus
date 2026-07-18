@@ -7,7 +7,7 @@ export interface SessionStorage {
     update(session: NexusSession): Promise<void>
     delete(id: string): Promise<void>
     cleanupExpired(now?: number): Promise<number>
-    list?(): Promise<NexusSession[]>
+    list(): Promise<NexusSession[]>
 }
 
 export class MemorySessionStorage implements SessionStorage {
@@ -45,7 +45,7 @@ export class MemorySessionStorage implements SessionStorage {
     async cleanupExpired(now = Date.now()) {
         let deleted = 0
         for (const [id, session] of this.sessions) {
-            if (session.expireAt > 0 && session.expireAt <= now) {
+            if (session.purgeAt && session.purgeAt <= now) {
                 this.sessions.delete(id)
                 deleted += 1
             }
@@ -61,4 +61,3 @@ export class MemorySessionStorage implements SessionStorage {
 function cloneSession(session: NexusSession): NexusSession {
     return structuredClone(session)
 }
-

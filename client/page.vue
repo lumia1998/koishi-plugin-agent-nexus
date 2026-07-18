@@ -31,7 +31,7 @@
                 <div class="stat-value">{{ overview.agentCount }}</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">活跃会话</div>
+                <div class="stat-label">SSH 连接</div>
                 <div class="stat-value">{{ status.activeSessions || 0 }}</div>
             </div>
         </div>
@@ -71,6 +71,10 @@
                 :status="status"
                 :visible="active === 'files'"
             />
+            <sessions-panel
+                v-show="active === 'sessions'"
+                :visible="active === 'sessions'"
+            />
             <!-- Keep terminal mounted so tabs/WebSocket survive Computer/Skills switches. -->
             <terminal-panel
                 v-show="active === 'terminal'"
@@ -90,6 +94,7 @@ import ComputerPanel from './components/computer-panel.vue'
 import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
 import FileManagerPanel from './components/file-manager-panel.vue'
+import SessionsPanel from './components/sessions-panel.vue'
 import type { NexusConfig, NexusStatus, SshAuth } from '../src/types'
 
 type ComputerConnectInput = {
@@ -103,11 +108,12 @@ type ComputerConnectInput = {
     setAsDefault?: boolean
 }
 
-const tabs = ['computer', 'skills', 'files', 'terminal'] as const
+const tabs = ['computer', 'skills', 'files', 'sessions', 'terminal'] as const
 const tabLabel = {
     computer: 'Computer',
     skills: 'Skills',
     files: '文件',
+    sessions: '会话',
     terminal: '终端'
 }
 

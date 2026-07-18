@@ -16,6 +16,10 @@ export interface Config {
     maxConcurrentPerHost: number
     maxConcurrentPerUser: number
     interactiveSessionTtlMs: number
+    sessionHistoryRetentionMs: number
+    sessionSummaryEnabled: boolean
+    sessionSummaryModel: string
+    sessionSummaryMaxInputChars: number
     maxOutputBytes: number
     fileManagerMaxUploadBytes: number
     fileManagerMaxPreviewBytes: number
@@ -50,6 +54,22 @@ export const Config: Schema<Config> = Schema.object({
         .max(86400000)
         .default(15 * 60 * 1000)
         .description('交互模式空闲超时（毫秒）；超时后自动退出'),
+    sessionHistoryRetentionMs: Schema.number()
+        .min(24 * 60 * 60 * 1000)
+        .max(365 * 24 * 60 * 60 * 1000)
+        .default(30 * 24 * 60 * 60 * 1000)
+        .description('历史会话保留时间（毫秒）'),
+    sessionSummaryEnabled: Schema.boolean()
+        .default(true)
+        .description('会话结束后使用 ChatLuna 默认模型生成标题和摘要'),
+    sessionSummaryModel: Schema.string()
+        .default('')
+        .description('摘要模型；留空使用 ChatLuna 默认模型'),
+    sessionSummaryMaxInputChars: Schema.number()
+        .min(1000)
+        .max(100000)
+        .default(12000)
+        .description('单次会话摘要最多发送给模型的字符数'),
     maxOutputBytes: Schema.number()
         .min(65536)
         .max(67108864)

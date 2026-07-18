@@ -22,7 +22,7 @@ export class HermesAdapter extends CodeAgentAdapter {
     }
 
     protected parseText(stdout: string, stderr: string) {
-        return super.parseText(
+        return mergeHermesOutput(
             cleanHermesCliNoise(stdout),
             cleanHermesCliNoise(stderr)
         )
@@ -42,7 +42,11 @@ export class HermesAdapter extends CodeAgentAdapter {
             timedOut,
             command
         )
-        const sessionId = extractHermesSessionId(stderr)
+        result.raw = mergeHermesOutput(
+            cleanHermesCliNoise(stdout),
+            cleanHermesCliNoise(stderr)
+        )
+        const sessionId = extractHermesSessionId(`${stdout}\n${stderr}`)
         if (sessionId) result.providerState = { sessionId }
         return result
     }
@@ -52,13 +56,12 @@ export class HermesAdapter extends CodeAgentAdapter {
 export function cleanHermesCliNoise(text: string) {
     return text
         .split(/\r?\n/)
-        .filter((line) => {
-            const plain = line.replace(ANSI_ESCAPE, '').trim()
-            return (
-                !/^Warning:\s*Unknown toolsets:\s*.+$/i.test(plain) &&
-                !/^session_id:\s*\S+\s*$/i.test(plain)
-            )
-        })
+        .map((line) => stripAnsi(line))
+        .filter(
+            (line) =>
+                !/^Warning:\s*Unknown toolsets:\s*.+$/i.test(line.trim()) &&
+                !/^session_id:\s*\S+\s*$/i.test(line.trim())
+        )
         .join('\n')
         .trim()
 }
@@ -66,10 +69,20 @@ export function cleanHermesCliNoise(text: string) {
 export function extractHermesSessionId(stderr: string) {
     let sessionId: string | undefined
     for (const line of stderr.split(/\r?\n/)) {
-        const match = line.match(/^session_id:\s*(\S+)\s*$/)
+        const match = stripAnsi(line).match(/^session_id:\s*(\S+)\s*$/i)
         if (match) sessionId = match[1]
     }
     return sessionId
+}
+
+export function mergeHermesOutput(stdout: string, stderr: string) {
+    const out = stdout.trim()
+    const err = stderr.trim()
+    if (!out) return err
+    if (!err) return out
+    if (out.includes(err)) return out
+    if (err.includes(out)) return err
+    return `${err}\n${out}`
 }
 
 function providerSessionId(state: DelegateOptions['providerState']) {
@@ -79,3 +92,7 @@ function providerSessionId(state: DelegateOptions['providerState']) {
 }
 
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g
+
+function stripAnsi(value: string) {
+    return value.replace(ANSI_ESCAPE, '')
+}

@@ -16,7 +16,11 @@ import type {
     SshHostConfig,
     TerminalInfo
 } from './types'
-import type { SessionIdentity } from './sessions/types'
+import type {
+    NexusSession,
+    SessionHistoryQuery,
+    SessionIdentity
+} from './sessions/types'
 import { createDefaultNexusConfig, createHost } from './config'
 import { SshSessionPool } from './ssh/pool'
 import type { SshSession, TerminalHandle } from './ssh/session'
@@ -49,8 +53,13 @@ import {
 } from './utils/config'
 import { registerNexusCommands } from './commands'
 import type { Config } from './config'
-import { MemorySessionStorage } from './sessions/storage'
+import { FileSessionStorage } from './sessions/file-storage'
 import { SessionManager } from './sessions/manager'
+import {
+    buildSummaryPrompt,
+    fallbackSummary,
+    parseModelSummary
+} from './sessions/summary'
 import {
     AgentRunner,
     type SessionInvocationContext,
@@ -80,6 +89,10 @@ export class AgentNexusService extends Service {
     private commandDispose?: () => void
     private reconnectTimer?: NodeJS.Timeout
     private sessionCleanupTimer?: NodeJS.Timeout
+    private sessionStorage: FileSessionStorage
+    private summaryQueue = new Set<string>()
+    private summaryDrain?: Promise<void>
+    private summaryStopped = true
     private reconnecting = false
     private nexusConfig: NexusConfig
     private dataPath: string
@@ -97,15 +110,26 @@ export class AgentNexusService extends Service {
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
         this.nexusConfig = createDefaultNexusConfig(pluginConfig)
         this.proxy = new NexusTerminalProxy(ctx, this)
-        this.sessionManager = new SessionManager(new MemorySessionStorage())
+        this.sessionStorage = new FileSessionStorage(
+            path.join(this.dataPath, 'sessions.json')
+        )
+        this.sessionManager = new SessionManager(this.sessionStorage, {
+            historyRetentionMs: pluginConfig.sessionHistoryRetentionMs,
+            onArchived: (session) => this.enqueueSessionSummary(session)
+        })
         this.agentRunner = new AgentRunner(this.sessionManager, (input) =>
             this.delegate(input)
         )
     }
 
     async start() {
+        this.summaryStopped = false
         await this.loadConfig()
+        await this.sessionStorage.init()
         await this.sessionManager.recoverTasks()
+        for (const session of await this.sessionManager.listPendingSummaries()) {
+            this.enqueueSessionSummary(session)
+        }
         this.commandDispose?.()
         this.commandDispose = registerNexusCommands(
             this.ctx,
@@ -133,7 +157,8 @@ export class AgentNexusService extends Service {
     }
 
     async stop() {
-        this.agentRunner.shutdown()
+        this.summaryStopped = true
+        await this.agentRunner.shutdown()
         this.commandDispose?.()
         this.commandDispose = undefined
         for (const d of this.toolDispose) d()
@@ -146,6 +171,7 @@ export class AgentNexusService extends Service {
         this.pool.stopIdleCleanup()
         await this.closeAllTerminals()
         await this.pool.clear()
+        await this.summaryDrain
     }
 
     getConfig() {
@@ -154,6 +180,29 @@ export class AgentNexusService extends Service {
 
     get commandAuthority() {
         return this.pluginConfig.commandAuthority
+    }
+
+    listSessionHistory(query: SessionHistoryQuery = {}) {
+        return this.sessionManager.listHistory(query)
+    }
+
+    async getSessionHistory(id: string) {
+        const session = await this.sessionManager.getHistoryDetail(id)
+        if (!session) throw new Error('会话不存在或已被清理。')
+        return session
+    }
+
+    async deleteSessionHistory(id: string) {
+        await this.sessionManager.deleteHistory(id)
+        this.summaryQueue.delete(id)
+        return { success: true }
+    }
+
+    async retrySessionSummary(id: string) {
+        const session = await this.sessionManager.retrySummary(id)
+        if (!session) throw new Error('只有已结束的会话可以重新生成摘要。')
+        this.enqueueSessionSummary(session)
+        return { success: true }
     }
 
     runInSession(
@@ -213,6 +262,95 @@ export class AgentNexusService extends Service {
         hostId?: string
     ) {
         return this.agentRunner.endInteractive(identity, agent, hostId)
+    }
+
+    private enqueueSessionSummary(session: NexusSession) {
+        if (!session.endedAt || session.summary?.status !== 'pending') return
+        this.summaryQueue.add(session.id)
+        if (this.summaryStopped || this.summaryDrain) return
+        this.summaryDrain = this.drainSessionSummaries().finally(() => {
+            this.summaryDrain = undefined
+            if (!this.summaryStopped && this.summaryQueue.size) {
+                const next = this.summaryQueue.values().next().value as string
+                void this.sessionManager.get(next).then((session) => {
+                    if (session) this.enqueueSessionSummary(session)
+                })
+            }
+        })
+    }
+
+    private async drainSessionSummaries() {
+        while (!this.summaryStopped && this.summaryQueue.size) {
+            const id = this.summaryQueue.values().next().value as string
+            this.summaryQueue.delete(id)
+            await this.summarizeSession(id)
+        }
+    }
+
+    private async summarizeSession(id: string) {
+        const session = await this.sessionManager.get(id)
+        if (!session?.endedAt || session.summary?.status !== 'pending') return
+        const revision = session.summary.revision ?? 0
+        const fallback = fallbackSummary(session)
+        const readyFallback = async (error?: unknown) => {
+            await this.sessionManager.setSummary(id, {
+                status: 'ready',
+                revision,
+                source: 'fallback',
+                title: fallback.title,
+                abstract: fallback.abstract,
+                topics: [],
+                generatedAt: Date.now(),
+                ...(error ? { error: getErrorMessage(error) } : {})
+            }, revision)
+        }
+        if (!this.pluginConfig.sessionSummaryEnabled) {
+            await readyFallback()
+            return
+        }
+
+        try {
+            const chatluna = this.ctx.chatluna as any
+            const modelName =
+                this.pluginConfig.sessionSummaryModel.trim() ||
+                chatluna?.currentConfig?.defaultModel
+            if (!modelName) throw new Error('ChatLuna 未配置默认模型')
+            const modelRef = await chatluna.createChatModel(modelName)
+            const model = modelRef?.value
+            if (!model) throw new Error(`无法创建 ChatLuna 模型：${modelName}`)
+            const result = await model.invoke(
+                buildSummaryPrompt(
+                    session,
+                    this.pluginConfig.sessionSummaryMaxInputChars
+                ),
+                {
+                    temperature: 0,
+                    maxTokens: 400,
+                    stream: false,
+                    timeout: 20000
+                }
+            )
+            const { getMessageContent } = require(
+                'koishi-plugin-chatluna/utils/string'
+            ) as { getMessageContent(content: unknown): string }
+            const parsed = parseModelSummary(
+                getMessageContent(result.content),
+                fallback
+            )
+            if (!parsed) throw new Error('摘要模型没有返回有效 JSON')
+            await this.sessionManager.setSummary(id, {
+                status: 'ready',
+                revision,
+                source: 'model',
+                ...parsed,
+                generatedAt: Date.now()
+            }, revision)
+        } catch (error) {
+            this.ctx.logger.warn(
+                `[agent-nexus] session summary failed: ${getErrorMessage(error)}`
+            )
+            await readyFallback(error)
+        }
     }
 
     async saveConfig(cfg: NexusConfig) {
