@@ -28,6 +28,11 @@ import {
 } from '../src/utils/config.ts'
 import { createId } from '../client/utils/id.ts'
 import { splitMessage } from '../src/utils/text.ts'
+import {
+    buildAgentMaintenancePlan,
+    isVersionNewer,
+    normalizeAgentVersion
+} from '../src/agents/maintenance.ts'
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
 import {
@@ -807,6 +812,36 @@ test('detects every supported agent through the shared SSH probe', async () => {
         assert.equal(result.path, executable, adapter.kind)
         assert.equal(result.version, `${bin} smoke-version`, adapter.kind)
     }
+})
+
+test('builds fixed user-scope maintenance plans and compares agent versions', () => {
+    assert.equal(normalizeAgentVersion('Hermes Agent v0.18.0 (2026.7.1)'), '0.18.0')
+    assert.equal(normalizeAgentVersion('2.1.205 (Claude Code)'), '2.1.205')
+    assert.equal(isVersionNewer('2.1.205', '2.1.214'), true)
+    assert.equal(isVersionNewer('1.18.3', '1.18.3'), false)
+
+    const codex = buildAgentMaintenancePlan('codex', false)
+    assert.equal(codex.action, 'install')
+    assert.match(codex.command, /npm_config_prefix="\$HOME\/\.local"/)
+    assert.match(codex.command, /'@openai\/codex@latest'/)
+    assert.doesNotMatch(codex.command, /sudo/)
+
+    const claude = buildAgentMaintenancePlan(
+        'claude',
+        true,
+        '/home/lumia/.local/bin/claude'
+    )
+    assert.equal(claude.action, 'update')
+    assert.equal(
+        claude.command,
+        "'/home/lumia/.local/bin/claude' update"
+    )
+
+    const hermes = buildAgentMaintenancePlan('hermes', false)
+    assert.match(
+        hermes.command,
+        /https:\/\/hermes-agent\.nousresearch\.com\/install\.sh/
+    )
 })
 
 test('parses interactive SSH environment markers and removes volatile variables', () => {

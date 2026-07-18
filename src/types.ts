@@ -63,7 +63,23 @@ export interface DetectedAgent {
     installed: boolean
     path?: string
     version?: string
+    latestVersion?: string
+    updateAvailable?: boolean
+    maintenanceMethod?: string
+    maintenanceError?: string
     skillDirs: string[]
+}
+
+export interface AgentMaintenanceInput {
+    hostId: string
+    kind: AgentKind
+}
+
+export interface AgentMaintenanceResult {
+    action: 'install' | 'update'
+    method: string
+    agent: DetectedAgent
+    status: NexusStatus
 }
 
 export interface HostStatus {

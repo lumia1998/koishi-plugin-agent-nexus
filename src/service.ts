@@ -3,6 +3,8 @@ import { Context, Service } from 'koishi'
 import path from 'path'
 import type {
     AgentKind,
+    AgentMaintenanceInput,
+    AgentMaintenanceResult,
     AgentResult,
     DelegateInput,
     DetectedAgent,
@@ -66,6 +68,11 @@ import {
     type SessionRunOutcome
 } from './runtime/runner'
 import { SftpFileManager } from './files/manager'
+import {
+    buildAgentMaintenancePlan,
+    isVersionNewer,
+    latestAgentVersion
+} from './agents/maintenance'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -98,6 +105,7 @@ export class AgentNexusService extends Service {
     private dataPath: string
     private activeByHost = new Map<string, number>()
     private hostErrors = new Map<string, string>()
+    private maintenanceLocks = new Set<string>()
     readonly sessionManager: SessionManager
     private agentRunner: AgentRunner
 
@@ -579,6 +587,14 @@ export class AgentNexusService extends Service {
         const hosts = hostId
             ? [this.requireHost(hostId)]
             : this.nexusConfig.hosts.filter((h) => h.enabled)
+        const latestVersions = new Map(
+            await Promise.all(
+                listAdapters().map(async (adapter) => [
+                    adapter.kind,
+                    await latestAgentVersion(adapter.kind)
+                ] as const)
+            )
+        )
 
         for (const host of hosts) {
             try {
@@ -594,7 +610,12 @@ export class AgentNexusService extends Service {
                         continue
                     }
                     try {
-                        detected.push(await adapter.detect(session))
+                        detected.push(
+                            await this.withAgentMaintenanceInfo(
+                                await adapter.detect(session),
+                                latestVersions.get(adapter.kind)
+                            )
+                        )
                     } catch (err) {
                         detected.push({
                             kind: adapter.kind,
@@ -622,6 +643,92 @@ export class AgentNexusService extends Service {
         }
 
         return this.getStatus()
+    }
+
+    async maintainAgent(
+        input: AgentMaintenanceInput
+    ): Promise<AgentMaintenanceResult> {
+        const key = `${input.hostId}:${input.kind}`
+        if (this.maintenanceLocks.has(key)) {
+            throw new Error('该 Agent 正在安装或更新，请稍候。')
+        }
+        this.maintenanceLocks.add(key)
+        try {
+            const host = this.requireHost(input.hostId)
+            const adapter = getAdapter(input.kind)
+            const session = await this.pool.getOrCreate(host)
+            const current =
+                this.agentCache
+                    .get(host.id)
+                    ?.find((agent) => agent.kind === input.kind) ??
+                (await adapter.detect(session))
+            const plan = buildAgentMaintenancePlan(
+                input.kind,
+                current.installed,
+                current.path
+            )
+            const result = await session.exec(plan.command, {
+                timeoutMs: 10 * 60 * 1000
+            })
+            if (result.timedOut) {
+                throw new Error(`${plan.method}执行超时。`)
+            }
+            if (result.truncated) {
+                throw new Error(`${plan.method}输出过长，无法确认安装结果。`)
+            }
+            if (result.exitCode !== 0) {
+                const output = (result.stderr || result.stdout).trim()
+                throw new Error(
+                    `${plan.method}失败（exit ${result.exitCode}）：${output.slice(-2000)}`
+                )
+            }
+            const agent = await this.withAgentMaintenanceInfo(
+                await adapter.detect(session)
+            )
+            if (!agent.installed) {
+                throw new Error('安装命令已结束，但重新扫描仍未发现可执行文件。')
+            }
+            const agents = this.agentCache.get(host.id) ?? emptyAgents()
+            this.agentCache.set(
+                host.id,
+                agents.map((item) =>
+                    item.kind === input.kind ? agent : item
+                )
+            )
+            this.hostErrors.delete(host.id)
+            return {
+                action: plan.action,
+                method: plan.method,
+                agent,
+                status: this.getStatus()
+            }
+        } finally {
+            this.maintenanceLocks.delete(key)
+        }
+    }
+
+    private async withAgentMaintenanceInfo(
+        agent: DetectedAgent,
+        resolvedLatest?: {
+            value?: string
+            error?: string
+        }
+    ) {
+        const latest = resolvedLatest ?? (await latestAgentVersion(agent.kind))
+        const plan = buildAgentMaintenancePlan(
+            agent.kind,
+            agent.installed,
+            agent.path
+        )
+        return {
+            ...agent,
+            latestVersion: latest.value,
+            updateAvailable: agent.installed
+                ? isVersionNewer(agent.version, latest.value)
+                : undefined,
+            maintenanceMethod: plan.method,
+            maintenanceError: latest.error
+        }
     }
 
     async refreshSkills(hostId?: string) {

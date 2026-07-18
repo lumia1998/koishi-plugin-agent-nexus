@@ -50,31 +50,51 @@ export function apply(ctx: Context) {
         commandAuthority
     )
 
-    ctx.console.addListener('agent-nexus/saveConfig', async (cfg: NexusConfig) => {
-        await nexus().saveConfig(cfg)
-        return { success: true }
-    })
+    ctx.console.addListener(
+        'agent-nexus/saveConfig',
+        async (cfg: NexusConfig) => {
+            await nexus().saveConfig(cfg)
+            return { success: true }
+        },
+        commandAuthority
+    )
 
     ctx.console.addListener(
         'agent-nexus/saveHost',
         async (input: Partial<SshHostConfig> & { setAsDefault?: boolean }) => {
             const result = await nexus().saveHost(input)
             return { success: true, hostId: result.hostId, data: result.data }
-        }
+        },
+        commandAuthority
     )
 
-    ctx.console.addListener('agent-nexus/removeHost', async (hostId: string) => {
-        await nexus().removeHost(hostId)
-        return { success: true }
-    })
+    ctx.console.addListener(
+        'agent-nexus/removeHost',
+        async (hostId: string) => {
+            await nexus().removeHost(hostId)
+            return { success: true }
+        },
+        commandAuthority
+    )
 
-    ctx.console.addListener('agent-nexus/testHost', async (hostId: string) => {
-        return await nexus().testHost(hostId)
-    })
+    ctx.console.addListener(
+        'agent-nexus/testHost',
+        async (hostId: string) => await nexus().testHost(hostId),
+        commandAuthority
+    )
 
-    ctx.console.addListener('agent-nexus/scanAgents', async (hostId?: string) => {
-        return await nexus().scanAgents(hostId)
-    })
+    ctx.console.addListener(
+        'agent-nexus/scanAgents',
+        async (hostId?: string) => await nexus().scanAgents(hostId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/maintainAgent',
+        async (input: import('../types').AgentMaintenanceInput) =>
+            nexus().maintainAgent(input),
+        commandAuthority
+    )
 
     ctx.console.addListener(
         'agent-nexus/syncSkill',
@@ -95,7 +115,8 @@ export function apply(ctx: Context) {
             }
             const info = await nexus().syncSkill(source, input.hostId)
             return { success: true, skill: info }
-        }
+        },
+        commandAuthority
     )
 
     ctx.console.addListener('agent-nexus/listSkills', async (hostId?: string) => {
@@ -221,6 +242,9 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/removeHost'(hostId: string): Promise<{ success: boolean }>
         'agent-nexus/testHost'(hostId: string): Promise<{ ok: boolean; output?: string }>
         'agent-nexus/scanAgents'(hostId?: string): Promise<import('../types').NexusStatus>
+        'agent-nexus/maintainAgent'(
+            input: import('../types').AgentMaintenanceInput
+        ): Promise<import('../types').AgentMaintenanceResult>
         'agent-nexus/syncSkill'(input: {
             repoUrl: string
             name?: string

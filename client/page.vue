@@ -55,8 +55,10 @@
                 :config="config"
                 :status="status"
                 :connecting="connecting"
+                :maintaining="maintaining"
                 @connect="connectComputer"
                 @remove="removeComputer"
+                @maintain="maintainAgent"
             />
             <skills-panel
                 v-if="active === 'skills'"
@@ -95,7 +97,13 @@ import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
 import FileManagerPanel from './components/file-manager-panel.vue'
 import SessionsPanel from './components/sessions-panel.vue'
-import type { NexusConfig, NexusStatus, SshAuth } from '../src/types'
+import type {
+    AgentKind,
+    AgentMaintenanceInput,
+    NexusConfig,
+    NexusStatus,
+    SshAuth
+} from '../src/types'
 
 type ComputerConnectInput = {
     id?: string
@@ -120,6 +128,8 @@ const tabLabel = {
 const active = ref<(typeof tabs)[number]>('computer')
 const loading = ref(false)
 const connecting = ref(false)
+const maintaining = ref<string[]>([])
+let statusGeneration = 0
 const config = ref<NexusConfig>({
     hosts: [],
     agents: {
@@ -169,9 +179,11 @@ const overview = computed(() => {
 })
 
 async function reload(scan = false) {
+    const generation = ++statusGeneration
     loading.value = true
     try {
         const data = await send('agent-nexus/getConsoleData')
+        if (generation !== statusGeneration) return
         config.value = data.config
         status.value = data.status
         if (scan && data.config.hosts.some((host) => host.enabled)) {
@@ -250,8 +262,11 @@ async function connectComputer(input: ComputerConnectInput, done: (hostId: strin
 }
 
 async function reloadQuiet() {
+    if (maintaining.value.length) return
+    const generation = ++statusGeneration
     try {
         const data = await send('agent-nexus/getConsoleData')
+        if (generation !== statusGeneration || maintaining.value.length) return
         config.value = data.config
         status.value = data.status
     } catch {
@@ -277,6 +292,45 @@ async function removeComputer(hostId: string) {
     } catch (err: any) {
         if (err === 'cancel' || err === 'close') return
         ElMessage.error(err?.message || String(err))
+    }
+}
+
+async function maintainAgent(input: AgentMaintenanceInput) {
+    const key = `${input.hostId}:${input.kind}`
+    if (maintaining.value.includes(key)) return
+    maintaining.value = [...maintaining.value, key]
+    statusGeneration += 1
+    const host = status.value.hosts.find((item) => item.id === input.hostId)
+    const agent = host?.agents.find((item) => item.kind === input.kind)
+    const action = agent?.installed ? '更新' : '安装'
+    const labels: Record<AgentKind, string> = {
+        hermes: 'Hermes',
+        openclaw: 'OpenClaw',
+        claude: 'Claude Code',
+        opencode: 'OpenCode',
+        codex: 'Codex'
+    }
+    try {
+        await ElMessageBox.confirm(
+            `将在设备“${host?.name || input.hostId}”上以当前 SSH 用户执行${action}。渠道：${agent?.maintenanceMethod || '官方安装渠道'}。是否继续？`,
+            `${action} ${labels[input.kind]}`,
+            {
+                confirmButtonText: action,
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+        const result = await send('agent-nexus/maintainAgent', input)
+        statusGeneration += 1
+        status.value = result.status
+        ElMessage.success(
+            `${labels[input.kind]} ${result.action === 'install' ? '安装' : '更新'}完成`
+        )
+    } catch (error: any) {
+        if (error === 'cancel' || error === 'close') return
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        maintaining.value = maintaining.value.filter((item) => item !== key)
     }
 }
 

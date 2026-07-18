@@ -182,11 +182,31 @@
                         <span class="status-dot" />
                         <span class="agent-name">{{ labels[kind] }}</span>
                         <el-tag size="small" effect="plain" :type="agent(kind)?.installed ? 'success' : 'info'">
-                            {{ agent(kind)?.installed ? '已安装' : '未发现' }}
+                            {{ !isScanned(kind) ? '等待扫描' : agent(kind)?.installed ? '已安装' : '未安装' }}
                         </el-tag>
                     </div>
-                    <div class="agent-version">{{ agent(kind)?.version || '等待扫描' }}</div>
+                    <div class="agent-version">
+                        {{ agent(kind)?.version || (isScanned(kind) ? '未安装' : '等待扫描') }}
+                    </div>
+                    <div class="agent-latest">
+                        最新：{{ agent(kind)?.latestVersion || (agent(kind)?.maintenanceError ? '检查失败' : '等待检查') }}
+                    </div>
                     <div class="agent-path">{{ agent(kind)?.path || 'PATH 中未找到可执行文件' }}</div>
+                    <div class="agent-actions">
+                        <span class="maintenance-method">
+                            {{ agent(kind)?.maintenanceMethod || '官方安装渠道' }}
+                        </span>
+                        <el-button
+                            size="small"
+                            :type="agent(kind)?.installed && agent(kind)?.updateAvailable ? 'warning' : 'primary'"
+                            :plain="agent(kind)?.installed"
+                            :disabled="!connected || !isScanned(kind) || (agent(kind)?.installed && agent(kind)?.updateAvailable !== true)"
+                            :loading="maintaining.includes(maintenanceKey(kind))"
+                            @click="maintain(kind)"
+                        >
+                            {{ maintenanceLabel(kind) }}
+                        </el-button>
+                    </div>
                 </div>
             </div>
 
@@ -217,11 +237,13 @@ const props = defineProps<{
     config: NexusConfig
     status: NexusStatus
     connecting: boolean
+    maintaining: string[]
 }>()
 
 const emit = defineEmits<{
     connect: [input: ComputerConnectInput, done: (hostId: string) => void]
     remove: [hostId: string]
+    maintain: [input: { hostId: string; kind: AgentKind }]
 }>()
 
 const kinds: AgentKind[] = ['hermes', 'openclaw', 'claude', 'opencode', 'codex']
@@ -311,6 +333,35 @@ const environmentLabel = computed(() => {
 
 function agent(kind: AgentKind) {
     return hostStatus.value?.agents.find((item) => item.kind === kind)
+}
+
+function maintenanceKey(kind: AgentKind) {
+    return `${selectedHostId.value}:${kind}`
+}
+
+function maintenanceLabel(kind: AgentKind) {
+    const value = agent(kind)
+    if (!value?.installed) return '一键安装'
+    if (value.updateAvailable === true) return '更新'
+    if (value.updateAvailable === undefined && !value.maintenanceError) {
+        return '版本未知'
+    }
+    if (value.maintenanceError) return '无法检查更新'
+    return '已是最新'
+}
+
+function isScanned(kind: AgentKind) {
+    const value = agent(kind)
+    return Boolean(
+        value?.installed ||
+            value?.latestVersion ||
+            value?.maintenanceError
+    )
+}
+
+function maintain(kind: AgentKind) {
+    if (!selectedHostId.value) return
+    emit('maintain', { hostId: selectedHostId.value, kind })
 }
 
 function hostLabel(item: SshHostConfig) {
@@ -460,6 +511,7 @@ function connect() {
 .connection-copy,
 .scan-hint,
 .agent-version,
+.agent-latest,
 .agent-path,
 .section-meta,
 .new-device-copy {
@@ -615,8 +667,26 @@ function connect() {
 }
 
 .agent-version,
+.agent-latest,
 .agent-path {
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.maintenance-method {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--k-text-light);
+    font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
