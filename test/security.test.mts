@@ -20,7 +20,7 @@ import {
     extractPaths,
     parseJsonLines
 } from '../src/adapters/base.ts'
-import { syncSkillSource } from '../src/skills/sync.ts'
+import { linkSkillToAgents, syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
     assertUniqueHostName,
@@ -46,6 +46,11 @@ import {
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
 import {
+    formatHostKeyFingerprint,
+    normalizeHostKeyFingerprint,
+    verifySshHostKey
+} from '../src/ssh/host-key.ts'
+import {
     enrichPath,
     filterRemoteEnvironment,
     parseEnvironmentProbe
@@ -53,6 +58,30 @@ import {
 import { terminalMessageSize } from '../src/proxy.ts'
 import { NexusListAgentsTool } from '../src/tools/list_agents.ts'
 import { SftpFileManager } from '../src/files/manager.ts'
+
+test('pins and verifies SSH SHA-256 host keys', () => {
+    const hash = 'ab'.repeat(32)
+    const fingerprint = formatHostKeyFingerprint(hash)
+    assert.match(fingerprint, /^SHA256:/)
+    assert.equal(normalizeHostKeyFingerprint(fingerprint), hash)
+
+    assert.deepEqual(verifySshHostKey(hash, undefined, 'accept-new'), {
+        accepted: true,
+        fingerprint,
+        learned: true
+    })
+    assert.equal(
+        verifySshHostKey(hash, undefined, 'strict').accepted,
+        false
+    )
+    assert.equal(
+        verifySshHostKey(hash, fingerprint, 'strict').accepted,
+        true
+    )
+    const mismatch = verifySshHostKey('cd'.repeat(32), fingerprint, 'strict')
+    assert.equal(mismatch.accepted, false)
+    assert.match(mismatch.error || '', /mismatch/i)
+})
 
 test('creates UUIDs without crypto.randomUUID for LAN HTTP consoles', () => {
     const id = createId({
@@ -120,6 +149,17 @@ test('rejects unsafe git refs', () => {
 test('rejects repository values that can become git options', () => {
     assert.throws(() => validateRepoUrl('--upload-pack=evil'))
     assert.throws(() => validateRepoUrl('https://example.com/repo.git\n--config=evil'))
+    assert.throws(() => validateRepoUrl('http://example.com/repo.git'))
+    assert.throws(() => validateRepoUrl('file:///srv/private/repo'))
+    assert.throws(() => validateRepoUrl('/srv/private/repo'))
+    assert.equal(
+        validateRepoUrl('https://example.com/team/repo.git'),
+        'https://example.com/team/repo.git'
+    )
+    assert.equal(
+        validateRepoUrl('ssh://git@example.com/team/repo.git'),
+        'ssh://git@example.com/team/repo.git'
+    )
     assert.equal(validateRepoUrl('git@example.com:team/repo.git'), 'git@example.com:team/repo.git')
 })
 
@@ -380,6 +420,28 @@ test('expands the configured skill root through remote HOME', async () => {
     assert.match(command, /SKILL\.md not found/)
     assert.match(command, /STAGE=/)
     assert.match(command, /BACKUP=/)
+    assert.doesNotMatch(command, /\|\| git clone/)
+    assert.match(command, /remote get-url origin/)
+})
+
+test('refuses to replace a real agent skill directory with a symlink', async () => {
+    let command = ''
+    const session = {
+        async exec(value: string) {
+            command = value
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        }
+    }
+    assert.deepEqual(
+        await linkSkillToAgents(
+            session as never,
+            '/home/agent/.agent-nexus/skills/demo',
+            'demo',
+            ['claude']
+        ),
+        ['claude']
+    )
+    assert.match(command, /Refusing to replace non-symlink skill/)
 })
 
 test('fails clearly when a referenced secret environment variable is missing', () => {
@@ -756,6 +818,23 @@ test('limits captured SSH output', async () => {
     assert.equal(result.truncated, true)
 })
 
+test('rejects oversized automatic SSH asset publishing before opening a stream', async () => {
+    const session = sshSession()
+    let opened = false
+    ;(session as any).getSftp = async () => ({
+        createReadStream() {
+            opened = true
+            return new EventEmitter()
+        }
+    })
+    ;(session as any).stat = async () => ({
+        size: 5,
+        isFile: () => true
+    })
+    await assert.rejects(() => session.openAsset('/tmp/large.bin', 4), /publish limit/)
+    assert.equal(opened, false)
+})
+
 test('times out SSH shell creation and closes a late channel', async () => {
     const session = sshSession()
     let closed = false
@@ -920,11 +999,33 @@ test('builds fixed user-scope maintenance plans and compares agent versions', ()
     assert.equal(isVersionNewer('2.1.205', '2.1.214'), true)
     assert.equal(isVersionNewer('1.18.3', '1.18.3'), false)
 
-    const codex = buildAgentMaintenancePlan('codex', false)
+    const codex = buildAgentMaintenancePlan('codex', false, undefined, '1.2.3')
     assert.equal(codex.action, 'install')
     assert.match(codex.command, /npm_config_prefix="\$HOME\/\.local"/)
-    assert.match(codex.command, /'@openai\/codex@latest'/)
+    assert.match(codex.command, /'@openai\/codex@1\.2\.3'/)
     assert.doesNotMatch(codex.command, /sudo/)
+    assert.throws(
+        () => buildAgentMaintenancePlan('codex', false),
+        /determine the registry version/i
+    )
+
+    const claudeInstall = buildAgentMaintenancePlan(
+        'claude',
+        false,
+        undefined,
+        '2.1.205'
+    )
+    assert.match(claudeInstall.command, /'@anthropic-ai\/claude-code@2\.1\.205'/)
+    assert.doesNotMatch(claudeInstall.command, /claude\.ai\/install/)
+
+    const opencodeInstall = buildAgentMaintenancePlan(
+        'opencode',
+        false,
+        undefined,
+        '1.2.3'
+    )
+    assert.match(opencodeInstall.command, /'opencode-ai@1\.2\.3'/)
+    assert.doesNotMatch(opencodeInstall.command, /opencode\.ai\/install/)
 
     const claude = buildAgentMaintenancePlan(
         'claude',
@@ -987,6 +1088,8 @@ test('builds fixed user-scope maintenance plans and compares agent versions', ()
         hermes.command,
         /https:\/\/hermes-agent\.nousresearch\.com\/install\.sh/
     )
+    assert.match(hermes.command, /--proto '=https'/)
+    assert.match(hermes.command, /installer download exceeds 2 MB/)
 })
 
 test('parses interactive SSH environment markers and removes volatile variables', () => {

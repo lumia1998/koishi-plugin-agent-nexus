@@ -4,6 +4,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { Task } from '@a2a-js/sdk'
 import { NexusA2AExecutor } from '../src/a2a/executor.ts'
 import { BridgeArtifactRegistry } from '../src/bridge/artifacts.ts'
 import { normalizeBridgeConfig } from '../src/bridge/config.ts'
@@ -13,6 +14,7 @@ import {
     parseBridgeStatus
 } from '../src/bridge/maintenance.ts'
 import { defaultSshBridgeConfig } from '../src/utils/bridge-config.ts'
+import { BoundedTaskStore } from '../src/bridge/task-store.ts'
 import {
     AgentNexusBridgeServer,
     BRIDGE_A2A_PATH,
@@ -37,8 +39,75 @@ test('normalizes standalone bridge configuration and enabled agents', () => {
     assert.equal(config.agents.pi, true)
     assert.equal(config.agents.hermes, false)
     assert.equal(config.runtime.claudeSkipPermissions, false)
+    assert.equal(config.maxConcurrentTasks, 2)
+    assert.equal(config.maxTrackedTasks, 64)
+    assert.equal(config.maxStoredTasks, 256)
+    const bounded = normalizeBridgeConfig({
+        maxConcurrentTasks: 999,
+        maxTrackedTasks: 1,
+        maxStoredTasks: 99999,
+        maxArtifacts: 99999
+    })
+    assert.equal(bounded.maxConcurrentTasks, 32)
+    assert.equal(bounded.maxTrackedTasks, 32)
+    assert.equal(bounded.maxStoredTasks, 4096)
+    assert.equal(bounded.maxArtifacts, 4096)
     assert.throws(() => normalizeBridgeConfig({ agents: 'claude,missing' }))
     assert.throws(() => normalizeBridgeConfig({ port: 70000 }))
+})
+
+test('bounds bridge artifact size and live link count', async () => {
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'nexus-bridge-limits-'))
+    await writeFile(path.join(temp, 'a.txt'), 'abc')
+    await writeFile(path.join(temp, 'b.txt'), 'def')
+    await writeFile(path.join(temp, 'large.txt'), '12345')
+    try {
+        const registry = new BridgeArtifactRegistry(temp, 60000, 4, 1)
+        registry.setPublicBaseUrl('http://127.0.0.1:8787')
+        const first = await registry.register('a.txt', temp)
+        const second = await registry.register('b.txt', temp)
+        assert.equal(registry.get(first.id), undefined)
+        assert.equal(registry.get(second.id)?.name, 'b.txt')
+        await assert.rejects(
+            () => registry.register('large.txt', temp),
+            /size limit/i
+        )
+    } finally {
+        await rm(temp, { recursive: true, force: true })
+    }
+})
+
+test('evicts old A2A task records from the bounded bridge store', async () => {
+    const store = new BoundedTaskStore(2)
+    const context = {
+        tenant: '',
+        user: { isAuthenticated: true, userName: 'peer' }
+    } as any
+    for (let index = 1; index <= 3; index += 1) {
+        await store.save(
+            Task.fromJSON({
+                id: `task-${index}`,
+                contextId: 'context',
+                status: {
+                    state: 'TASK_STATE_COMPLETED',
+                    timestamp: `2026-08-10T00:00:0${index}.000Z`
+                }
+            }),
+            context
+        )
+    }
+    assert.equal(await store.load('task-1', context), undefined)
+    assert.equal((await store.load('task-3', context))?.id, 'task-3')
+    const page = await store.list({ pageSize: 10 } as any, context)
+    assert.deepEqual(page.tasks.map((task) => task.id), ['task-3', 'task-2'])
+    assert.equal(page.totalSize, 2)
+    assert.equal(
+        await store.load('task-3', {
+            ...context,
+            user: { isAuthenticated: true, userName: 'other' }
+        }),
+        undefined
+    )
 })
 
 test('publishes only files inside the configured bridge root', async () => {

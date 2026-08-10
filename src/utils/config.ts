@@ -99,6 +99,8 @@ export function hostConnectionChanged(previous: SshHostConfig, next: SshHostConf
         previous.host !== next.host ||
         previous.port !== next.port ||
         previous.username !== next.username ||
+        previous.hostKeyPolicy !== next.hostKeyPolicy ||
+        previous.hostKeyFingerprint !== next.hostKeyFingerprint ||
         previous.enabled !== next.enabled ||
         JSON.stringify(previous.auth) !== JSON.stringify(next.auth)
     )

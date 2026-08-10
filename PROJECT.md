@@ -112,9 +112,10 @@ AgentNexus (Koishi 插件)
           · nexus_publish
           · nexus_list_agents
           · nexus_list_skills
-          · nexus_a2a_list
-          · nexus_a2a_send
-          · nexus_a2a_task
+          · nexus_a2a_delegate（后台委托 + 自动回送）
+          · nexus_a2a_list（协议调试）
+          · nexus_a2a_send（协议调试）
+          · nexus_a2a_task（协议调试）
 ```
 
 ---
@@ -126,7 +127,7 @@ AgentNexus (Koishi 插件)
 - [x] SSH 连接（密码/密钥，`env:VAR` 密钥引用）
 - [x] exec / sftp / pty
 - [x] 6 个 code agent adapter（含 Pi）
-- [x] SSH 委托、文件/Agent/Skill 查询以及 3 个 A2A 工具
+- [x] SSH 委托、文件/Agent/Skill 查询、高层 A2A 后台工具以及 3 个调试工具
 - [x] Skills：仓库同步 + 中心目录 + 软链
 - [x] WebUI：Computer / Skills / 单实例终端
 - [x] 默认 SSH Computer 常驻连接 + 断线自动重连
@@ -155,7 +156,14 @@ AgentNexus (Koishi 插件)
 - [x] Hermes native session checkpoint：quiet query + session_id + resume
 - [x] Pi native session checkpoint：JSON event stream + session header ID + `--session` resume
 - [x] SSH login/interactive 环境探测与绝对 Agent 路径执行
+- [x] SSH SHA-256 主机密钥 TOFU/严格校验与指纹变更拒绝
 - [x] SFTP 文件管理：浏览、预览、编辑、上传下载、新建目录、重命名和安全删除
+- [x] 配置原子写入与损坏配置备份恢复
+- [x] Bridge 并发、任务数量、产物数量和单文件大小限制
+- [x] Skills HTTPS/SSH 来源限制、精确分支同步与真实目录保护
+- [x] prepack 自动构建与 Node 20 CI/高危依赖审计
+- [x] `nexus_a2a_delegate`：ChatLuna 后台调用、自动会话绑定、完成后唤醒原会话
+- [x] A2A Client job 与 Bridge Task Store 持久化，Bridge 重启后可查询/续接
 - [ ] 真实 SSH 联调（Linux 远端优先）
 - [ ] OpenClaw 在不同安装形态下的探测增强
 - [ ] Skill 同步失败重试 / 增量更新状态展示
@@ -166,7 +174,7 @@ AgentNexus (Koishi 插件)
 
 - [ ] 多主机并行、更细会话隔离
 - [ ] SQLite / Redis SessionStorage，支持跨进程重启恢复
-- [ ] 后台长任务（类似 chatluna background job，挂到终端 tab）
+- [ ] SSH/本地执行的通用后台长任务（挂到终端 tab）
 - [ ] 统一结构化 JSON 结果 schema
 - [ ] Windows 远端适配（路径/symlink/shell）
 - [ ] 更严格的安全策略与审计日志
@@ -203,7 +211,10 @@ koishi-plugin-AgentNexus/
 │   │   └── index.ts
 │   ├── a2a/
 │   │   ├── client.ts          # Agent Card 发现与出站任务
+│   │   ├── chatluna-wakeup.ts # 后台完成后唤醒原 ChatLuna conversation
 │   │   ├── executor.ts        # 独立 Bridge 入站 → Nexus Session Runtime
+│   │   ├── delegation-store.ts # ChatLuna A2A job 持久化
+│   │   ├── delegation-manager.ts # 后台轮询、会话绑定与结果回送
 │   │   └── index.ts
 │   ├── bridge/
 │   │   ├── cli.ts             # agent-nexus-bridge 命令入口
@@ -211,6 +222,7 @@ koishi-plugin-AgentNexus/
 │   │   ├── local-executor.ts  # 本机 Agent 探测与子进程执行
 │   │   ├── runtime.ts         # 持久化 Nexus Session Runtime
 │   │   ├── server.ts          # 原生 Node HTTP A2A Server
+│   │   ├── task-store.ts      # 可恢复的 A2A 协议 Task Store
 │   │   ├── artifacts.ts       # 受限工作目录产物发布
 │   │   └── maintenance.ts     # SSH + systemd 部署计划
 │   ├── sessions/
@@ -228,6 +240,8 @@ koishi-plugin-AgentNexus/
 │   │   ├── publish.ts
 │   │   ├── list_agents.ts
 │   │   ├── list_skills.ts
+│   │   ├── a2a_delegate.ts
+│   │   ├── context.ts
 │   │   ├── a2a_list.ts
 │   │   ├── a2a_send.ts
 │   │   └── a2a_task.ts
@@ -251,9 +265,10 @@ koishi-plugin-AgentNexus/
 | `nexus_publish` | 按远端路径 SFTP 拉取并生成临时 URL |
 | `nexus_list_agents` | 列出主机与已安装 agent |
 | `nexus_list_skills` | 列出已同步 skills |
-| `nexus_a2a_list` | 列出/刷新 A2A 远端 Agent Card |
-| `nexus_a2a_send` | 创建 A2A 任务或按 Task/Context ID 续接 |
-| `nexus_a2a_task` | 查询或取消 A2A 任务 |
+| `nexus_a2a_delegate` | 后台调用 A2A Agent，自动绑定 ChatLuna conversation 并回送结果 |
+| `nexus_a2a_list` | 调试：列出/刷新 A2A 远端 Agent Card |
+| `nexus_a2a_send` | 调试：创建 A2A 任务或按 Task/Context ID 续接 |
+| `nexus_a2a_task` | 调试：查询或取消 A2A 任务 |
 
 ### 6.2 WebUI Tab
 
@@ -312,8 +327,10 @@ A2A 出站：
 
 ```
 Remote base URL → Agent Card（v1，失败时回退 v0.3）
+  → nexus_a2a_delegate 创建持久化 job 并绑定 ChatLuna conversation
   → ClientFactory 选择 JSONRPC 或 HTTP+JSON
-  → send / 自动等待非终态 Task / get / cancel
+  → 后台 send / get / message / cancel
+  → 完成或 input-required 后通过 ChatLuna invoke 唤醒原会话
   → Status Message / Artifact / History 归一化为 A2ATaskView
 ```
 
@@ -323,6 +340,7 @@ Remote base URL → Agent Card（v1，失败时回退 v0.3）
 本机 npm pack → SFTP 上传 → 远端 npm 用户级安装 + user systemd
   → agent-nexus-bridge 探测本机 CLI 并发布 Agent Card Skills
   → ChatLuna → AgentNexus A2A Client → 远端 /a2a
+  → 按 Context ID 恢复 Nexus managed session / Hermes-Pi checkpoint
   → LocalAgentExecutor → Nexus Session Runtime → Artifact URL
 ```
 

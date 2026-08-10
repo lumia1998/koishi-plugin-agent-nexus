@@ -27,10 +27,27 @@ export function validateGitRef(value: string): string {
 }
 
 export function validateRepoUrl(value: string): string {
-    if (!value || value.startsWith('-') || /[\0\r\n]/.test(value)) {
+    const candidate = value?.trim()
+    if (
+        !candidate ||
+        candidate.startsWith('-') ||
+        /[\0\r\n\s]/.test(candidate)
+    ) {
         throw new Error('Invalid skill repository URL')
     }
-    return value
+    if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$/.test(candidate)) {
+        return candidate
+    }
+    let url: URL
+    try {
+        url = new URL(candidate)
+    } catch {
+        throw new Error('Skill repository must use https://, ssh://, or git@host:path')
+    }
+    if (!['https:', 'ssh:'].includes(url.protocol) || !url.hostname) {
+        throw new Error('Skill repository must use https:// or ssh://')
+    }
+    return candidate
 }
 
 export function buildRemoteRealpathCommand(remotePath: string): string {

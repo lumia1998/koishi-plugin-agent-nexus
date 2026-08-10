@@ -43,17 +43,22 @@ export async function syncSkillSource(
         `ROOT=$(printf %s ${quoteShell(root)} | sed "s|^~|$HOME|")`,
         `REPOS="$ROOT/../repos"`,
         `REPO="$REPOS/${sourceId}"`,
+        `SOURCE_URL=${quoteShell(repoUrl)}`,
         `SKILL="$ROOT/${name}"`,
         `STAGE="$ROOT/.${name}.stage.$$"`,
         `BACKUP="$ROOT/.${name}.backup.$$"`,
         `trap 'rm -rf "$STAGE" "$BACKUP"' EXIT`,
         `mkdir -p "$REPOS" "$ROOT"`,
+        `if [ -d "$REPO/.git" ] && [ "$(git -C "$REPO" remote get-url origin 2>/dev/null || true)" != "$SOURCE_URL" ]; then`,
+        `  rm -rf "$REPO"`,
+        `fi`,
         `if [ -d "$REPO/.git" ]; then`,
-        `  git -C "$REPO" fetch --depth 1 origin ${quoteShell(branch)}`,
-        `  git -C "$REPO" checkout -B ${quoteShell(branch)} FETCH_HEAD`,
+        `  git -c core.hooksPath=/dev/null -C "$REPO" fetch --no-tags --depth 1 origin ${quoteShell(branch)}`,
+        `  git -c core.hooksPath=/dev/null -C "$REPO" checkout -B ${quoteShell(branch)} FETCH_HEAD`,
+        `  git -C "$REPO" clean -fdx`,
         `else`,
         `  rm -rf "$REPO"`,
-        `  git clone --depth 1 --branch ${quoteShell(branch)} ${quoteShell(repoUrl)} "$REPO" || git clone --depth 1 ${quoteShell(repoUrl)} "$REPO"`,
+        `  git -c core.hooksPath=/dev/null clone --no-tags --single-branch --depth 1 --branch ${quoteShell(branch)} "$SOURCE_URL" "$REPO"`,
         `fi`,
         sub
             ? `SRC="$REPO/${sub}"`
@@ -101,7 +106,9 @@ export async function linkSkillToAgents(
             const simple = [
                 `DIR=$(echo ${quoteShell(dirTpl)} | sed "s|^~|$HOME|")`,
                 `mkdir -p "$DIR"`,
-                `ln -sfn ${quoteShell(skillPath)} "$DIR/${validatePathSegment(skillName, 'skill name')}"`
+                `TARGET="$DIR/${validatePathSegment(skillName, 'skill name')}"`,
+                `[ ! -e "$TARGET" ] || [ -L "$TARGET" ] || { echo "Refusing to replace non-symlink skill: $TARGET" >&2; exit 1; }`,
+                `ln -sfn ${quoteShell(skillPath)} "$TARGET"`
             ].join(' && ')
 
             const res = await session.exec(simple, { timeoutMs: 15000 })

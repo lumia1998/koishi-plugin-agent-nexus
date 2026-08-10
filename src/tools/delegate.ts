@@ -2,7 +2,7 @@ import z from 'zod'
 import { NexusToolBase } from './base'
 import { truncateText } from '../utils/shell'
 import type { DelegateInput } from '../types'
-import type { SessionIdentity } from '../sessions/types'
+import { toolSessionIdentity } from './context'
 
 export class NexusDelegateTool extends NexusToolBase {
     name = 'nexus_delegate'
@@ -100,20 +100,5 @@ Produced files can be auto-published.`
         } catch (err) {
             return this.formatError(err)
         }
-    }
-}
-
-function toolSessionIdentity(parentConfig: any): SessionIdentity | undefined {
-    const configurable = parentConfig?.configurable
-    const session = configurable?.session
-    const userId = String(configurable?.userId ?? session?.userId ?? '').trim()
-    if (!userId) return undefined
-    return {
-        userId,
-        channelId: configurable?.conversationId
-            ? `${String(session?.channelId ?? '')}#chatluna:${String(configurable.conversationId)}`
-            : String(session?.channelId ?? ''),
-        platform: String(session?.platform ?? 'chatluna'),
-        selfId: String(session?.selfId ?? '')
     }
 }

@@ -475,6 +475,39 @@ test('aborts a running executor through the shared runtime', async () => {
     assert.equal(outcome.reply, 'Agent 任务已中止。')
 })
 
+test('parks a running session for confirmation during a bridge restart', async () => {
+    const manager = new SessionManager(new MemorySessionStorage(), {
+        createId: () => 'session-restart'
+    })
+    const runner = new AgentRunner(manager, async (input) => {
+        return await new Promise<DelegateResult>((resolve) => {
+            input.signal?.addEventListener(
+                'abort',
+                () => resolve({ ...resultFixture(''), exitCode: 130 }),
+                { once: true }
+            )
+        })
+    })
+    const identity = {
+        userId: 'u1',
+        channelId: 'context:a2a-1',
+        platform: 'a2a'
+    }
+    const running = runner.run(identity, {
+        agent: 'hermes',
+        prompt: 'start',
+        sessionMode: 'managed'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(await runner.shutdown(1000, true), 1)
+    const outcome = await running
+    assert.equal(outcome.kind, 'waiting')
+    const session = await manager.get('session-restart')
+    assert.equal(session?.status, 'waiting_confirm')
+    assert.equal(session?.endedAt, undefined)
+    assert.match(session?.pendingAction?.prompt || '', /重启时中断/)
+})
+
 test('passive message handling ignores unrelated invalid selections', async () => {
     const manager = new SessionManager(new MemorySessionStorage(), {
         createId: () => 'session-1'

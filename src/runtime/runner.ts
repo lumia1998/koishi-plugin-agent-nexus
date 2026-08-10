@@ -49,10 +49,11 @@ export interface SessionInvocationContext {
 }
 
 type StoredExecution = Omit<DelegateInput, 'prompt' | 'signal'>
+type AgentAbortReason = SessionEndReason | 'restart'
 
 export class AgentRunner {
     private active = new Map<string, AbortController>()
-    private abortReasons = new Map<string, SessionEndReason>()
+    private abortReasons = new Map<string, AgentAbortReason>()
     private completions = new Map<
         string,
         { promise: Promise<void>; resolve: () => void }
@@ -285,10 +286,13 @@ export class AgentRunner {
         return cancelled
     }
 
-    async shutdown(timeoutMs = 5000) {
+    async shutdown(timeoutMs = 5000, preserveForRestart = false) {
         const controllers = Array.from(this.active.entries())
         for (const [sessionId, controller] of controllers) {
-            this.abortReasons.set(sessionId, 'cancelled')
+            this.abortReasons.set(
+                sessionId,
+                preserveForRestart ? 'restart' : 'cancelled'
+            )
             controller.abort()
         }
         const pending = controllers
@@ -454,6 +458,18 @@ export class AgentRunner {
 
             if (controller.signal.aborted || result.exitCode === 130) {
                 const reason = this.abortReasons.get(session.id) ?? 'cancelled'
+                if (reason === 'restart') {
+                    session = (await this.sessions.interrupt(session.id)) ?? session
+                    return {
+                        kind: 'waiting',
+                        session,
+                        result: { ...result, text: '' },
+                        reply: session.pendingAction
+                            ? formatPendingAction(session.pendingAction)
+                            : 'Agent task interrupted by restart and can be resumed.',
+                        created
+                    }
+                }
                 session = await this.sessions.archive(
                     markCancelled(session, reason),
                     reason === 'user_exit' ? 'completed' : 'failed',
@@ -537,6 +553,17 @@ export class AgentRunner {
         } catch (error) {
             if (controller.signal.aborted) {
                 const reason = this.abortReasons.get(session.id) ?? 'cancelled'
+                if (reason === 'restart') {
+                    session = (await this.sessions.interrupt(session.id)) ?? session
+                    return {
+                        kind: 'waiting',
+                        session,
+                        reply: session.pendingAction
+                            ? formatPendingAction(session.pendingAction)
+                            : 'Agent task interrupted by restart and can be resumed.',
+                        created
+                    }
+                }
                 session = await this.sessions.archive(
                     markCancelled(session, reason),
                     reason === 'user_exit' ? 'completed' : 'failed',

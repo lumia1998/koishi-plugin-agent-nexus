@@ -10,6 +10,8 @@ export type SshAuth =
     | { type: 'password'; password: string }
     | { type: 'key'; privateKey: string; passphrase?: string }
 
+export type SshHostKeyPolicy = 'strict' | 'accept-new' | 'insecure'
+
 export interface SshHostConfig {
     id: string
     name: string
@@ -17,6 +19,8 @@ export interface SshHostConfig {
     port: number
     username: string
     auth: SshAuth
+    hostKeyPolicy?: SshHostKeyPolicy
+    hostKeyFingerprint?: string
     enabled: boolean
     defaultAgent?: AgentKind | 'auto'
     cwd?: string

@@ -98,11 +98,11 @@
 </template>
 
 <script setup lang="ts">
-import 'xterm/css/xterm.css'
+import '@xterm/xterm/css/xterm.css'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage } from 'element-plus'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { NexusConfig, NexusStatus, SshHostConfig, TerminalInfo } from '../../src/types'
 

@@ -63,7 +63,8 @@ export async function latestAgentVersion(
 export function buildAgentMaintenancePlan(
     kind: AgentKind,
     installed: boolean,
-    executablePath?: string
+    executablePath?: string,
+    targetVersion?: string
 ): AgentMaintenancePlan {
     const action = installed ? 'update' : 'install'
     if (kind === 'hermes') {
@@ -85,11 +86,7 @@ export function buildAgentMaintenancePlan(
                       : 'Claude Code 内置更新器',
                   command: homebrew ?? `${quoteShell(executablePath)} update`
               }
-            : {
-                  action,
-                  method: 'Anthropic 官方安装器',
-                  command: officialInstaller('https://claude.ai/install.sh')
-              }
+            : npmInstallPlan(kind, action, targetVersion)
     }
     if (kind === 'opencode') {
         return installed && executablePath
@@ -98,23 +95,31 @@ export function buildAgentMaintenancePlan(
                   method: 'OpenCode 内置更新器',
                   command: `${quoteShell(executablePath)} upgrade`
               }
-            : {
-                  action,
-                  method: 'OpenCode 官方安装器',
-                  command: officialInstaller('https://opencode.ai/install')
-              }
+            : npmInstallPlan(kind, action, targetVersion)
     }
+    return npmInstallPlan(kind, action, targetVersion)
+}
+
+function npmInstallPlan(
+    kind: AgentKind,
+    action: AgentMaintenancePlan['action'],
+    targetVersion?: string
+): AgentMaintenancePlan {
     const packageName = npmPackages[kind]
     if (!packageName) throw new Error(`Unsupported agent maintenance: ${kind}`)
+    const version = normalizeAgentVersion(targetVersion)
+    if (!version) {
+        throw new Error(`Cannot determine the registry version for ${packageName}`)
+    }
     return {
         action,
-        method: `npm 用户级安装（${packageName}）`,
+        method: `npm 用户级安装（${packageName}@${version}）`,
         command: [
             'set -e',
             'command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 127; }',
             'mkdir -p "$HOME/.local"',
             `npm_config_prefix="$HOME/.local" npm install -g ${quoteShell(
-                `${packageName}@latest`
+                `${packageName}@${version}`
             )}`
         ].join('; ')
     }
@@ -215,7 +220,14 @@ async function fetchJsonVersion(
             headers: { 'user-agent': 'koishi-plugin-agent-nexus' }
         })
         if (!response.ok) throw new Error(`registry HTTP ${response.status}`)
-        const value = select(await response.json())
+        if (new URL(response.url).protocol !== 'https:') {
+            throw new Error('registry redirected to a non-HTTPS URL')
+        }
+        const raw = await response.text()
+        if (Buffer.byteLength(raw) > 1024 * 1024) {
+            throw new Error('registry response exceeds 1 MB')
+        }
+        const value = select(JSON.parse(raw))
         if (typeof value !== 'string' || !value.trim()) {
             throw new Error('registry response has no version')
         }
@@ -229,9 +241,12 @@ function officialInstaller(url: string) {
     return [
         'set -e',
         'command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 127; }',
+        'umask 077',
         'tmp=$(mktemp)',
         'trap \'rm -f "$tmp"\' EXIT',
-        `curl -fsSL ${quoteShell(url)} -o "$tmp"`,
+        `curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 ${quoteShell(url)} -o "$tmp"`,
+        '[ -s "$tmp" ] || { echo "installer download is empty" >&2; exit 1; }',
+        '[ "$(wc -c < "$tmp")" -le 2097152 ] || { echo "installer download exceeds 2 MB" >&2; exit 1; }',
         'bash "$tmp"'
     ].join('; ')
 }

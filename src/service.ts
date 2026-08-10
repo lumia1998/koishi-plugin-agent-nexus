@@ -48,7 +48,12 @@ import { NexusListSkillsTool } from './tools/list_skills'
 import { NexusA2AListTool } from './tools/a2a_list'
 import { NexusA2ASendTool } from './tools/a2a_send'
 import { NexusA2ATaskTool } from './tools/a2a_task'
+import { NexusA2ADelegateTool } from './tools/a2a_delegate'
 import { getErrorMessage } from './utils/shell'
+import {
+    moveCorruptFileAside,
+    writeTextFileAtomic
+} from './utils/atomic-file'
 import {
     buildRemoteRealpathCommand,
     isRemotePathWithinRoot
@@ -81,6 +86,16 @@ import {
 import { SftpFileManager } from './files/manager'
 import { A2AClientService, validateRemoteUrl } from './a2a/client'
 import {
+    A2ADelegationManager,
+    type A2ADelegateToolInput
+} from './a2a/delegation-manager'
+import {
+    A2ADelegationStore,
+    type A2ADelegationContext,
+    type A2ADelegationTask
+} from './a2a/delegation-store'
+import { notifyChatLunaA2ADelegation } from './a2a/chatluna-wakeup'
+import {
     buildAgentLatestVersionCommand,
     buildAgentMaintenancePlan,
     isVersionNewer,
@@ -110,7 +125,9 @@ export class AgentNexusService extends Service {
 
     private pool: SshSessionPool
     private proxy: NexusTerminalProxy
-    private a2aClient = new A2AClientService()
+    private a2aClient: A2AClientService
+    private a2aDelegationStore: A2ADelegationStore
+    private a2aDelegations: A2ADelegationManager
     private a2aRemoteStatus = new Map<string, A2ARemoteStatus>()
     private terminals = new Map<string, Map<string, ManagedTerminal>>()
     private agentCache = new Map<string, DetectedAgent[]>()
@@ -123,6 +140,7 @@ export class AgentNexusService extends Service {
     private summaryQueue = new Set<string>()
     private summaryDrain?: Promise<void>
     private summaryStopped = true
+    private hostKeyWriteQueue = Promise.resolve()
     private reconnecting = false
     private nexusConfig: NexusConfig
     private dataPath: string
@@ -138,9 +156,36 @@ export class AgentNexusService extends Service {
         private pluginConfig: Config
     ) {
         super(ctx, 'agent_nexus')
-        this.pool = new SshSessionPool(pluginConfig.maxOutputBytes)
+        this.pool = new SshSessionPool(
+            pluginConfig.maxOutputBytes,
+            (hostId, fingerprint) => this.rememberHostKey(hostId, fingerprint)
+        )
+        this.a2aClient = new A2AClientService(
+            pluginConfig.a2aMaxResponseBytes
+        )
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
         this.nexusConfig = createDefaultNexusConfig(pluginConfig)
+        this.a2aDelegationStore = new A2ADelegationStore(
+            path.join(this.dataPath, 'a2a-tasks.json')
+        )
+        this.a2aDelegations = new A2ADelegationManager(
+            this.a2aDelegationStore,
+            {
+                listRemotes: () => this.getA2AStatus().remotes,
+                resolveRemoteId: (reference) =>
+                    this.resolveA2ARemoteId(reference),
+                send: (remoteId, input) =>
+                    this.sendA2AMessage({ remoteId, ...input }),
+                get: (remoteId, taskId) =>
+                    this.getA2ATask(remoteId, taskId),
+                cancel: (remoteId, taskId) =>
+                    this.cancelA2ATask(remoteId, taskId),
+                discover: async (remoteId) => {
+                    await this.discoverA2ARemote(remoteId)
+                },
+                notify: (task) => this.notifyA2ADelegation(task)
+            }
+        )
         this.proxy = new NexusTerminalProxy(ctx, this)
         this.sessionStorage = new FileSessionStorage(
             path.join(this.dataPath, 'sessions.json')
@@ -174,6 +219,7 @@ export class AgentNexusService extends Service {
         })
         this.proxy.start()
         this.syncTools()
+        await this.a2aDelegations.start()
         void this.ensureEnabledConnections(true)
         this.reconnectTimer = setInterval(() => {
             void this.ensureEnabledConnections()
@@ -190,6 +236,7 @@ export class AgentNexusService extends Service {
 
     async stop() {
         this.summaryStopped = true
+        await this.a2aDelegations.stop()
         await this.agentRunner.shutdown()
         this.commandDispose?.()
         this.commandDispose = undefined
@@ -204,6 +251,7 @@ export class AgentNexusService extends Service {
         await this.closeAllTerminals()
         await this.pool.clear()
         await this.summaryDrain
+        await this.hostKeyWriteQueue
     }
 
     getConfig() {
@@ -329,6 +377,18 @@ export class AgentNexusService extends Service {
 
     async cancelA2ATask(remoteId: string, taskId: string) {
         return this.a2aClient.cancelTask(this.requireA2ARemote(remoteId), taskId)
+    }
+
+    handleA2ADelegate(
+        input: A2ADelegateToolInput,
+        context: A2ADelegationContext,
+        signal?: AbortSignal
+    ) {
+        return this.a2aDelegations.handle(input, context, signal)
+    }
+
+    private async notifyA2ADelegation(task: A2ADelegationTask) {
+        await notifyChatLunaA2ADelegation((this.ctx as any).chatluna, task)
     }
 
     resolveA2ARemoteId(reference: string) {
@@ -861,10 +921,12 @@ export class AgentNexusService extends Service {
                     .get(host.id)
                     ?.find((agent) => agent.kind === input.kind) ??
                 (await adapter.detect(session))
+            const latest = await latestAgentVersion(input.kind)
             const plan = buildAgentMaintenancePlan(
                 input.kind,
                 current.installed,
-                current.path
+                current.path,
+                latest.value
             )
             const result = await session.exec(plan.command, {
                 timeoutMs: 10 * 60 * 1000
@@ -1315,7 +1377,10 @@ export class AgentNexusService extends Service {
                 if (!isRemotePathWithinRoot(canonicalPath, publishRoot)) {
                     throw new Error(`File is outside the publish root: ${publishRoot}`)
                 }
-                const asset = await session.openAsset(canonicalPath)
+                const asset = await session.openAsset(
+                    canonicalPath,
+                    this.pluginConfig.maxPublishFileBytes
+                )
                 const file = await this.ctx.chatluna_storage.createTempFileFromStream(
                     asset.stream,
                     name,
@@ -1550,16 +1615,18 @@ export class AgentNexusService extends Service {
         if (!platform?.registerTool) return
 
         const tools = [
-            new NexusDelegateTool(this),
-            new NexusPublishTool(this),
-            new NexusListAgentsTool(this),
-            new NexusListSkillsTool(this),
-            new NexusA2AListTool(this),
-            new NexusA2ASendTool(this),
-            new NexusA2ATaskTool(this)
+            { tool: new NexusDelegateTool(this), debug: false },
+            { tool: new NexusPublishTool(this), debug: false },
+            { tool: new NexusListAgentsTool(this), debug: false },
+            { tool: new NexusListSkillsTool(this), debug: false },
+            { tool: new NexusA2ADelegateTool(this), debug: false },
+            { tool: new NexusA2AListTool(this), debug: true },
+            { tool: new NexusA2ASendTool(this), debug: true },
+            { tool: new NexusA2ATaskTool(this), debug: true }
         ]
 
-        for (const tool of tools) {
+        for (const entry of tools) {
+            const { tool, debug } = entry
             this.toolDispose.push(
                 platform.registerTool(tool.name, {
                     description: tool.description,
@@ -1568,11 +1635,13 @@ export class AgentNexusService extends Service {
                     meta: {
                         source: 'extension',
                         group: 'agent-nexus',
-                        tags: ['agent-nexus', 'ssh', 'computer'],
+                        tags: debug
+                            ? ['agent-nexus', 'a2a', 'debug']
+                            : ['agent-nexus', 'a2a', 'ssh', 'computer'],
                         defaultAvailability: {
-                            enabled: true,
-                            main: true,
-                            chatluna: true,
+                            enabled: !debug,
+                            main: !debug,
+                            chatluna: !debug,
                             characterScope: 'all'
                         }
                     }
@@ -1699,67 +1768,128 @@ export class AgentNexusService extends Service {
         const { readFile, mkdir } = await import('fs/promises')
         await mkdir(this.dataPath, { recursive: true })
         const file = path.join(this.dataPath, 'config.json')
+        let raw: string
         try {
-            const raw = await readFile(file, 'utf8')
-            const parsed = JSON.parse(raw) as NexusConfig
-            const defaults = createDefaultNexusConfig(this.pluginConfig)
-            const parsedA2A = (parsed.a2a || {}) as A2AConfig &
-                Record<string, unknown>
-            const legacyA2AServerConfig = [
-                'enabled',
-                'publicBaseUrl',
-                'serverToken',
-                'cardName',
-                'cardDescription'
-            ].some((key) => key in parsedA2A)
-            const missingBridge = (parsed.hosts || []).some((host) => !host.bridge)
-            const repaired = repairHostIds(
-                (parsed.hosts || []).map((host) => createHost(host))
-            )
-            const defaultHostId = repaired.hosts.some(
-                (host) => host.id === parsed.defaultHostId
-            )
-                ? parsed.defaultHostId
-                : repaired.hosts.find((host) => host.enabled)?.id || repaired.hosts[0]?.id
-            this.nexusConfig = {
-                ...defaults,
-                ...parsed,
-                agents: {
-                    ...defaults.agents,
-                    ...parsed.agents
-                },
-                runtime: {
-                    ...defaults.runtime,
-                    ...parsed.runtime
-                },
-                a2a: {
-                    remotes: parsedA2A.remotes || []
-                },
-                hosts: repaired.hosts,
-                skills: parsed.skills || [],
-                defaultHostId
+            raw = await readFile(file, 'utf8')
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+            this.nexusConfig = createDefaultNexusConfig(this.pluginConfig)
+            await this.writeConfigFile()
+            return
+        }
+
+        let parsed: NexusConfig
+        try {
+            const value = JSON.parse(raw) as unknown
+            if (!value || typeof value !== 'object' || Array.isArray(value)) {
+                throw new Error('AgentNexus config root must be an object')
+            }
+            const candidate = value as Partial<NexusConfig>
+            if (candidate.hosts !== undefined && !Array.isArray(candidate.hosts)) {
+                throw new Error('AgentNexus config hosts must be an array')
+            }
+            if (candidate.skills !== undefined && !Array.isArray(candidate.skills)) {
+                throw new Error('AgentNexus config skills must be an array')
             }
             if (
-                repaired.changed ||
-                defaultHostId !== parsed.defaultHostId ||
-                !parsed.a2a ||
-                legacyA2AServerConfig ||
-                parsed.agents?.pi === undefined ||
-                missingBridge
+                candidate.a2a !== undefined &&
+                (!candidate.a2a || typeof candidate.a2a !== 'object')
             ) {
-                await this.writeConfigFile()
+                throw new Error('AgentNexus config a2a must be an object')
             }
-        } catch {
+            for (const key of ['agents', 'runtime'] as const) {
+                const item = candidate[key]
+                if (
+                    item !== undefined &&
+                    (!item || typeof item !== 'object' || Array.isArray(item))
+                ) {
+                    throw new Error(`AgentNexus config ${key} must be an object`)
+                }
+            }
+            parsed = candidate as NexusConfig
+        } catch (error) {
+            const backupPath = await moveCorruptFileAside(file)
+            this.ctx.logger.error(
+                `[agent-nexus] invalid config moved to ${backupPath}: ${getErrorMessage(error)}`
+            )
             this.nexusConfig = createDefaultNexusConfig(this.pluginConfig)
+            await this.writeConfigFile()
+            return
+        }
+
+        const defaults = createDefaultNexusConfig(this.pluginConfig)
+        const parsedA2A = (parsed.a2a || {}) as A2AConfig &
+            Record<string, unknown>
+        const legacyA2AServerConfig = [
+            'enabled',
+            'publicBaseUrl',
+            'serverToken',
+            'cardName',
+            'cardDescription'
+        ].some((key) => key in parsedA2A)
+        const missingBridge = (parsed.hosts || []).some((host) => !host.bridge)
+        const missingHostKeyPolicy = (parsed.hosts || []).some(
+            (host) => !host.hostKeyPolicy
+        )
+        const repaired = repairHostIds(
+            (parsed.hosts || []).map((host) => createHost(host))
+        )
+        const defaultHostId = repaired.hosts.some(
+            (host) => host.id === parsed.defaultHostId
+        )
+            ? parsed.defaultHostId
+            : repaired.hosts.find((host) => host.enabled)?.id || repaired.hosts[0]?.id
+        this.nexusConfig = {
+            ...defaults,
+            ...parsed,
+            agents: {
+                ...defaults.agents,
+                ...parsed.agents
+            },
+            runtime: {
+                ...defaults.runtime,
+                ...parsed.runtime
+            },
+            a2a: {
+                remotes: parsedA2A.remotes || []
+            },
+            hosts: repaired.hosts,
+            skills: parsed.skills || [],
+            defaultHostId
+        }
+        if (
+            repaired.changed ||
+            defaultHostId !== parsed.defaultHostId ||
+            !parsed.a2a ||
+            legacyA2AServerConfig ||
+            parsed.agents?.pi === undefined ||
+            missingBridge ||
+            missingHostKeyPolicy
+        ) {
             await this.writeConfigFile()
         }
     }
 
     private async writeConfigFile() {
-        const { writeFile, mkdir } = await import('fs/promises')
-        await mkdir(this.dataPath, { recursive: true })
         const file = path.join(this.dataPath, 'config.json')
-        await writeFile(file, JSON.stringify(this.nexusConfig, null, 2), 'utf8')
+        await writeTextFileAtomic(
+            file,
+            `${JSON.stringify(this.nexusConfig, null, 2)}\n`
+        )
+    }
+
+    private rememberHostKey(hostId: string, fingerprint: string) {
+        const host = this.nexusConfig.hosts.find((item) => item.id === hostId)
+        if (!host) return
+        host.hostKeyFingerprint = fingerprint
+        const write = () => this.writeConfigFile()
+        this.hostKeyWriteQueue = this.hostKeyWriteQueue
+            .then(write, write)
+            .catch((error) => {
+                this.ctx.logger.warn(
+                    `[agent-nexus] failed to persist SSH host key: ${getErrorMessage(error)}`
+                )
+            })
     }
 }
 

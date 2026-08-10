@@ -26,13 +26,21 @@ export class BridgeRuntime implements NexusA2AExecutionService {
         detected: Awaited<ReturnType<typeof detectLocalAgents>>
     ) {
         this.detectedAgents = detected
-        this.artifacts = new BridgeArtifactRegistry(config.cwd, config.artifactTtlMs)
+        this.artifacts = new BridgeArtifactRegistry(
+            config.cwd,
+            config.artifactTtlMs,
+            config.maxArtifactBytes,
+            config.maxArtifacts
+        )
         this.sessionManager = new SessionManager(storage, {
             historyRetentionMs: config.sessionHistoryRetentionMs
         })
         const local = new LocalAgentExecutor(config, detected, this.artifacts)
         this.runner = new AgentRunner(this.sessionManager, (input) => local.execute(input))
-        this.a2aExecutor = new NexusA2AExecutor(this)
+        this.a2aExecutor = new NexusA2AExecutor(this, {
+            maxConcurrentTasks: config.maxConcurrentTasks,
+            maxTrackedTasks: config.maxTrackedTasks
+        })
     }
 
     static async create(config: BridgeConfig) {
@@ -56,12 +64,38 @@ export class BridgeRuntime implements NexusA2AExecutionService {
         )
     }
 
+    async runInContextSession(
+        identity: SessionIdentity,
+        input: DelegateInput,
+        context?: SessionInvocationContext
+    ): Promise<SessionRunOutcome> {
+        const resumed = await this.runner.resume(
+            identity,
+            input.prompt,
+            input.signal,
+            context
+        )
+        if (resumed.kind !== 'not_found') return resumed
+
+        const { prompt: _prompt, signal: _signal, ...execution } = input
+        await this.runner.startInteractive(
+            identity,
+            {
+                ...execution,
+                hostId: 'local',
+                sessionMode: 'managed'
+            },
+            this.config.sessionHistoryRetentionMs
+        )
+        return this.runner.resume(identity, input.prompt, input.signal, context)
+    }
+
     cancelSessions(identity: SessionIdentity) {
         return this.runner.cancel(identity)
     }
 
     async shutdown() {
-        await this.a2aExecutor.shutdown()
-        await this.runner.shutdown()
+        await this.runner.shutdown(5000, true)
+        await this.a2aExecutor.shutdown({ preserveForRestart: true })
     }
 }

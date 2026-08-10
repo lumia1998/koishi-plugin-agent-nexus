@@ -22,7 +22,9 @@ export class BridgeArtifactRegistry {
 
     constructor(
         private readonly root: string,
-        private readonly ttlMs: number
+        private readonly ttlMs: number,
+        private readonly maxBytes = 128 * 1024 * 1024,
+        private readonly maxItems = 256
     ) {}
 
     setPublicBaseUrl(value: string) {
@@ -38,6 +40,17 @@ export class BridgeArtifactRegistry {
         }
         const info = await stat(resolved)
         if (!info.isFile()) throw new Error(`Artifact is not a file: ${value}`)
+        if (info.size > this.maxBytes) {
+            throw new Error(
+                `Artifact exceeds size limit (${info.size} > ${this.maxBytes} bytes): ${value}`
+            )
+        }
+        this.cleanup()
+        while (this.items.size >= this.maxItems) {
+            const oldest = this.items.keys().next().value as string | undefined
+            if (!oldest) break
+            this.items.delete(oldest)
+        }
         const id = randomUUID()
         const item: BridgeArtifact = {
             id,
@@ -49,7 +62,6 @@ export class BridgeArtifactRegistry {
             expiresAt: Date.now() + this.ttlMs
         }
         this.items.set(id, item)
-        this.cleanup()
         return { ...item }
     }
 
@@ -65,13 +77,22 @@ export class BridgeArtifactRegistry {
         try {
             const info = await stat(item.path)
             if (!info.isFile()) return false
+            if (info.size > this.maxBytes) {
+                response.statusCode = 413
+                response.setHeader('Content-Type', 'application/json; charset=utf-8')
+                response.end(JSON.stringify({ error: 'Artifact exceeds size limit' }))
+                return true
+            }
             response.statusCode = 200
             response.setHeader('Content-Type', item.mediaType)
             response.setHeader('Content-Length', String(info.size))
             response.setHeader('Content-Disposition', contentDisposition(item.name))
             response.setHeader('Cache-Control', 'private, max-age=60')
             await new Promise<void>((resolve, reject) => {
-                const stream = createReadStream(item.path)
+                const stream = createReadStream(
+                    item.path,
+                    info.size > 0 ? { start: 0, end: info.size - 1 } : undefined
+                )
                 stream.once('error', reject)
                 response.once('close', resolve)
                 response.once('finish', resolve)

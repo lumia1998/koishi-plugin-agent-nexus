@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import os from 'os'
+import path from 'path'
 import {
     A2A_PROTOCOL_VERSION,
     A2A_VERSION_HEADER,
@@ -12,7 +13,6 @@ import {
 import {
     DefaultExecutionEventBusManager,
     DefaultRequestHandler,
-    InMemoryTaskStore,
     JsonRpcTransportHandler,
     UnauthenticatedUser,
     defaultServerCallContextBuilder,
@@ -27,6 +27,7 @@ import {
 import { resolveSecret } from '../utils/shell'
 import type { BridgeRuntime } from './runtime'
 import { BRIDGE_VERSION, type BridgeConfig } from './config'
+import { BoundedTaskStore } from './task-store'
 
 export const BRIDGE_A2A_PATH = '/a2a'
 export const BRIDGE_HEALTH_PATH = '/health'
@@ -35,7 +36,7 @@ export const BRIDGE_LEGACY_CARD_PATH = '/.well-known/agent.json'
 
 export class AgentNexusBridgeServer {
     private server?: Server
-    private readonly taskStore = new InMemoryTaskStore()
+    private readonly taskStore: BoundedTaskStore
     private readonly eventBusManager = new DefaultExecutionEventBusManager()
     private readonly card: AgentCard
     private readonly handler: DefaultRequestHandler
@@ -46,6 +47,10 @@ export class AgentNexusBridgeServer {
         private readonly config: BridgeConfig,
         private readonly runtime: BridgeRuntime
     ) {
+        this.taskStore = new BoundedTaskStore(
+            config.maxStoredTasks,
+            path.join(config.dataDir, 'a2a-tasks.json')
+        )
         this.card = buildBridgeCard(config, runtime)
         this.handler = new DefaultRequestHandler(
             this.card,
@@ -59,6 +64,7 @@ export class AgentNexusBridgeServer {
 
     async start() {
         if (this.server) return this.address()
+        await this.taskStore.init()
         this.server = createServer((request, response) => {
             void this.handle(request, response).catch((error) => {
                 if (response.headersSent || response.writableEnded) {
@@ -70,6 +76,10 @@ export class AgentNexusBridgeServer {
                 })
             })
         })
+        this.server.headersTimeout = 15_000
+        this.server.requestTimeout = 30_000
+        this.server.keepAliveTimeout = 5_000
+        this.server.maxHeadersCount = 100
         await new Promise<void>((resolve, reject) => {
             const server = this.server!
             const onError = (error: Error) => {
@@ -94,12 +104,16 @@ export class AgentNexusBridgeServer {
     async stop() {
         const server = this.server
         this.server = undefined
+        const closed = server
+            ? new Promise<void>((resolve, reject) => {
+                  server.close((error) => (error ? reject(error) : resolve()))
+              })
+            : Promise.resolve()
         await this.runtime.shutdown()
+        await this.taskStore.flush()
         if (!server) return
-        await new Promise<void>((resolve, reject) => {
-            server.close((error) => (error ? reject(error) : resolve()))
-            server.closeAllConnections?.()
-        })
+        server.closeAllConnections?.()
+        await closed
     }
 
     address() {
@@ -122,7 +136,8 @@ export class AgentNexusBridgeServer {
                 ok: true,
                 name: this.config.cardName,
                 version: BRIDGE_VERSION,
-                activeTasks: this.runtime.a2aExecutor.activeCount,
+                activeTasks: this.runtime.a2aExecutor.runningCount,
+                trackedTasks: this.runtime.a2aExecutor.activeCount,
                 endpointUrl: `${this.publicBaseUrl()}${BRIDGE_A2A_PATH}`,
                 agents: this.runtime.detectedAgents
             })

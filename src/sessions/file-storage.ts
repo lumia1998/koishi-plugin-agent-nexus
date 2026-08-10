@@ -1,7 +1,8 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises'
+import { mkdir, readFile } from 'fs/promises'
 import path from 'path'
 import type { SessionStorage } from './storage'
 import type { NexusSession } from './types'
+import { writeTextFileAtomic } from '../utils/atomic-file'
 
 interface SessionFile {
     schemaVersion: 1
@@ -97,42 +98,15 @@ export class FileSessionStorage implements SessionStorage {
                 schemaVersion: 1,
                 sessions: Array.from(this.sessions.values())
             }
-            const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`
-            try {
-                await writeFile(
-                    tempPath,
-                    `${JSON.stringify(payload, null, 2)}\n`,
-                    'utf8'
-                )
-                await renameWithRetry(tempPath, this.filePath)
-            } catch (error) {
-                await unlink(tempPath).catch(() => undefined)
-                throw error
-            }
+            await writeTextFileAtomic(
+                this.filePath,
+                `${JSON.stringify(payload, null, 2)}\n`
+            )
         }
         const next = this.writeQueue.then(write, write)
         this.writeQueue = next.catch(() => undefined)
         return next
     }
-}
-
-async function renameWithRetry(source: string, target: string) {
-    const delays = [0, 25, 75, 150]
-    let lastError: unknown
-    for (const delay of delays) {
-        if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
-        try {
-            await rename(source, target)
-            return
-        } catch (error) {
-            lastError = error
-            const code = (error as NodeJS.ErrnoException).code
-            if (!code || !['EPERM', 'EACCES', 'EBUSY'].includes(code)) {
-                throw error
-            }
-        }
-    }
-    throw lastError
 }
 
 function normalizeSession(session: NexusSession): NexusSession {

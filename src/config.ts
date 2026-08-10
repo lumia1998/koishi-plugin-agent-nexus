@@ -7,6 +7,7 @@ import type {
     SshHostConfig
 } from './types'
 import { normalizeSshBridgeConfig } from './utils/bridge-config'
+import { normalizeHostKeyPolicy } from './ssh/host-key'
 
 export const name = 'agent-nexus'
 
@@ -22,6 +23,8 @@ export interface Config {
     sessionSummaryModel: string
     sessionSummaryMaxInputChars: number
     maxOutputBytes: number
+    maxPublishFileBytes: number
+    a2aMaxResponseBytes: number
     fileManagerMaxUploadBytes: number
     fileManagerMaxPreviewBytes: number
     commandUsers: string[]
@@ -76,6 +79,16 @@ export const Config: Schema<Config> = Schema.object({
         .max(67108864)
         .default(4194304)
         .description('单次 SSH 命令 stdout/stderr 最大捕获字节数'),
+    maxPublishFileBytes: Schema.number()
+        .min(1048576)
+        .max(2147483648)
+        .default(128 * 1024 * 1024)
+        .description('Agent 自动回传单个文件的最大字节数'),
+    a2aMaxResponseBytes: Schema.number()
+        .min(1048576)
+        .max(268435456)
+        .default(32 * 1024 * 1024)
+        .description('单个 A2A HTTP/SSE 响应允许读取的最大字节数'),
     fileManagerMaxUploadBytes: Schema.number()
         .min(1048576)
         .max(268435456)
@@ -129,6 +142,8 @@ export function createHost(partial?: Partial<SshHostConfig>): SshHostConfig {
         port: partial?.port ?? 22,
         username: partial?.username ?? 'root',
         auth: partial?.auth ?? { type: 'password', password: '' },
+        hostKeyPolicy: normalizeHostKeyPolicy(partial?.hostKeyPolicy),
+        hostKeyFingerprint: partial?.hostKeyFingerprint?.trim() || undefined,
         enabled: partial?.enabled ?? true,
         defaultAgent: partial?.defaultAgent ?? 'auto',
         cwd: partial?.cwd,

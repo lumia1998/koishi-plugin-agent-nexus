@@ -46,19 +46,48 @@ export interface NexusA2AExecutionService {
         input: DelegateInput,
         context?: SessionInvocationContext
     ): Promise<SessionRunOutcome>
+    runInContextSession?(
+        identity: SessionIdentity,
+        input: DelegateInput,
+        context?: SessionInvocationContext
+    ): Promise<SessionRunOutcome>
     cancelSessions(identity: SessionIdentity): Promise<number>
+}
+
+export interface NexusA2AExecutorLimits {
+    maxConcurrentTasks?: number
+    maxTrackedTasks?: number
 }
 
 export class NexusA2AExecutor implements AgentExecutor {
     private taskContexts = new Map<string, TaskContext>()
     private cancelled = new Set<string>()
+    private restarting = new Set<string>()
     private executions = new Set<Promise<void>>()
     private shuttingDown = false
 
-    constructor(private readonly nexus: NexusA2AExecutionService) {}
+    private readonly maxConcurrentTasks: number
+    private readonly maxTrackedTasks: number
+
+    constructor(
+        private readonly nexus: NexusA2AExecutionService,
+        limits: NexusA2AExecutorLimits = {}
+    ) {
+        this.maxConcurrentTasks = Math.max(1, limits.maxConcurrentTasks || 2)
+        this.maxTrackedTasks = Math.max(
+            this.maxConcurrentTasks,
+            limits.maxTrackedTasks || 64
+        )
+    }
 
     get activeCount() {
         return this.taskContexts.size
+    }
+
+    get runningCount() {
+        return Array.from(this.taskContexts.values()).filter(
+            (context) => !context.waiting
+        ).length
     }
 
     async cancelTask(taskId: string, eventBus: ExecutionEventBus) {
@@ -74,10 +103,19 @@ export class NexusA2AExecutor implements AgentExecutor {
         }
     }
 
-    async shutdown() {
+    async shutdown(options: { preserveForRestart?: boolean } = {}) {
         this.shuttingDown = true
         const entries = Array.from(this.taskContexts.entries())
         try {
+            if (options.preserveForRestart) {
+                for (const [taskId, context] of entries) {
+                    if (context.waiting) continue
+                    this.restarting.add(taskId)
+                    context.controller.abort()
+                }
+                await Promise.allSettled(Array.from(this.executions))
+                return
+            }
             await Promise.all(
                 entries.map(async ([taskId, context]) => {
                     this.cancelled.add(taskId)
@@ -96,6 +134,7 @@ export class NexusA2AExecutor implements AgentExecutor {
         } finally {
             this.taskContexts.clear()
             this.cancelled.clear()
+            this.restarting.clear()
             this.shuttingDown = false
         }
     }
@@ -159,6 +198,26 @@ export class NexusA2AExecutor implements AgentExecutor {
             )
             return
         }
+        if (!previous && this.taskContexts.size >= this.maxTrackedTasks) {
+            this.publishStatus(
+                eventBus,
+                taskId,
+                contextId,
+                TaskState.TASK_STATE_FAILED,
+                'AgentNexus task tracking limit reached.'
+            )
+            return
+        }
+        if (this.runningCount >= this.maxConcurrentTasks) {
+            this.publishStatus(
+                eventBus,
+                taskId,
+                contextId,
+                TaskState.TASK_STATE_FAILED,
+                'AgentNexus concurrent task limit reached.'
+            )
+            return
+        }
         this.publishStatus(eventBus, taskId, contextId, TaskState.TASK_STATE_WORKING)
 
         const metadata = {
@@ -196,11 +255,17 @@ export class NexusA2AExecutor implements AgentExecutor {
             }
             if (!input.prompt.trim()) throw new Error('A2A 消息中没有文本内容。')
 
-            const outcome = await this.nexus.runInSession(
-                identity,
-                input,
-                { requestId: userMessage.messageId }
-            )
+            const run =
+                this.nexus.runInContextSession?.bind(this.nexus) ??
+                this.nexus.runInSession.bind(this.nexus)
+            const outcome = await run(identity, input, {
+                requestId: userMessage.messageId
+            })
+            if (this.restarting.has(taskId)) {
+                taskContext.waiting = true
+                this.publishRestartRequired(eventBus, taskId, contextId)
+                return
+            }
             if (this.cancelled.has(taskId) || outcome.kind === 'cancelled') {
                 this.publishCancelled(eventBus, taskId, contextId, taskContext)
                 return
@@ -219,6 +284,17 @@ export class NexusA2AExecutor implements AgentExecutor {
                 )
                 return
             }
+            if (outcome.kind === 'invalid_input') {
+                taskContext.waiting = true
+                this.publishStatus(
+                    eventBus,
+                    taskId,
+                    contextId,
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
+                    outcome.reply || 'The remote agent still requires valid input.'
+                )
+                return
+            }
             if (outcome.kind !== 'completed') {
                 this.publishStatus(
                     eventBus,
@@ -231,7 +307,10 @@ export class NexusA2AExecutor implements AgentExecutor {
             }
             this.publishStatus(eventBus, taskId, contextId, TaskState.TASK_STATE_COMPLETED)
         } catch (error) {
-            if (this.cancelled.has(taskId) || controller.signal.aborted) {
+            if (this.restarting.has(taskId)) {
+                taskContext.waiting = true
+                this.publishRestartRequired(eventBus, taskId, contextId)
+            } else if (this.cancelled.has(taskId) || controller.signal.aborted) {
                 this.publishCancelled(eventBus, taskId, contextId, taskContext)
             } else {
                 this.publishStatus(
@@ -261,11 +340,25 @@ export class NexusA2AExecutor implements AgentExecutor {
         this.publishStatus(eventBus, taskId, contextId, TaskState.TASK_STATE_CANCELED)
     }
 
+    private publishRestartRequired(
+        eventBus: ExecutionEventBus,
+        taskId: string,
+        contextId: string
+    ) {
+        this.publishStatus(
+            eventBus,
+            taskId,
+            contextId,
+            TaskState.TASK_STATE_INPUT_REQUIRED,
+            'AgentNexus Bridge restarted while this task was running. Send a follow-up message to retry/resume it, or cancel the task.'
+        )
+    }
+
     private identityFor(requestContext: RequestContext): SessionIdentity {
         const username = requestContext.context.user?.userName || 'anonymous'
         return {
             userId: `a2a:${username}`,
-            channelId: `task:${requestContext.taskId}`,
+            channelId: `context:${requestContext.contextId}`,
             platform: 'a2a',
             selfId: 'agent-nexus'
         }

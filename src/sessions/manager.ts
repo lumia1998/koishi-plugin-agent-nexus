@@ -377,16 +377,7 @@ export class SessionManager {
         for (let session of await this.storage.list()) {
             if (session.endedAt) continue
             if (session.status === 'running') {
-                session.status = 'waiting_confirm'
-                session.pendingAction = {
-                    type: 'confirm',
-                    prompt: '任务在 AgentNexus 重启时中断，无法确认远端副作用是否已发生。回复“确认”或“继续”将根据已保存状态重新执行；回复“取消”终止任务。',
-                    data: { interruptedAt: this.now() }
-                }
-                session.data = {
-                    ...(session.data ?? {}),
-                    interruptedAt: this.now()
-                }
+                session = markInterrupted(session, this.now())
                 session = await this.update(session)
             }
             if (
@@ -397,6 +388,18 @@ export class SessionManager {
             }
         }
         return recovered.sort((a, b) => b.updatedAt - a.updatedAt)
+    }
+
+    async interrupt(id: string) {
+        return this.withLock(`session:${id}`, async () => {
+            const current = await this.storage.get(id)
+            if (!current || current.endedAt || current.status !== 'running') {
+                return current
+            }
+            const next = this.prepareUpdate(markInterrupted(current, this.now()))
+            await this.storage.update(next)
+            return next
+        })
     }
 
     private async archiveIfExpired(session: NexusSession) {
@@ -467,6 +470,21 @@ export class SessionManager {
             if (this.locks.get(key) === queued) this.locks.delete(key)
         }
     }
+}
+
+function markInterrupted(session: NexusSession, now: number) {
+    const next = structuredClone(session)
+    next.status = 'waiting_confirm'
+    next.pendingAction = {
+        type: 'confirm',
+        prompt: '任务在 AgentNexus 重启时中断，无法确认远端副作用是否已发生。回复“确认”或“继续”将根据已保存状态重新执行；回复“取消”终止任务。',
+        data: { interruptedAt: now }
+    }
+    next.data = {
+        ...(next.data ?? {}),
+        interruptedAt: now
+    }
+    return next
 }
 
 function historyItem(session: NexusSession): SessionHistoryItem {

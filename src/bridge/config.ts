@@ -27,6 +27,11 @@ export interface BridgeConfig {
     defaultTimeoutMs: number
     maxOutputBytes: number
     maxRequestBytes: number
+    maxArtifactBytes: number
+    maxArtifacts: number
+    maxConcurrentTasks: number
+    maxTrackedTasks: number
+    maxStoredTasks: number
     artifactTtlMs: number
     sessionHistoryRetentionMs: number
     cardName: string
@@ -79,6 +84,16 @@ export function normalizeBridgeConfig(input: BridgeConfigInput = {}): BridgeConf
     const dataDir = path.resolve(
         expandHome(stringValue(input.dataDir) || '~/.agent-nexus/bridge')
     )
+    const maxConcurrentTasks = boundedInteger(
+        input.maxConcurrentTasks,
+        2,
+        1,
+        32
+    )
+    const maxTrackedTasks = Math.max(
+        maxConcurrentTasks,
+        boundedInteger(input.maxTrackedTasks, 64, 1, 4096)
+    )
     return {
         host: stringValue(input.host) || '127.0.0.1',
         port: portNumber(input.port, 8787),
@@ -100,12 +115,39 @@ export function normalizeBridgeConfig(input: BridgeConfigInput = {}): BridgeConf
             )
         },
         defaultTimeoutMs,
-        maxOutputBytes: positiveInteger(input.maxOutputBytes, 4 * 1024 * 1024),
-        maxRequestBytes: positiveInteger(input.maxRequestBytes, 2 * 1024 * 1024),
-        artifactTtlMs: positiveInteger(input.artifactTtlMs, 60 * 60 * 1000),
-        sessionHistoryRetentionMs: positiveInteger(
+        maxOutputBytes: boundedInteger(
+            input.maxOutputBytes,
+            4 * 1024 * 1024,
+            64 * 1024,
+            64 * 1024 * 1024
+        ),
+        maxRequestBytes: boundedInteger(
+            input.maxRequestBytes,
+            2 * 1024 * 1024,
+            1024,
+            16 * 1024 * 1024
+        ),
+        maxArtifactBytes: boundedInteger(
+            input.maxArtifactBytes,
+            128 * 1024 * 1024,
+            1024 * 1024,
+            2 * 1024 * 1024 * 1024
+        ),
+        maxArtifacts: boundedInteger(input.maxArtifacts, 256, 1, 4096),
+        maxConcurrentTasks,
+        maxTrackedTasks,
+        maxStoredTasks: boundedInteger(input.maxStoredTasks, 256, 1, 4096),
+        artifactTtlMs: boundedInteger(
+            input.artifactTtlMs,
+            60 * 60 * 1000,
+            60 * 1000,
+            24 * 60 * 60 * 1000
+        ),
+        sessionHistoryRetentionMs: boundedInteger(
             input.sessionHistoryRetentionMs,
-            30 * 24 * 60 * 60 * 1000
+            30 * 24 * 60 * 60 * 1000,
+            24 * 60 * 60 * 1000,
+            365 * 24 * 60 * 60 * 1000
         ),
         cardName: stringValue(input.cardName) || 'AgentNexus Bridge',
         cardDescription:
@@ -128,6 +170,13 @@ Options:
   --agents <list>             Comma-separated agents or "all"
   --timeout-ms <number>       Default task timeout
   --max-output-bytes <number> Maximum captured stdout/stderr bytes
+  --max-request-bytes <number> Maximum JSON-RPC request bytes
+  --max-artifact-bytes <n>    Maximum bytes per published artifact
+  --max-artifacts <number>    Maximum live artifact links
+  --max-concurrent <number>   Maximum running agent tasks
+  --max-tracked <number>      Maximum running or waiting tasks
+  --max-stored <number>       Maximum retained A2A task records
+  --artifact-ttl-ms <number>  Artifact link lifetime
   --help                      Show this help
   --version                   Show the bridge version
 
@@ -154,6 +203,11 @@ function environmentConfig(env: NodeJS.ProcessEnv): BridgeConfigInput {
     setNumber(result, 'defaultTimeoutMs', env.AGENT_NEXUS_BRIDGE_TIMEOUT_MS)
     setNumber(result, 'maxOutputBytes', env.AGENT_NEXUS_BRIDGE_MAX_OUTPUT_BYTES)
     setNumber(result, 'maxRequestBytes', env.AGENT_NEXUS_BRIDGE_MAX_REQUEST_BYTES)
+    setNumber(result, 'maxArtifactBytes', env.AGENT_NEXUS_BRIDGE_MAX_ARTIFACT_BYTES)
+    setNumber(result, 'maxArtifacts', env.AGENT_NEXUS_BRIDGE_MAX_ARTIFACTS)
+    setNumber(result, 'maxConcurrentTasks', env.AGENT_NEXUS_BRIDGE_MAX_CONCURRENT_TASKS)
+    setNumber(result, 'maxTrackedTasks', env.AGENT_NEXUS_BRIDGE_MAX_TRACKED_TASKS)
+    setNumber(result, 'maxStoredTasks', env.AGENT_NEXUS_BRIDGE_MAX_STORED_TASKS)
     setNumber(result, 'artifactTtlMs', env.AGENT_NEXUS_BRIDGE_ARTIFACT_TTL_MS)
     setNumber(
         result,
@@ -199,6 +253,13 @@ function parseArgs(argv: string[]) {
         else if (flag === '--agents') values.agents = take()
         else if (flag === '--timeout-ms') values.defaultTimeoutMs = Number(take())
         else if (flag === '--max-output-bytes') values.maxOutputBytes = Number(take())
+        else if (flag === '--max-request-bytes') values.maxRequestBytes = Number(take())
+        else if (flag === '--max-artifact-bytes') values.maxArtifactBytes = Number(take())
+        else if (flag === '--max-artifacts') values.maxArtifacts = Number(take())
+        else if (flag === '--max-concurrent') values.maxConcurrentTasks = Number(take())
+        else if (flag === '--max-tracked') values.maxTrackedTasks = Number(take())
+        else if (flag === '--max-stored') values.maxStoredTasks = Number(take())
+        else if (flag === '--artifact-ttl-ms') values.artifactTtlMs = Number(take())
         else throw new Error(`Unknown bridge option: ${argument}`)
     }
     return { values, configPath, help, version }
@@ -259,6 +320,16 @@ function optionalHttpUrl(value: unknown) {
 function positiveInteger(value: unknown, fallback: number) {
     const number = Number(value)
     return Number.isSafeInteger(number) && number > 0 ? number : fallback
+}
+
+function boundedInteger(
+    value: unknown,
+    fallback: number,
+    minimum: number,
+    maximum: number
+) {
+    const number = positiveInteger(value, fallback)
+    return Math.min(maximum, Math.max(minimum, number))
 }
 
 function portNumber(value: unknown, fallback: number) {

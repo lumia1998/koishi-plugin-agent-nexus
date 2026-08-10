@@ -9,7 +9,13 @@ export class SshSessionPool {
     private idleTimer?: NodeJS.Timeout
     private cleaning = false
 
-    constructor(private readonly maxOutputBytes = 4 * 1024 * 1024) {}
+    constructor(
+        private readonly maxOutputBytes = 4 * 1024 * 1024,
+        private readonly onHostKeyLearned?: (
+            hostId: string,
+            fingerprint: string
+        ) => void
+    ) {}
 
     startIdleCleanup(getTimeout: (hostId: string) => number) {
         this.stopIdleCleanup()
@@ -71,7 +77,11 @@ export class SshSessionPool {
                 await current.disconnect().catch(() => undefined)
                 this.sessions.delete(key)
             }
-            const session = new SshSession(host, this.maxOutputBytes)
+            const session = new SshSession(
+                host,
+                this.maxOutputBytes,
+                this.onHostKeyLearned
+            )
             this.sessions.set(key, session)
             try {
                 await session.connect()

@@ -12,6 +12,7 @@ import path from 'path'
 import type { ExecResult, SshHostConfig } from '../types'
 import { resolveSecret } from '../utils/shell'
 import { mimeType } from '../utils/mime'
+import { normalizeHostKeyPolicy, verifySshHostKey } from './host-key'
 
 export interface TerminalHandle {
     id: string
@@ -51,7 +52,11 @@ export class SshSession {
 
     constructor(
         public readonly host: SshHostConfig,
-        private readonly maxOutputBytes = 4 * 1024 * 1024
+        private readonly maxOutputBytes = 4 * 1024 * 1024,
+        private readonly onHostKeyLearned?: (
+            hostId: string,
+            fingerprint: string
+        ) => void
     ) {
         this.hostId = host.id
         this.home = defaultRemoteHome(host.username)
@@ -112,12 +117,36 @@ export class SshSession {
             const cancel = (error: Error) => reject(error)
             this.cancelConnecting = cancel
             const auth = this.host.auth
+            let hostVerificationError: string | undefined
+            const hostKeyPolicy = normalizeHostKeyPolicy(
+                this.host.hostKeyPolicy
+            )
             const config: Record<string, unknown> = {
                 host: this.host.host,
                 port: this.host.port || 22,
                 username: this.host.username,
                 readyTimeout: 20000,
-                keepaliveInterval: 15000
+                keepaliveInterval: 15000,
+                hostHash: 'sha256',
+                hostVerifier: (hashedKey: string) => {
+                    const verification = verifySshHostKey(
+                        hashedKey,
+                        this.host.hostKeyFingerprint,
+                        hostKeyPolicy
+                    )
+                    hostVerificationError = verification.error
+                    if (verification.learned && verification.fingerprint) {
+                        this.host.hostKeyPolicy = hostKeyPolicy
+                        this.host.hostKeyFingerprint = verification.fingerprint
+                        try {
+                            this.onHostKeyLearned?.(
+                                this.host.id,
+                                verification.fingerprint
+                            )
+                        } catch {}
+                    }
+                    return verification.accepted
+                }
             }
 
             if (auth.type === 'password') {
@@ -170,8 +199,11 @@ export class SshSession {
                     this.connected = false
                     this.sftp = undefined
                     this.sftpConnecting = undefined
-                    this.lastError = err.message
-                    reject(err)
+                    const connectionError = hostVerificationError
+                        ? new Error(hostVerificationError)
+                        : err
+                    this.lastError = connectionError.message
+                    reject(connectionError)
                 })
                 .on('end', () => {
                     if (!isCurrent()) return
@@ -581,13 +613,19 @@ export class SshSession {
         }
     }
 
-    async openAsset(remotePath: string): Promise<{
+    async openAsset(remotePath: string, maxBytes?: number): Promise<{
         stream: Readable
         size?: number
         mimeType?: string
     }> {
         const sftp = await this.getSftp()
         const stat = await this.stat(remotePath)
+        if (!stat.isFile()) throw new Error(`Asset is not a regular file: ${remotePath}`)
+        if (maxBytes && stat.size > maxBytes) {
+            throw new Error(
+                `Asset exceeds publish limit (${stat.size} > ${maxBytes} bytes): ${remotePath}`
+            )
+        }
         const stream = sftp.createReadStream(remotePath)
         this.activeOperations += 1
         this.touch()

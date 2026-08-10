@@ -86,11 +86,11 @@
                                 @click="discover(remote)"
                             />
                         </el-tooltip>
-                        <el-tooltip content="发送任务" placement="top">
+                        <el-tooltip content="协议调试：手动发送任务" placement="top">
                             <el-button
                                 circle
                                 size="small"
-                                type="primary"
+                                plain
                                 :icon="Promotion"
                                 :disabled="!remote.enabled"
                                 @click="openTask(remote)"
@@ -173,11 +173,17 @@
 
         <el-dialog
             v-model="taskDialog"
-            :title="`A2A · ${taskRemote?.name || ''}`"
+            :title="`A2A 协议调试 · ${taskRemote?.name || ''}`"
             width="min(760px, 94vw)"
             destroy-on-close
         >
             <div class="task-form">
+                <el-alert
+                    type="info"
+                    :closable="false"
+                    show-icon
+                    title="日常委托由 ChatLuna 调用 nexus_a2a_delegate；此处仅用于协议联调和故障排查。"
+                />
                 <el-input
                     v-model="taskForm.text"
                     type="textarea"

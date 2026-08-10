@@ -35,6 +35,8 @@ export interface A2ASendInput {
 }
 
 export class A2AClientService {
+    constructor(private readonly maxResponseBytes = 32 * 1024 * 1024) {}
+
     async discover(remote: A2ARemoteConfig) {
         const { card } = await this.resolve(remote)
         return cardToSummary(card)
@@ -111,8 +113,16 @@ export class A2AClientService {
 
     private async resolve(remote: A2ARemoteConfig, transportTimeoutMs = 30_000) {
         const baseUrl = validateRemoteUrl(remote.baseUrl)
-        const resolverFetch = createRemoteFetch(remote.authToken, 30_000)
-        const transportFetch = createRemoteFetch(remote.authToken, transportTimeoutMs)
+        const resolverFetch = createRemoteFetch(
+            remote.authToken,
+            30_000,
+            this.maxResponseBytes
+        )
+        const transportFetch = createRemoteFetch(
+            remote.authToken,
+            transportTimeoutMs,
+            this.maxResponseBytes
+        )
         const resolver = new DefaultAgentCardResolver({
             fetchImpl: resolverFetch,
             legacyCompat: { enabled: true }
@@ -293,7 +303,11 @@ function partView(
     return common
 }
 
-function createRemoteFetch(token?: string, timeoutMs = 30_000) {
+function createRemoteFetch(
+    token?: string,
+    timeoutMs = 30_000,
+    maxResponseBytes = 32 * 1024 * 1024
+) {
     const secret = token?.trim() ? resolveSecret(token) : ''
     return async (input: Parameters<typeof fetch>[0], init: RequestInit = {}) => {
         const headers = new Headers(init.headers)
@@ -306,17 +320,91 @@ function createRemoteFetch(token?: string, timeoutMs = 30_000) {
         const onAbort = () => controller.abort()
         if (init.signal?.aborted) controller.abort()
         else init.signal?.addEventListener('abort', onAbort, { once: true })
+        let cleaned = false
+        const cleanup = () => {
+            if (cleaned) return
+            cleaned = true
+            clearTimeout(timer)
+            init.signal?.removeEventListener('abort', onAbort)
+        }
         try {
-            return await fetch(input, {
+            const response = await fetch(input, {
                 ...init,
                 headers,
                 signal: controller.signal
             })
-        } finally {
-            clearTimeout(timer)
-            init.signal?.removeEventListener('abort', onAbort)
+            return limitResponseBody(response, maxResponseBytes, cleanup)
+        } catch (error) {
+            cleanup()
+            throw error
         }
     }
+}
+
+export function limitResponseBody(
+    response: Response,
+    maxBytes: number,
+    onDone: () => void = () => undefined
+) {
+    let finished = false
+    const done = () => {
+        if (finished) return
+        finished = true
+        onDone()
+    }
+    const limit = Math.max(1, Math.floor(maxBytes))
+    const declared = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > limit) {
+        void response.body?.cancel().catch(() => undefined)
+        done()
+        throw new Error(`A2A response exceeds ${limit} bytes`)
+    }
+    if (!response.body) {
+        done()
+        return response
+    }
+
+    const reader = response.body.getReader()
+    let received = 0
+    const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            try {
+                const chunk = await reader.read()
+                if (chunk.done) {
+                    done()
+                    controller.close()
+                    return
+                }
+                received += chunk.value.byteLength
+                if (received > limit) {
+                    const error = new Error(`A2A response exceeds ${limit} bytes`)
+                    await reader.cancel(error).catch(() => undefined)
+                    done()
+                    controller.error(error)
+                    return
+                }
+                controller.enqueue(chunk.value)
+            } catch (error) {
+                done()
+                controller.error(error)
+            }
+        },
+        cancel(reason) {
+            done()
+            return reader.cancel(reason)
+        }
+    })
+    const limited = new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+    })
+    Object.defineProperties(limited, {
+        url: { value: response.url },
+        redirected: { value: response.redirected },
+        type: { value: response.type }
+    })
+    return limited
 }
 
 function latestAgentMessageText(history: Message[]) {

@@ -106,6 +106,22 @@
                     </div>
                 </template>
                 <div class="field">
+                    <div class="field-label">SSH 主机密钥</div>
+                    <el-select v-model="hostKeyPolicy">
+                        <el-option label="首次信任并固定" value="accept-new" />
+                        <el-option label="严格校验" value="strict" />
+                        <el-option label="不校验（不推荐）" value="insecure" />
+                    </el-select>
+                </div>
+                <div class="field key-field">
+                    <div class="field-label">SHA-256 指纹</div>
+                    <el-input
+                        v-model="hostKeyFingerprint"
+                        clearable
+                        placeholder="SHA256:...；首次信任模式可留空"
+                    />
+                </div>
+                <div class="field">
                     <div class="field-label">工作目录</div>
                     <el-input v-model="cwd" placeholder="可选，如 ~/projects" clearable />
                 </div>
@@ -225,6 +241,7 @@ import type {
     NexusConfig,
     NexusStatus,
     SshAuth,
+    SshHostKeyPolicy,
     SshHostConfig
 } from '../../src/types'
 
@@ -235,6 +252,8 @@ export type ComputerConnectInput = {
     port: number
     username: string
     auth?: SshAuth
+    hostKeyPolicy: SshHostKeyPolicy
+    hostKeyFingerprint?: string
     cwd?: string
     setAsDefault?: boolean
 }
@@ -275,6 +294,8 @@ const username = ref('root')
 const password = ref('')
 const privateKey = ref('')
 const passphrase = ref('')
+const hostKeyPolicy = ref<SshHostKeyPolicy>('accept-new')
+const hostKeyFingerprint = ref('')
 const cwd = ref('')
 const authType = ref<'password' | 'key'>('password')
 const asDefault = ref(false)
@@ -310,6 +331,8 @@ watch(
         password.value = ''
         privateKey.value = ''
         passphrase.value = ''
+        hostKeyPolicy.value = value?.hostKeyPolicy || 'accept-new'
+        hostKeyFingerprint.value = value?.hostKeyFingerprint || ''
         asDefault.value = !!id && id === props.config.defaultHostId
     },
     { immediate: true }
@@ -392,6 +415,8 @@ function addComputer() {
     password.value = ''
     privateKey.value = ''
     passphrase.value = ''
+    hostKeyPolicy.value = 'accept-new'
+    hostKeyFingerprint.value = ''
     cwd.value = ''
     authType.value = 'password'
     asDefault.value = props.config.hosts.length === 0
@@ -443,6 +468,10 @@ function connect() {
             return
         }
     }
+    if (hostKeyPolicy.value === 'strict' && !hostKeyFingerprint.value.trim()) {
+        ElMessage.warning('严格校验需要填写 SSH SHA-256 主机指纹')
+        return
+    }
 
     let auth: SshAuth | undefined
     if (authType.value === 'password') {
@@ -467,6 +496,8 @@ function connect() {
             port: port.value || 22,
             username: username.value.trim(),
             auth,
+            hostKeyPolicy: hostKeyPolicy.value,
+            hostKeyFingerprint: hostKeyFingerprint.value.trim() || undefined,
             cwd: cwd.value.trim() || undefined,
             setAsDefault: asDefault.value
         },

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { FileSessionStorage } from '../src/sessions/file-storage.ts'
@@ -11,6 +11,24 @@ import {
     fallbackSummary,
     parseModelSummary
 } from '../src/sessions/summary.ts'
+import {
+    moveCorruptFileAside,
+    writeTextFileAtomic
+} from '../src/utils/atomic-file.ts'
+
+test('atomically replaces JSON files and preserves corrupt originals', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'agent-nexus-atomic-'))
+    const file = path.join(directory, 'config.json')
+    try {
+        await writeTextFileAtomic(file, '{"ok":true}\n')
+        assert.equal(await readFile(file, 'utf8'), '{"ok":true}\n')
+        await writeFile(file, '{broken', 'utf8')
+        const backup = await moveCorruptFileAside(file)
+        assert.equal(await readFile(backup, 'utf8'), '{broken')
+    } finally {
+        await rm(directory, { recursive: true, force: true })
+    }
+})
 
 test('archives idle sessions and purges them after history retention', async () => {
     let now = 1_000
