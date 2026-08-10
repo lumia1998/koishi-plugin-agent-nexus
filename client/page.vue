@@ -9,7 +9,7 @@
                     </el-tag>
                 </div>
                 <div class="subtitle">
-                    SSH Code Agent 网关 · 扫描远端 Agent · SFTP 文件管理 · 终端调试
+                    SSH Agent 管理 · A2A Client · 远端委托 · Skills · 文件与终端
                 </div>
             </div>
             <div class="actions">
@@ -67,6 +67,12 @@
                 @sync="syncSkill"
                 @refresh="refreshSkills"
             />
+            <a2a-panel
+                v-show="active === 'a2a'"
+                :config="config"
+                :status="status"
+                @updated="applyConsoleData"
+            />
             <file-manager-panel
                 v-show="active === 'files'"
                 :config="config"
@@ -97,10 +103,12 @@ import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
 import FileManagerPanel from './components/file-manager-panel.vue'
 import SessionsPanel from './components/sessions-panel.vue'
+import A2aPanel from './components/a2a-panel.vue'
 import type {
     AgentKind,
     AgentMaintenanceInput,
     NexusConfig,
+    NexusConsoleData,
     NexusStatus,
     SshAuth
 } from '../src/types'
@@ -116,9 +124,10 @@ type ComputerConnectInput = {
     setAsDefault?: boolean
 }
 
-const tabs = ['computer', 'skills', 'files', 'sessions', 'terminal'] as const
+const tabs = ['computer', 'a2a', 'skills', 'files', 'sessions', 'terminal'] as const
 const tabLabel = {
     computer: 'Computer',
+    a2a: 'A2A',
     skills: 'Skills',
     files: '文件',
     sessions: '会话',
@@ -137,7 +146,8 @@ const config = ref<NexusConfig>({
         openclaw: true,
         claude: true,
         opencode: true,
-        codex: true
+        codex: true,
+        pi: true
     },
     runtime: {
         openclawAgent: 'default',
@@ -147,13 +157,19 @@ const config = ref<NexusConfig>({
         defaultTimeoutMs: 600000
     },
     skills: [],
-    skillRoot: '~/.agent-nexus/skills'
+    skillRoot: '~/.agent-nexus/skills',
+    a2a: {
+        remotes: []
+    }
 })
 const status = ref<NexusStatus>({
     enabled: false,
     hosts: [],
     skills: { total: 0, items: [] },
-    activeSessions: 0
+    activeSessions: 0,
+    a2a: {
+        remotes: []
+    }
 })
 
 const overview = computed(() => {
@@ -187,12 +203,14 @@ async function reload(scan = false) {
         config.value = data.config
         status.value = data.status
         if (scan && data.config.hosts.some((host) => host.enabled)) {
-            status.value = await send('agent-nexus/scanAgents')
+            const scanned = await send('agent-nexus/scanAgents')
+            if (generation !== statusGeneration) return
+            status.value = scanned
         }
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
     } finally {
-        loading.value = false
+        if (generation === statusGeneration) loading.value = false
     }
 }
 
@@ -240,7 +258,6 @@ async function connectComputer(input: ComputerConnectInput, done: (hostId: strin
         if (input.id) payload.id = input.id
         if (input.cwd !== undefined) payload.cwd = input.cwd
         if (input.auth) payload.auth = input.auth as SshAuth
-
         const result = await send('agent-nexus/saveHost', payload as any)
         config.value = result.data.config
         status.value = result.data.status
@@ -308,7 +325,8 @@ async function maintainAgent(input: AgentMaintenanceInput) {
         openclaw: 'OpenClaw',
         claude: 'Claude Code',
         opencode: 'OpenCode',
-        codex: 'Codex'
+        codex: 'Codex',
+        pi: 'Pi'
     }
     try {
         await ElMessageBox.confirm(
@@ -368,6 +386,12 @@ async function refreshSkills(hostId?: string) {
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
     }
+}
+
+function applyConsoleData(data: NexusConsoleData) {
+    statusGeneration += 1
+    config.value = data.config
+    status.value = data.status
 }
 
 onMounted(async () => {

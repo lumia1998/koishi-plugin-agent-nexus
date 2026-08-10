@@ -1,7 +1,8 @@
 # koishi-plugin-agent-nexus
 
-AgentNexus 是面向 ChatLuna 的 SSH Code Agent 网关。插件连接一台远端机器，
-自动探测已安装的 Code Agent，并将复杂任务委托给远端 Agent 非交互执行。
+AgentNexus 是面向 ChatLuna 的 SSH Agent 管理器与 A2A Client。插件通过 SSH 连接
+远端机器、自动探测和维护已安装的 Code Agent，并通过外部 Agent Card 与不同框架
+或厂商的 A2A Server 发现、委托和续接任务。
 
 支持：
 
@@ -10,19 +11,23 @@ AgentNexus 是面向 ChatLuna 的 SSH Code Agent 网关。插件连接一台远�
 - Claude Code
 - OpenCode
 - Codex
+- Pi
 
 ## 功能
 
 - SSH 密码登录，配置后自动保持连接并在断线后重连
 - 自动扫描远端可用的 Code Agent
 - 对比官方最新版本，并在 Computer 页面一键安装或更新 Code Agent
-- 注册四个工具给 ChatLuna
+- 注册七个工具给 ChatLuna，包括 SSH 委托和 A2A 发现、发送、查询/取消
 - 提供命令直接调用各 Code Agent，无需经过 ChatLuna 工具选择
 - 从 Git 仓库同步 Skills，并软链接到各 Agent 的 Skills 目录
 - 通过 SFTP 回传远端生成的文件和图片
 - Koishi Console SFTP 文件管理：浏览、预览、编辑、上传下载、目录和重命名删除
 - Koishi Console 单实例交互终端
 - 支持远端工作目录和 Agent 自动路由
+- A2A v1.0 Client，并兼容 v0.3 Agent Card 与 JSON-RPC
+- 在 A2A 页面逐个管理外部 Agent Card、Bearer Token、传输方式和任务状态
+- 提供可选的独立 `agent-nexus-bridge`，在远端把本机 CLI 发布为 A2A Server
 
 ## 安装
 
@@ -36,6 +41,7 @@ npm install koishi-plugin-agent-nexus
 
 AgentNexus 需要 ChatLuna 和 `koishi-plugin-chatluna-storage-service`。
 Console 页面和交互终端还需要 Koishi 的 `console` 与 `server` 服务。
+当前版本要求 Node.js 20 或更高版本。
 
 ## 快速开始
 
@@ -43,10 +49,10 @@ Console 页面和交互终端还需要 Koishi 的 `console` 与 `server` 服务�
 2. 打开 Koishi Console 左侧的 **AgentNexus** 页面。
 3. 在 **Computer** 页面填写远端 SSH 地址、端口、账号和密码。
 4. 点击 **连接并扫描**。
-5. 等待 Hermes、OpenClaw、Claude Code、OpenCode、Codex 状态标签亮起。
+5. 等待 Hermes、OpenClaw、Claude Code、OpenCode、Codex、Pi 状态标签亮起。
 6. ChatLuna 随后可以调用 AgentNexus 工具委托远端 Agent 执行任务。
 
-如果 SSH 已连接但 Agent 显示 `0/5`，点击页面右上角的 **刷新并重扫**。扫描会读取
+如果 SSH 已连接但 Agent 显示 `0/6`，点击页面右上角的 **刷新并重扫**。扫描会读取
 远端 login + interactive shell 的 `HOME`、`PATH` 和 `SHELL`，并让实际执行使用扫描
 得到的绝对可执行文件路径；Computer 页面也会显示当前环境探测是否发生降级。
 
@@ -58,6 +64,7 @@ nexus.openclaw <任务>
 nexus.claudecode <任务>
 nexus.opencode <任务>
 nexus.codex <任务>
+nexus.pi <任务>
 nexus.cancel
 ```
 
@@ -80,15 +87,20 @@ nexus hermes 开发机 -q
 
 ## Session Runtime
 
-AgentNexus 会在自身维护任务会话，不依赖 Hermes、Claude Code、Codex 等 CLI
-保存上下文。每次远端调用仍是新的非交互进程，但 Nexus 会把消息历史、任务状态、
-Skill 状态和待处理动作重新编译进下一次 prompt。
+AgentNexus 会在自身维护任务会话，并把消息历史、任务状态、Skill 状态和待处理动作
+重新编译进后续 prompt。每次调用仍是新的非交互进程；支持原生 checkpoint 的 CLI
+还会保存 provider session ID，让工具执行记录与模型上下文也能继续。
 
 对于 Hermes，Session Runtime 会使用 `hermes chat --quiet --yolo -q` 创建原生
 Hermes session，并保存 stderr 中的 `session_id`；后续调用通过 `--resume` 继续
 Hermes 的 Tool/Skill transcript。Nexus 仍负责用户路由、TTL、并发、确认和取消，
 Hermes session 只作为 provider checkpoint。普通 `delegate()` one-shot 调用仍使用
 `hermes -z`。
+
+Pi 在普通 one-shot 委托中使用 `pi -p --no-session`。在 ChatLuna managed session 和
+A2A Task 中改用官方 `--mode json` 事件流，保存首行 session header 的 `id`，后续通过
+`--session <id>` 恢复同一个 Pi session；最终回复从 assistant message event 中提取，
+不会把 JSONL 协议事件直接显示给用户。
 
 Hermes chat 会继承远端设备的 `~/.hermes/config.yaml`。如果回复中反复出现
 `Warning: Unknown toolsets: messaging`，说明 Hermes 升级后仍保留了已经移除的旧
@@ -120,7 +132,7 @@ Hermes chat 会继承远端设备的 `~/.hermes/config.yaml`。如果回复中�
 也可通过 `sessionSummaryModel` 指定模型；模型不可用时会保留本地 fallback 摘要。
 历史默认保留 30 天，可通过 `sessionHistoryRetentionMs` 调整。
 
-源码仓库可以复用实际 Nexus SSH 配置执行五 Agent 冒烟测试。测试不会主动读取或
+源码仓库可以复用实际 Nexus SSH 配置执行六 Agent 冒烟测试。测试不会主动读取或
 修改远端文件，会验证安装探测、one-shot 调用和两轮 managed Session 记忆：
 
 ```bash
@@ -185,9 +197,111 @@ Console 的 **文件** 页面复用已建立的 SSH 连接，支持：
 | `nexus_publish` | 通过 SFTP 拉取并发布远端文件 |
 | `nexus_list_agents` | 查看已探测到的 Code Agent |
 | `nexus_list_skills` | 查看远端已同步的 Skills |
+| `nexus_a2a_list` | 列出 A2A 远端及其 Agent Card Skills，可重新发现 |
+| `nexus_a2a_send` | 向 A2A 远端创建任务或通过 Task/Context ID 续接 |
+| `nexus_a2a_task` | 查询或取消 A2A 任务 |
 
 `nexus_delegate` 支持指定 Agent、远端工作目录、模型、超时和是否自动发布产物。
 不指定 Agent 时会从当前可用 Agent 中自动选择；不指定 `publishFiles` 时默认发布产物并返回 Storage URL。
+
+## A2A
+
+A2A 位于 Agent 与 Agent 之间，与 Agent 调用工具所用的 MCP 互补。Koishi 中的
+AgentNexus 固定作为 **A2A Client**，不注册 Agent Card 或 JSON-RPC 入站路由。每个
+外部 Agent Server 都通过完整 Agent Card URL 独立加入，因此不同 Agent 可以使用
+不同主机、端口、Card 路径、Bearer Token 和传输方式。
+
+SSH 与 A2A 的职责相互独立：Computer 页面负责机器连接、Agent 探测、安装和更新；
+A2A 页面负责外部 Agent Card 与任务。远端既可以运行各框架原生的 A2A 插件，也可以
+运行可选的单端口 `agent-nexus-bridge`。Bridge 复用 AgentNexus 的 CLI adapters、
+Session Runtime 和 A2A Executor，把远端已安装并启用的 Code Agent 发布为 Skills。
+
+### 两台机器示例
+
+```text
+10.1.2.30
+  Koishi + ChatLuna + AgentNexus A2A Client
+          │
+          │ A2A JSON-RPC/SSE :8787
+          ▼
+10.1.2.50
+  agent-nexus-bridge
+    ├─ OpenCode
+    ├─ Claude Code
+    ├─ Hermes
+    ├─ OpenClaw
+    └─ Pi / Codex
+
+10.1.2.30 --SSH:22--> 10.1.2.50
+  仅用于安装、更新、写配置、systemd 和诊断
+```
+
+配置流程：
+
+1. 在 `10.1.2.30` 的 Computer 页面添加 SSH 设备 `10.1.2.50`，扫描、安装或更新所需 Agent。
+2. 在 `10.1.2.50` 启动各框架的 A2A 插件/Server，并记录各自完整 Agent Card URL；
+   也可以选择下面的独立 `agent-nexus-bridge`。
+3. 回到 `10.1.2.30` 的 A2A 页面，逐个添加完整 Card URL、名称、Bearer Token 和首选传输。
+4. 点击发现按钮读取 Card 与 Skills，再由 ChatLuna 调用 `nexus_a2a_send` 创建任务；
+   `nexus_a2a_task` 可查询或取消，Task/Context ID 可用于续接。
+
+同网段直连时需要允许 Koishi 机器访问每个 A2A Server 的实际端口。不要开放无 Token
+的 Server 到不可信网络；跨公网时使用 HTTPS 反向代理。
+
+### 独立 Bridge CLI
+
+`agent-nexus-bridge` 也可脱离 Koishi 手动运行。npm 包安装后创建配置：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "publicBaseUrl": "http://10.1.2.50:8787",
+  "token": "env:AGENT_NEXUS_BRIDGE_TOKEN",
+  "dataDir": "~/.agent-nexus/bridge",
+  "cwd": "/srv/agent-workspace",
+  "agents": ["opencode", "claude", "hermes", "pi"]
+}
+```
+
+```bash
+agent-nexus-bridge --config ~/.agent-nexus/bridge/config.json
+```
+
+Bridge 暴露：
+
+```text
+GET  /health                         # 服务、任务数和 Agent 探测状态
+GET  /.well-known/agent-card.json   # A2A v1.0 Agent Card
+GET  /.well-known/agent.json        # A2A v0.3 兼容 Agent Card
+POST /a2a                           # JSON-RPC / SSE
+GET  /artifacts/{id}                # 有效期内的受限工作目录产物
+```
+
+CLI 还支持 `--host`、`--port`、`--public-base-url`、`--token`、`--cwd`、
+`--data-dir`、`--agents`、`--timeout-ms` 和 `--max-output-bytes`。执行
+`agent-nexus-bridge --help` 可查看完整参数。
+
+### 外部 Agent Cards
+
+Console 的 **A2A** 页面只管理外部 Agent。添加时填写完整 Agent Card URL，例如
+`http://10.1.2.50:9101/.well-known/agent-card.json`。每张 Card 可使用不同端口、
+Bearer Token 和首选传输，保存后可执行发现、发送、刷新和取消。Token 支持
+`env:VAR`，Console 回传配置时会脱敏，输入框留空会保留原值。
+
+参考图中的框架 bridge 可以直接作为 AgentNexus A2A Client 的远端：
+
+| 框架 | 常见 bridge / 插件 | 接入方式 |
+|---|---|---|
+| Claude Code | `a2a-bridge`（推荐）或 `a2a-claude` | 启动 bridge 后，将其基础 URL 添加为远端；可双向调用 |
+| OpenCode | `opencode-a2a` 或 `a2a-opencode` | 暴露 A2A Server，并可通过其 outbound 能力调用其他 Agent |
+| Pi | `pi-a2a-communication` | 启动其 A2A Server（例如 `/a2a-server start`）后添加为远端 |
+| Hermes | 官方 `platforms/a2a` 或早期 `hermes-a2a` | 可作为 Client/Server，消息可进入当前 live session |
+| OpenClaw | `a2a-bridge`（ACP 侧） | 通常作为 Client 调用或由 bridge 暴露 Server |
+
+AgentNexus 自带的单端口 Bridge 负责统一 CLI 适配。如果需要保留某个框架原生的
+A2A live-session 语义，仍可改用表中的原生 bridge；其包名、启动命令和协议版本以
+对应项目的当前说明为准。
 
 ## Skills
 
@@ -209,6 +323,8 @@ Console 的 **文件** 页面复用已建立的 SSH 连接，支持：
 ~/.codex/skills
 ~/.hermes/skills
 ~/.openclaw/skills
+~/.pi/agent/skills
+~/.pi/skills
 ```
 
 ## 文件回传与 Storage
@@ -236,13 +352,17 @@ openclaw agent --local --agent default --message "..." --json
 claude -p "..." --output-format json --dangerously-skip-permissions
 opencode run --format json --auto "..."
 codex exec --json --ephemeral --dangerously-bypass-approvals-and-sandbox "..."
+pi -p --no-session "..."
+pi --mode json "..."                                # managed session 首轮
+pi --mode json --session <id> "..."                 # 后续恢复
 ```
 
 ## 安全警告
 
 AgentNexus 的定位是受信任远端机器上的自动化 Code Agent 网关。
 
-Claude Code、OpenCode 和 Codex 默认使用跳过确认或沙箱限制的参数。远端 Agent
+Claude Code、OpenCode 和 Codex 默认使用跳过确认或沙箱限制的参数；Pi one-shot
+不保存 session，managed/A2A 调用会在远端 Pi session 目录保存 checkpoint。远端 Agent
 可能读取、修改和删除工作目录中的文件，也可能执行系统命令。请遵守以下原则：
 
 - 只连接你信任的机器
@@ -250,10 +370,13 @@ Claude Code、OpenCode 和 Codex 默认使用跳过确认或沙箱限制的参�
 - 不要将工作目录设置到包含敏感数据的位置
 - 优先使用隔离虚拟机或容器
 - 不要将 Koishi Console 暴露给不可信用户
+- 为外部 A2A Server 配置强随机 Bearer Token，并优先通过 HTTPS 反向代理暴露
+- Agent Card 按 A2A 规范公开；不要在名称、描述或 Skill 元数据中写入秘密
 
 ## 开发
 
 ```bash
+# Node.js >= 20
 npm install
 npm test
 npm run typecheck
@@ -263,7 +386,8 @@ npm run build
 构建产物：
 
 ```text
-lib/     # Koishi 后端
+lib/index.js   # Koishi 后端
+lib/bridge.js  # agent-nexus-bridge CLI
 dist/    # Koishi Console 前端
 ```
 

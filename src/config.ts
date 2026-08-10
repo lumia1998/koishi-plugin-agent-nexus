@@ -6,6 +6,7 @@ import type {
     NexusConfig,
     SshHostConfig
 } from './types'
+import { normalizeSshBridgeConfig } from './utils/bridge-config'
 
 export const name = 'agent-nexus'
 
@@ -101,7 +102,8 @@ export function createDefaultNexusConfig(cfg?: Config): NexusConfig {
             openclaw: true,
             claude: true,
             opencode: true,
-            codex: true
+            codex: true,
+            pi: true
         },
         runtime: {
             openclawAgent: 'default',
@@ -112,7 +114,10 @@ export function createDefaultNexusConfig(cfg?: Config): NexusConfig {
         },
         skills: [],
         skillRoot: cfg?.skillRoot ?? '~/.agent-nexus/skills',
-        defaultHostId: undefined
+        defaultHostId: undefined,
+        a2a: {
+            remotes: []
+        }
     }
 }
 
@@ -127,9 +132,11 @@ export function createHost(partial?: Partial<SshHostConfig>): SshHostConfig {
         enabled: partial?.enabled ?? true,
         defaultAgent: partial?.defaultAgent ?? 'auto',
         cwd: partial?.cwd,
-        idleTimeoutMs: partial?.idleTimeoutMs ?? 15 * 60 * 1000
+        idleTimeoutMs: partial?.idleTimeoutMs ?? 15 * 60 * 1000,
+        bridge: normalizeSshBridgeConfig(partial?.bridge)
     }
 }
+
 
 export function defaultAgents(): AgentEnableConfig {
     return {
@@ -137,7 +144,8 @@ export function defaultAgents(): AgentEnableConfig {
         openclaw: true,
         claude: true,
         opencode: true,
-        codex: true
+        codex: true,
+        pi: true
     }
 }
 

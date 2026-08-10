@@ -13,9 +13,9 @@ try {
         entryPoints: [path.join(root, 'test/index.test.mts')],
         bundle: true,
         platform: 'node',
-        target: 'node18',
+        target: 'node20',
         format: 'cjs',
-        external: ['ssh2'],
+        external: ['ssh2', '@a2a-js/sdk', '@a2a-js/sdk/*'],
         outfile
     })
     const result = spawnSync(process.execPath, ['--test', outfile], {

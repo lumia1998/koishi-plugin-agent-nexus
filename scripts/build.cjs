@@ -47,27 +47,43 @@ const tsc = path.join(root, 'node_modules', 'typescript', 'bin', 'tsc')
 fs.rmSync(outdir, { recursive: true, force: true })
 fs.mkdirSync(outdir, { recursive: true })
 
-esbuild
-    .build({
+const external = [
+    'koishi',
+    'ssh2',
+    '@langchain/core',
+    '@a2a-js/sdk',
+    '@a2a-js/sdk/*',
+    'zod',
+    'ws',
+    '@koishijs/plugin-console',
+    'koishi-plugin-chatluna',
+    'koishi-plugin-chatluna-storage-service'
+]
+
+Promise.all([
+    esbuild.build({
         entryPoints: [path.join(root, 'src/index.ts')],
         bundle: true,
         platform: 'node',
-        target: 'node18',
+        target: 'node20',
         format: 'cjs',
         outfile: path.join(outdir, 'index.js'),
-        external: [
-            'koishi',
-            'ssh2',
-            '@langchain/core',
-            'zod',
-            'ws',
-            '@koishijs/plugin-console',
-            'koishi-plugin-chatluna',
-            'koishi-plugin-chatluna-storage-service'
-        ],
+        external,
+        logLevel: 'info'
+    }),
+    esbuild.build({
+        entryPoints: [path.join(root, 'src/bridge/cli.ts')],
+        bundle: true,
+        platform: 'node',
+        target: 'node20',
+        format: 'cjs',
+        outfile: path.join(outdir, 'bridge.js'),
+        external: ['@a2a-js/sdk', '@a2a-js/sdk/*'],
         logLevel: 'info'
     })
+])
     .then(() => {
+        fs.chmodSync(path.join(outdir, 'bridge.js'), 0o755)
         const result = spawnSync(
             process.execPath,
             [

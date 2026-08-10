@@ -14,7 +14,8 @@ const COMMANDS: Array<[name: string, agent: AgentKind, description: string]> = [
     ['nexus.openclaw', 'openclaw', '直接调用远端 OpenClaw Code Agent'],
     ['nexus.claudecode', 'claude', '直接调用远端 Claude Code'],
     ['nexus.opencode', 'opencode', '直接调用远端 OpenCode'],
-    ['nexus.codex', 'codex', '直接调用远端 Codex']
+    ['nexus.codex', 'codex', '直接调用远端 Codex'],
+    ['nexus.pi', 'pi', '直接调用远端 Pi coding agent']
 ]
 
 export function registerNexusCommands(
@@ -331,7 +332,7 @@ function sessionIdentity(session: Session): SessionIdentity {
 }
 
 function isNexusCommand(content: string) {
-    return /^(?:[./!#]\s*)?nexus(?:\.|\s+)(?:hermes|openclaw|claude(?:code)?|opencode|codex|cancel)\b/i.test(
+    return /^(?:[./!#]\s*)?nexus(?:\.|\s+)(?:hermes|openclaw|claude(?:code)?|opencode|codex|pi|cancel)\b/i.test(
         content
     )
 }

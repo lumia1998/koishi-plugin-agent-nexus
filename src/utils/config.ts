@@ -1,33 +1,35 @@
-import type { NexusConfig, SshAuth, SshHostConfig } from '../types'
+import type {
+    A2AConfig,
+    NexusConfig,
+    SshAuth,
+    SshHostConfig
+} from '../types'
 import { randomUUID } from 'crypto'
+import { normalizeSshBridgeConfig } from './bridge-config'
 
 export function mergeHostSecrets(
     incoming: SshHostConfig,
     previous?: SshHostConfig
 ): SshHostConfig {
     if (!previous) return incoming
-
+    let merged = incoming
     if (!incoming.auth || isEmptyAuth(incoming.auth)) {
-        return {
+        merged = {
             ...incoming,
             auth: previous.auth
         }
-    }
-
-    if (incoming.auth.type !== previous.auth.type) return incoming
-
-    if (incoming.auth.type === 'password' && previous.auth.type === 'password') {
-        return {
+    } else if (incoming.auth.type !== previous.auth.type) {
+        merged = incoming
+    } else if (incoming.auth.type === 'password' && previous.auth.type === 'password') {
+        merged = {
             ...incoming,
             auth: {
                 type: 'password',
                 password: incoming.auth.password || previous.auth.password
             }
         }
-    }
-
-    if (incoming.auth.type === 'key' && previous.auth.type === 'key') {
-        return {
+    } else if (incoming.auth.type === 'key' && previous.auth.type === 'key') {
+        merged = {
             ...incoming,
             auth: {
                 type: 'key',
@@ -36,8 +38,9 @@ export function mergeHostSecrets(
             }
         }
     }
-
-    return incoming
+    const bridge = normalizeSshBridgeConfig(merged.bridge || previous.bridge)
+    if (!bridge.token) bridge.token = previous.bridge?.token || ''
+    return { ...merged, bridge }
 }
 
 function isEmptyAuth(auth: SshAuth) {
@@ -53,7 +56,40 @@ export function redactNexusConfig(config: NexusConfig): NexusConfig {
             auth:
                 host.auth.type === 'password'
                     ? { type: 'password', password: '' }
-                    : { type: 'key', privateKey: '' }
+                    : { type: 'key', privateKey: '' },
+            bridge: {
+                ...normalizeSshBridgeConfig(host.bridge),
+                token: ''
+            }
+        })),
+        a2a: redactA2AConfig(config.a2a)
+    }
+}
+
+export function mergeA2ASecrets(
+    incoming: A2AConfig,
+    previous?: A2AConfig
+): A2AConfig {
+    const previousRemotes = new Map(
+        (previous?.remotes || []).map((remote) => [remote.id, remote])
+    )
+    return {
+        remotes: (incoming.remotes || []).map((remote) => {
+            const old = previousRemotes.get(remote.id)
+            return {
+                ...remote,
+                authToken: remote.authToken || old?.authToken
+            }
+        })
+    }
+}
+
+export function redactA2AConfig(config?: A2AConfig): A2AConfig {
+    const value = config || { remotes: [] }
+    return {
+        remotes: (value.remotes || []).map((remote) => ({
+            ...remote,
+            authToken: ''
         }))
     }
 }
@@ -114,7 +150,8 @@ export function patchHostConfig(
         ...previous,
         ...input,
         id: previous.id,
-        auth: previous.auth
+        auth: previous.auth,
+        bridge: normalizeSshBridgeConfig(input.bridge || previous.bridge)
     }
 
     if (input.auth) {
@@ -127,6 +164,8 @@ export function patchHostConfig(
             next.auth = input.auth
         }
     }
+
+    if (!next.bridge.token) next.bridge.token = previous.bridge?.token || ''
 
     return mergeHostSecrets(next, previous)
 }

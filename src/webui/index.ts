@@ -97,6 +97,69 @@ export function apply(ctx: Context) {
     )
 
     ctx.console.addListener(
+        'agent-nexus/getBridgeStatus',
+        async (hostId: string) => nexus().refreshBridgeStatus(hostId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/maintainBridge',
+        async (input: import('../types').BridgeMaintenanceInput) =>
+            nexus().maintainBridge(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/saveA2ARemote',
+        async (
+            input: Partial<import('../types').A2ARemoteConfig> & {
+                clearAuthToken?: boolean
+                clearPreferredTransport?: boolean
+            }
+        ) => nexus().saveA2ARemote(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/removeA2ARemote',
+        async (id: string) => nexus().removeA2ARemote(id),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/discoverA2ARemote',
+        async (id: string) => nexus().discoverA2ARemote(id),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/sendA2AMessage',
+        async (input: {
+            remoteId: string
+            text: string
+            taskId?: string
+            contextId?: string
+            returnImmediately?: boolean
+            metadata?: Record<string, unknown>
+        }) => nexus().sendA2AMessage(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/getA2ATask',
+        async (remoteId: string, taskId: string) =>
+            nexus().getA2ATask(remoteId, taskId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/cancelA2ATask',
+        async (remoteId: string, taskId: string) =>
+            nexus().cancelA2ATask(remoteId, taskId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
         'agent-nexus/syncSkill',
         async (input: {
             repoUrl: string
@@ -245,6 +308,43 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/maintainAgent'(
             input: import('../types').AgentMaintenanceInput
         ): Promise<import('../types').AgentMaintenanceResult>
+        'agent-nexus/getBridgeStatus'(
+            hostId: string
+        ): Promise<import('../types').BridgeHostStatus>
+        'agent-nexus/maintainBridge'(
+            input: import('../types').BridgeMaintenanceInput
+        ): Promise<import('../types').BridgeMaintenanceResult>
+        'agent-nexus/saveA2ARemote'(
+            input: Partial<import('../types').A2ARemoteConfig> & {
+                clearAuthToken?: boolean
+                clearPreferredTransport?: boolean
+            }
+        ): Promise<{
+            remoteId: string
+            data: import('../types').NexusConsoleData
+        }>
+        'agent-nexus/removeA2ARemote'(
+            id: string
+        ): Promise<import('../types').NexusConsoleData>
+        'agent-nexus/discoverA2ARemote'(
+            id: string
+        ): Promise<import('../types').A2ARemoteStatus>
+        'agent-nexus/sendA2AMessage'(input: {
+            remoteId: string
+            text: string
+            taskId?: string
+            contextId?: string
+            returnImmediately?: boolean
+            metadata?: Record<string, unknown>
+        }): Promise<import('../types').A2ATaskView>
+        'agent-nexus/getA2ATask'(
+            remoteId: string,
+            taskId: string
+        ): Promise<import('../types').A2ATaskView>
+        'agent-nexus/cancelA2ATask'(
+            remoteId: string,
+            taskId: string
+        ): Promise<import('../types').A2ATaskView>
         'agent-nexus/syncSkill'(input: {
             repoUrl: string
             name?: string

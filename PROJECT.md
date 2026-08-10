@@ -2,7 +2,7 @@
 
 > 仓库：`https://github.com/lumia1998/koishi-plugin-AgentNexus`
 > 参考实现：`ChatLunaLab/chatluna` → `packages/extension-agent`（v1-dev）Computer 模块
-> 日期：2026-07-13
+> 更新：2026-08-10
 
 ---
 
@@ -17,10 +17,12 @@
    - Claude Code
    - OpenCode
    - Codex
+   - Pi
 3. 在 Koishi 侧边栏 WebUI 中选择/管理这些 agent
 4. **Skills 同步**：给仓库地址后自动拉取，落到 AgentNexus 中心目录，并软链接到各 code agent 的 skill 路径
 5. **注册工具给 ChatLuna**：把复杂任务、爬虫 skill 等委托给远端 code agent 非交互执行
 6. 解析 agent 输出中的文件/图片路径，通过 **SFTP + publish** 回传给 ChatLuna
+7. 提供 **A2A Client**，通过外部 Agent Card 支持跨框架 Agent 发现、委托、续接、查询和取消
 
 ---
 
@@ -58,6 +60,7 @@ chatluna/packages/extension-agent/src/computer/
 | **Claude Code** | `claude -p "..." --output-format json` | 可加 skip-permissions（需显式开关） |
 | **OpenCode** | `opencode run --format json --auto "..."` | `--auto` 可配置 |
 | **Codex** | `codex exec --json --ephemeral "..."` | 可加 bypass sandbox（需显式开关） |
+| **Pi** | one-shot: `pi -p --no-session "..."`；managed: `pi --mode json [--session <id>] "..."` | npm 包 `@mariozechner/pi-coding-agent`，JSONL 首行提供 session ID |
 
 统一执行原则：
 
@@ -87,6 +90,14 @@ AgentNexus (Koishi 插件)
     │     · 探测/勾选 code agent
     │     · Skill 仓库导入与同步状态
     │     · 交互终端（xterm）
+    │     · 外部 Agent Cards / Task 控制
+    ├── A2A Client
+    │     · v1.0 Agent Card，兼容 v0.3 Card
+    │     · 出站发现、发送、续接、查询、取消
+    ├── AgentNexus Bridge（远端单端口服务）
+    │     · 本机 CLI 探测与进程执行
+    │     · A2A Card / JSON-RPC / SSE / Artifact
+    │     · FileSessionStorage + Nexus Session Runtime
     ├── SSH Backend
     │     · ssh2 连接池（密码 / privateKey）
     │     · exec + sftp + pty
@@ -101,6 +112,9 @@ AgentNexus (Koishi 插件)
           · nexus_publish
           · nexus_list_agents
           · nexus_list_skills
+          · nexus_a2a_list
+          · nexus_a2a_send
+          · nexus_a2a_task
 ```
 
 ---
@@ -111,8 +125,8 @@ AgentNexus (Koishi 插件)
 
 - [x] SSH 连接（密码/密钥，`env:VAR` 密钥引用）
 - [x] exec / sftp / pty
-- [x] 5 个 code agent adapter
-- [x] `nexus_delegate` / `nexus_publish` / `nexus_list_agents` / `nexus_list_skills`
+- [x] 6 个 code agent adapter（含 Pi）
+- [x] SSH 委托、文件/Agent/Skill 查询以及 3 个 A2A 工具
 - [x] Skills：仓库同步 + 中心目录 + 软链
 - [x] WebUI：Computer / Skills / 单实例终端
 - [x] 默认 SSH Computer 常驻连接 + 断线自动重连
@@ -127,6 +141,10 @@ AgentNexus (Koishi 插件)
 - [x] 终端连接 token 增加 60 秒有效期、单次认领和同源检查
 - [x] Windows UNC 工作区构建脚本自动寻找可用映射盘符
 - [x] 后端与前端 TypeScript 检查、单元测试及完整构建通过
+- [x] A2A v1.0 Client，兼容 v0.3 Agent Card / JSON-RPC
+- [x] A2A 远端 Card 配置、发现、任务发送/续接、查询与取消 WebUI
+- [x] 独立 `agent-nexus-bridge`：单端口发布远端本机 6 类 CLI
+- [x] SSH 部署/更新、systemd user service、健康检查和自动 A2A Remote 注册
 
 ### P1（下一步）
 
@@ -135,6 +153,7 @@ AgentNexus (Koishi 插件)
 - [x] ChatLuna conversation 隔离及直接消息选择/确认续接
 - [x] `nexus <agent> <设备>` 交互模式、可配置空闲 TTL 与 `-q` 退出
 - [x] Hermes native session checkpoint：quiet query + session_id + resume
+- [x] Pi native session checkpoint：JSON event stream + session header ID + `--session` resume
 - [x] SSH login/interactive 环境探测与绝对 Agent 路径执行
 - [x] SFTP 文件管理：浏览、预览、编辑、上传下载、新建目录、重命名和安全删除
 - [ ] 真实 SSH 联调（Linux 远端优先）
@@ -180,7 +199,20 @@ koishi-plugin-AgentNexus/
 │   │   ├── claude.ts
 │   │   ├── opencode.ts
 │   │   ├── codex.ts
+│   │   ├── pi.ts
 │   │   └── index.ts
+│   ├── a2a/
+│   │   ├── client.ts          # Agent Card 发现与出站任务
+│   │   ├── executor.ts        # 独立 Bridge 入站 → Nexus Session Runtime
+│   │   └── index.ts
+│   ├── bridge/
+│   │   ├── cli.ts             # agent-nexus-bridge 命令入口
+│   │   ├── config.ts          # JSON / CLI / 环境变量配置
+│   │   ├── local-executor.ts  # 本机 Agent 探测与子进程执行
+│   │   ├── runtime.ts         # 持久化 Nexus Session Runtime
+│   │   ├── server.ts          # 原生 Node HTTP A2A Server
+│   │   ├── artifacts.ts       # 受限工作目录产物发布
+│   │   └── maintenance.ts     # SSH + systemd 部署计划
 │   ├── sessions/
 │   │   ├── types.ts          # 会话、消息、pendingAction 类型
 │   │   ├── storage.ts        # SessionStorage + 内存实现
@@ -195,7 +227,10 @@ koishi-plugin-AgentNexus/
 │   │   ├── delegate.ts
 │   │   ├── publish.ts
 │   │   ├── list_agents.ts
-│   │   └── list_skills.ts
+│   │   ├── list_skills.ts
+│   │   ├── a2a_list.ts
+│   │   ├── a2a_send.ts
+│   │   └── a2a_task.ts
 │   ├── utils/shell.ts
 │   └── webui/index.ts         # console listeners
 └── client/
@@ -203,6 +238,7 @@ koishi-plugin-AgentNexus/
     ├── page.vue
     └── components/
         ├── computer-panel.vue
+        ├── a2a-panel.vue
         ├── skills-panel.vue
         └── terminal-panel.vue
 ```
@@ -215,13 +251,18 @@ koishi-plugin-AgentNexus/
 | `nexus_publish` | 按远端路径 SFTP 拉取并生成临时 URL |
 | `nexus_list_agents` | 列出主机与已安装 agent |
 | `nexus_list_skills` | 列出已同步 skills |
+| `nexus_a2a_list` | 列出/刷新 A2A 远端 Agent Card |
+| `nexus_a2a_send` | 创建 A2A 任务或按 Task/Context ID 续接 |
+| `nexus_a2a_task` | 查询或取消 A2A 任务 |
 
 ### 6.2 WebUI Tab
 
-1. **Computer**：配置单一默认 SSH Computer，连接后自动扫描 Agent 状态
-2. **Skills**：仓库 URL 导入、同步状态和软链状态
-3. **文件**：基于共享 SSH 连接的 SFTP 文件管理，限制在设备工作目录内
-4. **终端**：进入页面后自动创建一个 xterm SSH 终端
+1. **Computer**：配置 SSH Computer，连接后自动扫描 Agent 状态
+2. **A2A**：配置外部 Agent Card、鉴权、传输方式和任务状态
+3. **Skills**：仓库 URL 导入、同步状态和软链状态
+4. **文件**：基于共享 SSH 连接的 SFTP 文件管理，限制在设备工作目录内
+5. **会话**：查看持久化任务、摘要和消息
+6. **终端**：进入页面后自动创建一个 xterm SSH 终端
 
 ### 6.3 配置落盘
 
@@ -229,8 +270,9 @@ koishi-plugin-AgentNexus/
 {koishi.baseDir}/data/agent-nexus/config.json
 ```
 
-配置文件仍保存实际凭据以供 SSH 使用，但 Console RPC 不会回传密码、私钥或
-passphrase。编辑已有主机时凭据输入框留空会保留原凭据，需要替换时再输入新值。
+配置文件仍保存实际凭据以供 SSH/A2A Client 使用，但 Console RPC 不会回传密码、
+私钥、passphrase 或外部 Agent Token。编辑已有配置时凭据输入框留空会保留原凭据，
+需要替换时再输入新值，也可通过显式清除选项删除 Token。
 生产环境推荐使用 `env:VAR`；引用不存在的环境变量会返回明确错误。
 
 ### 6.4 Skills 远端布局
@@ -248,6 +290,7 @@ passphrase。编辑已有主机时凭据输入框留空会保留原凭据，需�
 - Claude: `~/.claude/skills`
 - OpenCode: `~/.config/opencode/skills` 等
 - Codex: `~/.codex/skills` 等
+- Pi: `~/.pi/agent/skills`、`~/.pi/skills`
 
 ---
 
@@ -265,6 +308,24 @@ ChatLuna 判断任务复杂 / 需要 code agent skill
   → 返回文本 + 文件 URL
 ```
 
+A2A 出站：
+
+```
+Remote base URL → Agent Card（v1，失败时回退 v0.3）
+  → ClientFactory 选择 JSONRPC 或 HTTP+JSON
+  → send / 自动等待非终态 Task / get / cancel
+  → Status Message / Artifact / History 归一化为 A2ATaskView
+```
+
+远端 Bridge：
+
+```text
+本机 npm pack → SFTP 上传 → 远端 npm 用户级安装 + user systemd
+  → agent-nexus-bridge 探测本机 CLI 并发布 Agent Card Skills
+  → ChatLuna → AgentNexus A2A Client → 远端 /a2a
+  → LocalAgentExecutor → Nexus Session Runtime → Artifact URL
+```
+
 ---
 
 ## 8. 安全注意
@@ -274,6 +335,8 @@ ChatLuna 判断任务复杂 / 需要 code agent skill
 3. Claude、OpenCode、Codex 默认跳过权限确认或沙箱，只应连接受信任的隔离机器
 4. 首期按 **Linux/macOS 远端** 设计
 5. 日志应避免打印私钥与完整密码
+6. 外部 A2A Server 的 Agent Card 通常公开发现；JSON-RPC 应配置 Bearer Token 并通过 HTTPS 暴露
+7. 外部 Agent Token 支持 `env:VAR`，Console 仅返回脱敏值
 
 ---
 
@@ -286,7 +349,7 @@ npm run build   # scripts/build.cjs → lib/index.js
 
 说明：
 
-- 后端用 esbuild 打包为单文件 `lib/index.js`
+- 后端用 esbuild 打包为 `lib/index.js` 与独立 CLI `lib/bridge.js`
 - 前端 client 使用 Koishi console 构建链，完整 `npm run build` 会同时生成 `lib/` 与 `dist/`
 - Windows 网络工作区应配置映射盘符；构建脚本会自动从现有盘符中寻找对应项目
 - 当前本地验证命令：`npm test`、`npm run typecheck`、`tsc -p client/tsconfig.json --noEmit`、`npm run build`
@@ -307,7 +370,13 @@ npm run build   # scripts/build.cjs → lib/index.js
 9. 修复 delegate cwd 与 publish 根目录不一致问题
 10. 修复 Skill 更新吞错、失败状态缺失、软链状态丢失和未安装 agent 误链接
 11. 加固 Console 凭据回传与终端 token 生命周期
-12. 增加凭据脱敏、凭据合并和缺失环境变量测试；当前共 11 个测试通过
+12. 增加凭据脱敏、凭据合并和缺失环境变量测试
+13. 新增 Pi adapter、自动探测、维护安装、命令与 Skills 目录
+14. 新增基于 `@a2a-js/sdk` 的 A2A v1.0 Client 和 v0.3 兼容层
+15. 新增 A2A Console 面板、3 个 ChatLuna 工具及协议/生命周期测试
+16. 新增可选单端口 `agent-nexus-bridge`、SSH + SFTP 部署、systemd 管理和 Remote 注册
+17. Pi managed session 改用官方 JSON event stream
+18. Koishi AgentNexus 固定为 A2A Client，移除本机 Agent Card、入站路由和 Server WebUI
 
 ---
 
@@ -322,5 +391,5 @@ npm run build   # scripts/build.cjs → lib/index.js
 
 ## 12. 一句话总结
 
-> AgentNexus = **ChatLuna 的 SSH Code-Agent 网关**：
-> 配置远端主机 → 探测/选择 agent → 同步 skills → 非交互委托执行 → SFTP 回传产物，并提供 WebUI 终端调试。
+> AgentNexus = **ChatLuna 的 SSH + A2A Code-Agent 网关**：
+> 通过 SSH 执行六类 Code Agent，通过 A2A 与其他框架 Agent 发现和协作，并统一管理 Session、Skills 与产物回传。

@@ -14,6 +14,9 @@ declare module 'koishi' {
             ): Promise<{ url: string; name: string }>
         }
         server?: {
+            selfUrl: string
+            get(path: RegExp | string, callback: (ctx: any) => unknown): unknown
+            post(path: RegExp | string, callback: (ctx: any) => unknown): unknown
             ws(
                 path: RegExp | string,
                 callback: (socket: any, request: any) => void

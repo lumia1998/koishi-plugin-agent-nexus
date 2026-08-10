@@ -1,3 +1,5 @@
 import './security.test.mts'
 import './session-runtime.test.mts'
 import './session-history.test.mts'
+import './pi-a2a.test.mts'
+import './bridge.test.mts'

@@ -4,6 +4,7 @@ export type AgentKind =
     | 'claude'
     | 'opencode'
     | 'codex'
+    | 'pi'
 
 export type SshAuth =
     | { type: 'password'; password: string }
@@ -20,6 +21,7 @@ export interface SshHostConfig {
     defaultAgent?: AgentKind | 'auto'
     cwd?: string
     idleTimeoutMs: number
+    bridge: SshBridgeConfig
 }
 
 export interface AgentEnableConfig {
@@ -28,6 +30,20 @@ export interface AgentEnableConfig {
     claude: boolean
     opencode: boolean
     codex: boolean
+    pi: boolean
+}
+
+export interface SshBridgeConfig {
+    enabled: boolean
+    bindHost: string
+    port: number
+    publicBaseUrl?: string
+    token?: string
+    dataDir: string
+    cwd?: string
+    packageSpec: string
+    agents: AgentEnableConfig
+    remoteId?: string
 }
 
 export interface AgentRuntimeOptions {
@@ -49,6 +65,76 @@ export interface SkillSourceConfig {
     lastError?: string
 }
 
+export interface A2ARemoteConfig {
+    id: string
+    name: string
+    baseUrl: string
+    cardPath?: string
+    authToken?: string
+    enabled: boolean
+    preferredTransport?: 'JSONRPC' | 'HTTP+JSON'
+}
+
+export interface A2AConfig {
+    remotes: A2ARemoteConfig[]
+}
+
+export interface A2ACardSkillSummary {
+    id: string
+    name: string
+    description: string
+    tags: string[]
+}
+
+export interface A2AAgentCardSummary {
+    name: string
+    description: string
+    version: string
+    url: string
+    protocolVersions: string[]
+    streaming: boolean
+    skills: A2ACardSkillSummary[]
+}
+
+export type A2ARemoteState = 'unknown' | 'checking' | 'ready' | 'error'
+
+export interface A2ARemoteStatus {
+    id: string
+    name: string
+    baseUrl: string
+    enabled: boolean
+    state: A2ARemoteState
+    card?: A2AAgentCardSummary
+    lastCheckedAt?: number
+    error?: string
+}
+
+export interface A2ATaskView {
+    remoteId: string
+    taskId?: string
+    contextId?: string
+    state: string
+    timedOut?: boolean
+    text?: string
+    artifacts: Array<{
+        artifactId?: string
+        name?: string
+        description?: string
+        text?: string
+        url?: string
+        filename?: string
+        mediaType?: string
+        data?: unknown
+        bytesBase64?: string
+        metadata?: Record<string, unknown>
+    }>
+    raw?: unknown
+}
+
+export interface A2AStatus {
+    remotes: A2ARemoteStatus[]
+}
+
 export interface NexusConfig {
     hosts: SshHostConfig[]
     agents: AgentEnableConfig
@@ -56,6 +142,7 @@ export interface NexusConfig {
     skills: SkillSourceConfig[]
     skillRoot: string
     defaultHostId?: string
+    a2a: A2AConfig
 }
 
 export interface DetectedAgent {
@@ -82,6 +169,57 @@ export interface AgentMaintenanceResult {
     status: NexusStatus
 }
 
+export type BridgeMaintenanceAction =
+    | 'install'
+    | 'update'
+    | 'start'
+    | 'stop'
+    | 'restart'
+
+export interface BridgeMaintenanceInput {
+    hostId: string
+    action: BridgeMaintenanceAction
+    /** Current console form values, persisted before the requested action. */
+    bridge?: SshBridgeConfig
+}
+
+export type BridgeServiceState =
+    | 'disabled'
+    | 'unknown'
+    | 'installing'
+    | 'not-installed'
+    | 'starting'
+    | 'running'
+    | 'stopped'
+    | 'error'
+
+export interface BridgeAgentStatus {
+    kind: AgentKind
+    installed: boolean
+    path?: string
+    version?: string
+}
+
+export interface BridgeHostStatus {
+    enabled: boolean
+    state: BridgeServiceState
+    endpointUrl?: string
+    cardUrl?: string
+    version?: string
+    activeTasks?: number
+    agents: BridgeAgentStatus[]
+    pid?: number
+    lastCheckedAt?: number
+    error?: string
+}
+
+export interface BridgeMaintenanceResult {
+    action: BridgeMaintenanceAction
+    method: string
+    bridge: BridgeHostStatus
+    status: NexusStatus
+}
+
 export interface HostStatus {
     id: string
     name: string
@@ -92,6 +230,7 @@ export interface HostStatus {
     sessionCount: number
     lastConnectedAt?: number
     environment?: SshEnvironmentInfo
+    bridge: BridgeHostStatus
 }
 
 export interface SshEnvironmentInfo {
@@ -113,6 +252,7 @@ export interface NexusStatus {
         hostId?: string
     }
     activeSessions: number
+    a2a: A2AStatus
 }
 
 export interface SkillInfo {

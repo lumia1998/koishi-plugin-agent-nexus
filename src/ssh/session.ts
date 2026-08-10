@@ -608,16 +608,22 @@ export class SshSession {
         }
     }
 
-    async writeFile(remotePath: string, content: Buffer | string): Promise<void> {
+    async writeFile(
+        remotePath: string,
+        content: Buffer | string,
+        mode?: number
+    ): Promise<void> {
         const sftp = await this.getSftp()
         const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
         await this.trackOperation(
             () =>
                 new Promise<void>((resolve, reject) => {
-                    sftp.writeFile(remotePath, buf, (err) => {
+                    const callback = (err?: Error | null) => {
                         if (err) reject(err)
                         else resolve()
-                    })
+                    }
+                    if (mode === undefined) sftp.writeFile(remotePath, buf, callback)
+                    else sftp.writeFile(remotePath, buf, { mode }, callback)
                 })
         )
     }

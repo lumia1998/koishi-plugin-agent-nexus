@@ -26,4 +26,6 @@ export * from './sessions/storage'
 export * from './sessions/file-storage'
 export * from './sessions/manager'
 export * from './runtime/runner'
+export * from './a2a'
+export * from './bridge'
 export { AgentNexusService }

@@ -11,7 +11,8 @@ const npmPackages: Partial<Record<AgentKind, string>> = {
     openclaw: 'openclaw',
     claude: '@anthropic-ai/claude-code',
     opencode: 'opencode-ai',
-    codex: '@openai/codex'
+    codex: '@openai/codex',
+    pi: '@mariozechner/pi-coding-agent'
 }
 
 const latestCache = new Map<
@@ -156,11 +157,35 @@ export function validateAgentMaintenanceVersion(
     }
 }
 
+export function buildAgentLatestVersionCommand(
+    kind: AgentKind,
+    executablePath?: string
+) {
+    if (kind !== 'claude' || !executablePath) return
+    const brew = homebrewExecutablePath(executablePath)
+    if (!brew) return
+    return `${quoteShell(brew)} info --json=v2 --cask ${quoteShell('claude-code')}`
+}
+
+export function parseHomebrewClaudeVersion(output: string) {
+    const data = JSON.parse(output)
+    const cask = data?.casks?.find((item: any) => item?.token === 'claude-code')
+    if (typeof cask?.version !== 'string' || !cask.version.trim()) {
+        throw new Error('Homebrew 返回结果中没有 claude-code 版本。')
+    }
+    return cask.version.trim()
+}
+
 function homebrewClaudeCommand(executablePath: string) {
+    const brew = homebrewExecutablePath(executablePath)
+    if (!brew) return
+    return `${quoteShell(brew)} upgrade ${quoteShell('claude-code')}`
+}
+
+function homebrewExecutablePath(executablePath: string) {
     if (!/(?:homebrew|linuxbrew)/i.test(executablePath)) return
     const brew = executablePath.replace(/[/\\]claude(?:\.exe)?$/i, '/brew')
-    if (brew === executablePath) return
-    return `${quoteShell(brew)} upgrade ${quoteShell('claude-code')}`
+    return brew === executablePath ? undefined : brew
 }
 
 function compareVersions(left: string, right: string) {

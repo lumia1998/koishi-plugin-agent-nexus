@@ -152,7 +152,7 @@ import type {
 } from '../../src/sessions/types'
 
 const props = defineProps<{ visible: boolean }>()
-const agents = ['hermes', 'openclaw', 'claude', 'opencode', 'codex']
+const agents = ['hermes', 'openclaw', 'claude', 'opencode', 'codex', 'pi']
 const loading = ref(false)
 const deleting = ref(false)
 const retrying = ref(false)

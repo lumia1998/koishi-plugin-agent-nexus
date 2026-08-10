@@ -5,13 +5,15 @@ import { CodexAdapter } from './codex'
 import { HermesAdapter } from './hermes'
 import { OpenClawAdapter } from './openclaw'
 import { OpenCodeAdapter } from './opencode'
+import { PiAdapter } from './pi'
 
 const adapters: CodeAgentAdapter[] = [
     new HermesAdapter(),
     new OpenClawAdapter(),
     new ClaudeAdapter(),
     new OpenCodeAdapter(),
-    new CodexAdapter()
+    new CodexAdapter(),
+    new PiAdapter()
 ]
 
 export function getAdapter(kind: AgentKind): CodeAgentAdapter {

@@ -24,8 +24,10 @@ import { syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
     assertUniqueHostName,
+    mergeA2ASecrets,
     mergeHostSecrets,
     patchHostConfig,
+    redactA2AConfig,
     redactNexusConfig,
     repairHostIds,
     resolveHostReference,
@@ -34,9 +36,11 @@ import {
 import { createId } from '../client/utils/id.ts'
 import { splitMessage } from '../src/utils/text.ts'
 import {
+    buildAgentLatestVersionCommand,
     buildAgentMaintenancePlan,
     isVersionNewer,
     normalizeAgentVersion,
+    parseHomebrewClaudeVersion,
     validateAgentMaintenanceVersion
 } from '../src/agents/maintenance.ts'
 import { mimeType } from '../src/utils/mime.ts'
@@ -64,6 +68,35 @@ test('splits long agent replies without dropping content', () => {
     const text = `${'a'.repeat(20)}\n${'b'.repeat(20)}`
     const chunks = splitMessage(text, 25)
     assert.deepEqual(chunks, ['a'.repeat(20), 'b'.repeat(20)])
+})
+
+test('keeps A2A configuration client-only while preserving remote secrets', () => {
+    const previous = {
+        remotes: [
+            {
+                id: 'remote-1',
+                name: 'OpenCode',
+                baseUrl: 'http://10.1.2.50:9101',
+                authToken: 'TOKEN',
+                enabled: true
+            }
+        ]
+    }
+    const merged = mergeA2ASecrets(
+        {
+            remotes: [
+                {
+                    ...previous.remotes[0],
+                    authToken: ''
+                }
+            ]
+        },
+        previous
+    )
+
+    assert.deepEqual(Object.keys(merged), ['remotes'])
+    assert.equal(merged.remotes[0].authToken, 'TOKEN')
+    assert.equal(redactA2AConfig(merged).remotes[0].authToken, '')
 })
 
 test('rejects unsafe skill path segments', () => {
@@ -913,6 +946,21 @@ test('builds fixed user-scope maintenance plans and compares agent versions', ()
     assert.equal(
         homebrewClaude.command,
         "'/home/linuxbrew/.linuxbrew/bin/brew' upgrade 'claude-code'"
+    )
+    assert.equal(
+        buildAgentLatestVersionCommand(
+            'claude',
+            '/home/linuxbrew/.linuxbrew/bin/claude'
+        ),
+        "'/home/linuxbrew/.linuxbrew/bin/brew' info --json=v2 --cask 'claude-code'"
+    )
+    assert.equal(
+        parseHomebrewClaudeVersion(
+            JSON.stringify({
+                casks: [{ token: 'claude-code', version: '2.1.206' }]
+            })
+        ),
+        '2.1.206'
     )
 
     assert.equal(

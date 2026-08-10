@@ -136,20 +136,22 @@ const emit = defineEmits<{
     scan: [string?]
 }>()
 
-const kinds: AgentKind[] = ['hermes', 'openclaw', 'claude', 'opencode', 'codex']
+const kinds: AgentKind[] = ['hermes', 'openclaw', 'claude', 'opencode', 'codex', 'pi']
 const labels: Record<AgentKind, string> = {
     hermes: 'Hermes',
     openclaw: 'OpenClaw',
     claude: 'Claude Code',
     opencode: 'OpenCode',
-    codex: 'Codex'
+    codex: 'Codex',
+    pi: 'Pi'
 }
 const descriptions: Record<AgentKind, string> = {
     hermes: '通过 hermes -z 非交互执行任务，适合通用问答和工具调用。',
     openclaw: '使用远端 OpenClaw local agent 处理任务和 Skills。',
     claude: '调用 Claude Code print 模式，适合复杂代码分析与修改。',
     opencode: '调用 OpenCode run 模式，可使用远端项目上下文执行任务。',
-    codex: '调用 Codex exec，适合工程实现、检查和自动化操作。'
+    codex: '调用 Codex exec，适合工程实现、检查和自动化操作。',
+    pi: '调用 Pi print 模式，适合轻量代码任务与扩展生态。'
 }
 
 function toggle(kind: AgentKind, value: boolean) {

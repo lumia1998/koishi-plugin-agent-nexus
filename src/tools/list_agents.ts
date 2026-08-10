@@ -5,7 +5,7 @@ export class NexusListAgentsTool extends NexusToolBase {
     name = 'nexus_list_agents'
 
     description =
-        'List remote SSH hosts and installed code agents (hermes/openclaw/claude/opencode/codex).'
+        'List remote SSH hosts and installed code agents (hermes/openclaw/claude/opencode/codex/pi).'
 
     schema = z.object({
         hostId: z

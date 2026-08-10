@@ -220,7 +220,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { AgentKind, NexusConfig, NexusStatus, SshAuth, SshHostConfig } from '../../src/types'
+import type {
+    AgentKind,
+    NexusConfig,
+    NexusStatus,
+    SshAuth,
+    SshHostConfig
+} from '../../src/types'
 
 export type ComputerConnectInput = {
     id?: string
@@ -246,13 +252,21 @@ const emit = defineEmits<{
     maintain: [input: { hostId: string; kind: AgentKind }]
 }>()
 
-const kinds: AgentKind[] = ['hermes', 'openclaw', 'claude', 'opencode', 'codex']
+const kinds: AgentKind[] = [
+    'hermes',
+    'openclaw',
+    'claude',
+    'opencode',
+    'codex',
+    'pi'
+]
 const labels: Record<AgentKind, string> = {
     hermes: 'Hermes',
     openclaw: 'OpenClaw',
     claude: 'Claude Code',
     opencode: 'OpenCode',
-    codex: 'Codex'
+    codex: 'Codex',
+    pi: 'Pi'
 }
 const name = ref('')
 const host = ref('')

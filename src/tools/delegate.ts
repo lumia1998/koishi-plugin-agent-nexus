@@ -8,7 +8,7 @@ export class NexusDelegateTool extends NexusToolBase {
     name = 'nexus_delegate'
 
     description = `Delegate a complex task to a remote code agent over SSH.
-Supported agents: hermes, openclaw, claude, opencode, codex.
+Supported agents: hermes, openclaw, claude, opencode, codex, pi.
 Use this for multi-step coding, crawling skills, repo operations, and long agent workflows.
 The remote agent runs non-interactively, while AgentNexus preserves task state and pending user actions.
 When a previous call asks for a choice, confirmation, or input, call this tool again with the user's answer.
@@ -17,7 +17,7 @@ Produced files can be auto-published.`
     schema = z.object({
         prompt: z.string().describe('Task instruction for the code agent'),
         agent: z
-            .enum(['auto', 'hermes', 'openclaw', 'claude', 'opencode', 'codex'])
+            .enum(['auto', 'hermes', 'openclaw', 'claude', 'opencode', 'codex', 'pi'])
             .optional()
             .describe('Target code agent. Defaults to host/auto selection.'),
         hostId: z
@@ -41,7 +41,7 @@ Produced files can be auto-published.`
 
     async _call(input: {
         prompt: string
-        agent?: 'auto' | 'hermes' | 'openclaw' | 'claude' | 'opencode' | 'codex'
+        agent?: 'auto' | 'hermes' | 'openclaw' | 'claude' | 'opencode' | 'codex' | 'pi'
         hostId?: string
         cwd?: string
         model?: string
