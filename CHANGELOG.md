@@ -2,6 +2,12 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.1.32-alpha.2] - 2026-08-11
+
+### 修复
+
+- 修复 Vite 6 将 Console 样式产物从 `dist/style.css` 改名为 `dist/index.css` 后，Koishi 无法加载插件 CSS，导致 WebUI 退化为原生 HTML 样式、页面贴边和表单错位的问题。
+
 ## [0.1.32-alpha.1] - 2026-08-11
 
 ### 新功能
@@ -39,3 +45,4 @@
 - 这是 `alpha` 预发布版本；自动会话绑定与 Bridge 恢复已通过自动化测试，但仍需在真实 Koishi + ChatLuna + 远端 Bridge 环境完成端到端联调。
 
 [0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
+[0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2

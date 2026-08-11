@@ -85,6 +85,14 @@ async function main() {
 
     // Keep chatluna style: Element comes from Console host tree, not a direct package dep.
     await build(root, {
+        build: {
+            // Koishi Console only discovers dist/style.css for plugin styles.
+            // Vite 6 defaults library CSS to index.css, so keep the Console contract explicit.
+            cssCodeSplit: false,
+            lib: {
+                cssFileName: 'style'
+            }
+        },
         resolve: {
             alias: {
                 'element-plus': elementPlusEntry
@@ -96,7 +104,23 @@ async function main() {
     if (!fs.existsSync(indexJs)) {
         throw new Error('client build finished without dist/index.js')
     }
+
+    const styleCss = path.join(root, 'dist', 'style.css')
+    const indexCss = path.join(root, 'dist', 'index.css')
+    // Keep a fallback for Vite releases that ignore build.lib.cssFileName.
+    if (!fs.existsSync(styleCss) && fs.existsSync(indexCss)) {
+        fs.renameSync(indexCss, styleCss)
+    }
+    if (!fs.existsSync(styleCss)) {
+        const cssFiles = fs
+            .readdirSync(path.join(root, 'dist'))
+            .filter((file) => file.toLowerCase().endsWith('.css'))
+        throw new Error(
+            `client build finished without dist/style.css (found: ${cssFiles.join(', ') || 'none'})`
+        )
+    }
     console.log('client build ok ->', indexJs)
+    console.log('client style ok ->', styleCss)
 }
 
 main().catch((err) => {
