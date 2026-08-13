@@ -1,4 +1,4 @@
-import z from 'zod'
+import z from './chatluna-dependencies'
 import { NexusToolBase } from './base'
 
 export class NexusListAgentsTool extends NexusToolBase {

@@ -1,4 +1,4 @@
-import z from 'zod'
+import z from './chatluna-dependencies'
 import type { A2ATaskView } from '../types'
 import { NexusToolBase } from './base'
 

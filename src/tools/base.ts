@@ -1,4 +1,4 @@
-import { StructuredTool } from '@langchain/core/tools'
+import { StructuredTool } from './chatluna-dependencies'
 import type { AgentNexusService } from '../service'
 
 // LangChain's generic defaults can explode under TS 5.9; keep tools untyped here.

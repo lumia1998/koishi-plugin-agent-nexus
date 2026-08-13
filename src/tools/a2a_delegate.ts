@@ -1,4 +1,4 @@
-import z from 'zod'
+import z from './chatluna-dependencies'
 import type { A2ADelegateToolInput } from '../a2a/delegation-manager'
 import { NexusToolBase } from './base'
 import { toolA2ADelegationContext } from './context'

@@ -50,10 +50,8 @@ fs.mkdirSync(outdir, { recursive: true })
 const external = [
     'koishi',
     'ssh2',
-    '@langchain/core',
     '@a2a-js/sdk',
     '@a2a-js/sdk/*',
-    'zod',
     'ws',
     '@koishijs/plugin-console',
     'koishi-plugin-chatluna',

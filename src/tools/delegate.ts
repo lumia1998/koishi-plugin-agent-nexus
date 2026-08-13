@@ -1,4 +1,4 @@
-import z from 'zod'
+import z from './chatluna-dependencies'
 import { NexusToolBase } from './base'
 import { truncateText } from '../utils/shell'
 import type { DelegateInput } from '../types'
