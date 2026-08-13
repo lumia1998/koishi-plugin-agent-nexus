@@ -2,6 +2,13 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.1.32-alpha.3] - 2026-08-13
+
+### 改进
+
+- 将已打包进 Console `dist` 的 Element Plus、图标、Xterm 与 Koishi Client 移至开发依赖，避免市场安装重复计算整套前端构建工具链。
+- 将 ChatLuna 已提供的 LangChain Core 与 Zod 声明为 peer 依赖，保留严格包管理器下的运行时依赖契约，同时复用宿主版本。
+
 ## [0.1.32-alpha.2] - 2026-08-11
 
 ### 修复
@@ -46,3 +53,4 @@
 
 [0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
 [0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2
+[0.1.32-alpha.3]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.2...v0.1.32-alpha.3
