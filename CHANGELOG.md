@@ -2,6 +2,12 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.1.32-alpha.5] - 2026-08-13
+
+### 发布
+
+- 发布当前 A2A Client、ChatLuna 委托与依赖精简实现，供 Koishi 测试环境联调。
+
 ## [0.1.32-alpha.4] - 2026-08-13
 
 ### 改进
@@ -54,3 +60,4 @@
 [0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
 [0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2
 [0.1.32-alpha.4]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.3...v0.1.32-alpha.4
+[0.1.32-alpha.5]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.4...v0.1.32-alpha.5
