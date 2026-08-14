@@ -2,6 +2,16 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## 未发布
+
+### 改进
+
+- AgentNexus 固定为 A2A Client，移除内置 A2A Bridge/Server、Bridge CLI、SSH 部署与维护入口。
+- ChatLuna 工具收敛为 `nexus_a2a_delegate`；移除 SSH 自动委托、发布、列表及协议级 A2A 调试工具，避免模型误走 SSH 链路。
+- 移除 `nexus.hermes`、`nexus.claudecode` 等 SSH 直调命令，以及其托管 Session Runtime、交互绑定、历史摘要和自动产物发布链路。
+- A2A 委托移除仅供旧 Bridge 使用的 Agent 类型 hint，按远端 Agent Card/Skill 选择并直接转交用户任务。
+- Code Agent 管理改为安装-only：移除版本检测、联网最新版查询和所有更新命令；已安装 Agent 只报告存在状态。
+
 ## [0.1.32-alpha.5] - 2026-08-13
 
 ### 发布

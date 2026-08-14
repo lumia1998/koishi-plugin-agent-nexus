@@ -68,20 +68,9 @@ Promise.all([
         outfile: path.join(outdir, 'index.js'),
         external,
         logLevel: 'info'
-    }),
-    esbuild.build({
-        entryPoints: [path.join(root, 'src/bridge/cli.ts')],
-        bundle: true,
-        platform: 'node',
-        target: 'node20',
-        format: 'cjs',
-        outfile: path.join(outdir, 'bridge.js'),
-        external: ['@a2a-js/sdk', '@a2a-js/sdk/*'],
-        logLevel: 'info'
     })
 ])
     .then(() => {
-        fs.chmodSync(path.join(outdir, 'bridge.js'), 0o755)
         const result = spawnSync(
             process.execPath,
             [

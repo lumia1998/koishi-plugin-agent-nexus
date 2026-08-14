@@ -2,7 +2,7 @@ import type { AgentKind } from '../types'
 import { quoteShell } from '../utils/shell'
 
 export interface AgentMaintenancePlan {
-    action: 'install' | 'update'
+    action: 'install'
     method: string
     command: string
 }
@@ -15,225 +15,38 @@ const npmPackages: Partial<Record<AgentKind, string>> = {
     pi: '@mariozechner/pi-coding-agent'
 }
 
-const latestCache = new Map<
-    AgentKind,
-    { value?: string; error?: string; expiresAt: number }
->()
-
-interface LatestVersionResult {
-    value?: string
-    error?: string
-    expiresAt: number
-}
-
-export async function latestAgentVersion(
-    kind: AgentKind
-): Promise<LatestVersionResult> {
-    const cached = latestCache.get(kind)
-    if (cached && cached.expiresAt > Date.now()) return cached
-    try {
-        const value =
-            kind === 'hermes'
-                ? await fetchJsonVersion(
-                      'https://pypi.org/pypi/hermes-agent/json',
-                      (data) => data?.info?.version
-                  )
-                : await fetchJsonVersion(
-                      `https://registry.npmjs.org/${encodeURIComponent(
-                          npmPackages[kind]!
-                      )}/latest`,
-                      (data) => data?.version
-                  )
-        const result: LatestVersionResult = {
-            value,
-            expiresAt: Date.now() + 10 * 60 * 1000
-        }
-        latestCache.set(kind, result)
-        return result
-    } catch (error) {
-        const result: LatestVersionResult = {
-            error: error instanceof Error ? error.message : String(error),
-            expiresAt: Date.now() + 60 * 1000
-        }
-        latestCache.set(kind, result)
-        return result
-    }
-}
-
 export function buildAgentMaintenancePlan(
     kind: AgentKind,
     installed: boolean,
-    executablePath?: string,
-    targetVersion?: string
+    _executablePath?: string
 ): AgentMaintenancePlan {
-    const action = installed ? 'update' : 'install'
+    if (installed) {
+        throw new Error('该 Agent 已安装，AgentNexus 只提供安装，不提供更新。')
+    }
     if (kind === 'hermes') {
         return {
-            action,
+            action: 'install',
             method: 'NousResearch 官方安装器',
             command: officialInstaller(
                 'https://hermes-agent.nousresearch.com/install.sh'
             )
         }
     }
-    if (kind === 'claude') {
-        const homebrew = executablePath && homebrewClaudeCommand(executablePath)
-        return installed && executablePath
-            ? {
-                  action,
-                  method: homebrew
-                      ? 'Homebrew（claude-code）'
-                      : 'Claude Code 内置更新器',
-                  command: homebrew ?? `${quoteShell(executablePath)} update`
-              }
-            : npmInstallPlan(kind, action, targetVersion)
-    }
-    if (kind === 'opencode') {
-        return installed && executablePath
-            ? {
-                  action,
-                  method: 'OpenCode 内置更新器',
-                  command: `${quoteShell(executablePath)} upgrade`
-              }
-            : npmInstallPlan(kind, action, targetVersion)
-    }
-    return npmInstallPlan(kind, action, targetVersion)
+    return npmInstallPlan(kind)
 }
 
-function npmInstallPlan(
-    kind: AgentKind,
-    action: AgentMaintenancePlan['action'],
-    targetVersion?: string
-): AgentMaintenancePlan {
+function npmInstallPlan(kind: AgentKind): AgentMaintenancePlan {
     const packageName = npmPackages[kind]
     if (!packageName) throw new Error(`Unsupported agent maintenance: ${kind}`)
-    const version = normalizeAgentVersion(targetVersion)
-    if (!version) {
-        throw new Error(`Cannot determine the registry version for ${packageName}`)
-    }
     return {
-        action,
-        method: `npm 用户级安装（${packageName}@${version}）`,
+        action: 'install',
+        method: `npm 用户级安装（${packageName}）`,
         command: [
             'set -e',
             'command -v npm >/dev/null 2>&1 || { echo "npm is required" >&2; exit 127; }',
             'mkdir -p "$HOME/.local"',
-            `npm_config_prefix="$HOME/.local" npm install -g ${quoteShell(
-                `${packageName}@${version}`
-            )}`
+            `npm_config_prefix="$HOME/.local" npm install -g ${quoteShell(packageName)}`
         ].join('; ')
-    }
-}
-
-export function normalizeAgentVersion(value?: string) {
-    const match = value?.match(/(?:^|\s|v)(\d+(?:\.\d+){1,3}(?:-[0-9A-Za-z.-]+)?)/)
-    return match?.[1]
-}
-
-export function isVersionNewer(current?: string, latest?: string) {
-    const left = normalizeAgentVersion(current)
-    const right = normalizeAgentVersion(latest)
-    if (!left || !right) return undefined
-    return compareVersions(right, left) > 0
-}
-
-export function validateAgentMaintenanceVersion(
-    action: AgentMaintenancePlan['action'],
-    current?: string,
-    updated?: string,
-    latest?: string
-) {
-    if (action !== 'update') return
-    const before = normalizeAgentVersion(current)
-    const after = normalizeAgentVersion(updated)
-    const target = normalizeAgentVersion(latest)
-    if (!after) {
-        return '更新命令已结束，但无法读取更新后的版本，不能确认更新成功。'
-    }
-    if (target && compareVersions(after, target) < 0) {
-        return `更新命令已结束，但当前版本仍为 ${after}，未达到最新版本 ${target}。`
-    }
-    if (
-        before &&
-        compareVersions(after, before) <= 0 &&
-        (!target || compareVersions(before, target) < 0)
-    ) {
-        return `更新命令已结束，但版本仍为 ${after}，未发生更新。`
-    }
-}
-
-export function buildAgentLatestVersionCommand(
-    kind: AgentKind,
-    executablePath?: string
-) {
-    if (kind !== 'claude' || !executablePath) return
-    const brew = homebrewExecutablePath(executablePath)
-    if (!brew) return
-    return `${quoteShell(brew)} info --json=v2 --cask ${quoteShell('claude-code')}`
-}
-
-export function parseHomebrewClaudeVersion(output: string) {
-    const data = JSON.parse(output)
-    const cask = data?.casks?.find((item: any) => item?.token === 'claude-code')
-    if (typeof cask?.version !== 'string' || !cask.version.trim()) {
-        throw new Error('Homebrew 返回结果中没有 claude-code 版本。')
-    }
-    return cask.version.trim()
-}
-
-function homebrewClaudeCommand(executablePath: string) {
-    const brew = homebrewExecutablePath(executablePath)
-    if (!brew) return
-    return `${quoteShell(brew)} upgrade ${quoteShell('claude-code')}`
-}
-
-function homebrewExecutablePath(executablePath: string) {
-    if (!/(?:homebrew|linuxbrew)/i.test(executablePath)) return
-    const brew = executablePath.replace(/[/\\]claude(?:\.exe)?$/i, '/brew')
-    return brew === executablePath ? undefined : brew
-}
-
-function compareVersions(left: string, right: string) {
-    const [leftMain, leftPre = ''] = left.split('-', 2)
-    const [rightMain, rightPre = ''] = right.split('-', 2)
-    const a = leftMain.split('.').map(Number)
-    const b = rightMain.split('.').map(Number)
-    for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-        const delta = (a[index] ?? 0) - (b[index] ?? 0)
-        if (delta) return delta
-    }
-    if (leftPre === rightPre) return 0
-    if (!leftPre) return 1
-    if (!rightPre) return -1
-    return leftPre.localeCompare(rightPre, undefined, { numeric: true })
-}
-
-async function fetchJsonVersion(
-    url: string,
-    select: (data: any) => unknown
-) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 8000)
-    try {
-        const response = await fetch(url, {
-            signal: controller.signal,
-            headers: { 'user-agent': 'koishi-plugin-agent-nexus' }
-        })
-        if (!response.ok) throw new Error(`registry HTTP ${response.status}`)
-        if (new URL(response.url).protocol !== 'https:') {
-            throw new Error('registry redirected to a non-HTTPS URL')
-        }
-        const raw = await response.text()
-        if (Buffer.byteLength(raw) > 1024 * 1024) {
-            throw new Error('registry response exceeds 1 MB')
-        }
-        const value = select(JSON.parse(raw))
-        if (typeof value !== 'string' || !value.trim()) {
-            throw new Error('registry response has no version')
-        }
-        return value.trim()
-    } finally {
-        clearTimeout(timer)
     }
 }
 

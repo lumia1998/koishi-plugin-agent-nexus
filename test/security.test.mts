@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import {
-    buildRemoteRealpathCommand,
     isRemotePathWithinRoot,
     validateGitRef,
     validatePathSegment,
@@ -14,12 +13,7 @@ import { CodexAdapter } from '../src/adapters/codex.ts'
 import { HermesAdapter } from '../src/adapters/hermes.ts'
 import { OpenClawAdapter } from '../src/adapters/openclaw.ts'
 import { OpenCodeAdapter } from '../src/adapters/opencode.ts'
-import {
-    cleanAgentText,
-    extractArtifacts,
-    extractPaths,
-    parseJsonLines
-} from '../src/adapters/base.ts'
+import { PiAdapter } from '../src/adapters/pi.ts'
 import { linkSkillToAgents, syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
@@ -30,18 +24,11 @@ import {
     redactA2AConfig,
     redactNexusConfig,
     repairHostIds,
-    resolveHostReference,
-    routeCommandHost
+    resolveHostReference
 } from '../src/utils/config.ts'
 import { createId } from '../client/utils/id.ts'
-import { splitMessage } from '../src/utils/text.ts'
 import {
-    buildAgentLatestVersionCommand,
     buildAgentMaintenancePlan,
-    isVersionNewer,
-    normalizeAgentVersion,
-    parseHomebrewClaudeVersion,
-    validateAgentMaintenanceVersion
 } from '../src/agents/maintenance.ts'
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
@@ -56,7 +43,6 @@ import {
     parseEnvironmentProbe
 } from '../src/ssh/session.ts'
 import { terminalMessageSize } from '../src/proxy.ts'
-import { NexusListAgentsTool } from '../src/tools/list_agents.ts'
 import { SftpFileManager } from '../src/files/manager.ts'
 
 test('pins and verifies SSH SHA-256 host keys', () => {
@@ -91,12 +77,6 @@ test('creates UUIDs without crypto.randomUUID for LAN HTTP consoles', () => {
         }
     })
     assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-})
-
-test('splits long agent replies without dropping content', () => {
-    const text = `${'a'.repeat(20)}\n${'b'.repeat(20)}`
-    const chunks = splitMessage(text, 25)
-    assert.deepEqual(chunks, ['a'.repeat(20), 'b'.repeat(20)])
 })
 
 test('keeps A2A configuration client-only while preserving remote secrets', () => {
@@ -163,216 +143,11 @@ test('rejects repository values that can become git options', () => {
     assert.equal(validateRepoUrl('git@example.com:team/repo.git'), 'git@example.com:team/repo.git')
 })
 
-test('only allows publishing files below the remote root', () => {
+test('confines remote files to the configured root', () => {
     assert.equal(isRemotePathWithinRoot('/home/agent/out/a.png', '/home/agent/out'), true)
     assert.equal(isRemotePathWithinRoot('/home/agent/out/../.ssh/id_rsa', '/home/agent/out'), false)
     assert.equal(isRemotePathWithinRoot('/etc/passwd', '/home/agent'), false)
     assert.equal(isRemotePathWithinRoot('/etc/passwd', '/'), true)
-})
-
-test('quotes remote paths before canonicalization', () => {
-    const command = buildRemoteRealpathCommand("/tmp/a'; touch /tmp/pwned; '")
-    assert.equal(command, "readlink -f -- '/tmp/a'\\''; touch /tmp/pwned; '\\'''" )
-})
-
-test('quotes model overrides in agent commands', () => {
-    const model = 'model; touch /tmp/pwned'
-    const runtime = {
-        openclawAgent: 'default',
-        claudeSkipPermissions: false,
-        codexBypassSandbox: false,
-        opencodeAuto: true,
-        defaultTimeoutMs: 1000
-    }
-
-    for (const adapter of [new ClaudeAdapter(), new CodexAdapter(), new OpenCodeAdapter()]) {
-        const command = adapter.buildInnerCommand('"$PROMPT"', { prompt: '', model, runtime })
-        assert.match(command, /'model; touch \/tmp\/pwned'/)
-    }
-})
-
-test('honors runtime safety switches in agent commands', () => {
-    const runtime = {
-        openclawAgent: 'default',
-        claudeSkipPermissions: false,
-        codexBypassSandbox: false,
-        opencodeAuto: false,
-        defaultTimeoutMs: 1000
-    }
-    assert.doesNotMatch(new ClaudeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /skip-permissions/)
-    assert.doesNotMatch(new CodexAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /bypass-approvals/)
-    assert.doesNotMatch(new OpenCodeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /--auto/)
-
-    runtime.claudeSkipPermissions = true
-    runtime.codexBypassSandbox = true
-    runtime.opencodeAuto = true
-    assert.match(new ClaudeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /skip-permissions/)
-    assert.match(new CodexAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /bypass-approvals/)
-    assert.match(new OpenCodeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /--auto/)
-})
-
-test('parses JSONL agent output into readable text', () => {
-    const text = [
-        JSON.stringify({ type: 'message', part: { type: 'text', text: 'first' } }),
-        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'second' } })
-    ].join('\n')
-    assert.equal(parseJsonLines(text), 'first\nsecond')
-})
-
-test('runs Hermes one-shot queries without CLI presentation output', () => {
-    const command = new HermesAdapter().buildInnerCommand('"$PROMPT"', {
-        prompt: '',
-        runtime: {
-            openclawAgent: 'default',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        }
-    })
-    assert.equal(command, 'hermes -z "$PROMPT"')
-})
-
-test('uses Claude Code single-result JSON without session persistence', () => {
-    const adapter = new ClaudeAdapter()
-    const command = adapter.buildInnerCommand('"$PROMPT"', {
-        prompt: '',
-        runtime: {
-            openclawAgent: 'default',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        }
-    })
-    assert.match(command, /-p "\$PROMPT" --output-format json --no-session-persistence/)
-    const result = adapter.parseResult(
-        JSON.stringify({ result: 'final answer', session_id: 'ignored' }),
-        '',
-        0,
-        false,
-        command
-    )
-    assert.equal(result.text, 'final answer')
-    assert.equal(result.providerState, undefined)
-
-    const managed = adapter.buildInnerCommand('"$PROMPT"', {
-        prompt: '',
-        runtime: {
-            openclawAgent: 'default',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        },
-        sessionMode: 'managed',
-        providerState: { sessionId: 'claude-session-id' }
-    })
-    assert.match(managed, /--resume 'claude-session-id'/)
-    assert.match(managed, /--append-system-prompt/)
-    assert.doesNotMatch(managed, /--no-session-persistence/)
-    const resumed = adapter.parseResult(
-        JSON.stringify({ result: 'continued', session_id: 'claude-session-id' }),
-        '',
-        0,
-        false,
-        managed
-    )
-    assert.equal(resumed.providerState?.sessionId, 'claude-session-id')
-})
-
-test('uses current OpenClaw JSON agent invocation', () => {
-    const adapter = new OpenClawAdapter()
-    const command = adapter.buildInnerCommand('"$PROMPT"', {
-        prompt: '',
-        runtime: {
-            openclawAgent: 'main',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        }
-    })
-    assert.equal(
-        command,
-        `openclaw agent --local --agent 'main' --message "$PROMPT" --json`
-    )
-    const result = adapter.parseResult(
-        JSON.stringify({ payloads: [{ text: 'first' }, { text: 'second' }] }),
-        '',
-        0,
-        false,
-        command
-    )
-    assert.equal(result.text, 'first\nsecond')
-})
-
-test('keeps only OpenCode assistant text events', () => {
-    const adapter = new OpenCodeAdapter()
-    const stdout = [
-        JSON.stringify({ type: 'step_start', part: { text: 'starting' } }),
-        JSON.stringify({ type: 'tool_use', part: { text: 'tool preview' } }),
-        JSON.stringify({ type: 'text', part: { text: 'final answer' } })
-    ].join('\n')
-    const result = adapter.parseResult(stdout, '', 0, false, 'opencode run')
-    assert.equal(result.text, 'final answer')
-})
-
-test('keeps only completed Codex agent messages', () => {
-    const adapter = new CodexAdapter()
-    const stdout = [
-        JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', text: 'ls' } }),
-        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })
-    ].join('\n')
-    const result = adapter.parseResult(stdout, '', 0, false, 'codex exec')
-    assert.equal(result.text, 'done')
-    assert.match(
-        adapter.buildInnerCommand('"$PROMPT"', {
-            prompt: '',
-            runtime: {
-                openclawAgent: 'default',
-                claudeSkipPermissions: false,
-                codexBypassSandbox: false,
-                opencodeAuto: true,
-                defaultTimeoutMs: 1000
-            }
-        }),
-        /--json --ephemeral/
-    )
-})
-
-test('removes internal file manifests from user-visible agent text', () => {
-    assert.equal(
-        cleanAgentText(`完成。\n\n<nexus_files>\n（无文件产生）\n</nexus_files>`),
-        '完成。'
-    )
-    assert.equal(
-        cleanAgentText(`完成。\n<nexus_files>\n/workspace/report.pdf\n</nexus_files>\n请查收。`),
-        '完成。\n\n请查收。'
-    )
-})
-
-test('extracts files before hiding the internal manifest from replies', () => {
-    const adapter = new HermesAdapter()
-    const result = adapter.parseResult(
-        `报告已生成。\n<nexus_files>\n/workspace/report.pdf\n</nexus_files>`,
-        '',
-        0,
-        false,
-        'hermes -z'
-    )
-    assert.equal(result.text, '报告已生成。')
-    assert.deepEqual(result.files, ['/workspace/report.pdf'])
-})
-
-test('only extracts explicitly declared or markdown-linked local files', () => {
-    const text = `Visit https://example.com/a.png and import foo/bar.ts.
-![result](./out/result.png)
-<nexus_files>
-/workspace/report.pdf
-https://example.com/remote.zip
-</nexus_files>`
-    assert.deepEqual(extractPaths(text), ['/workspace/report.pdf', './out/result.png'])
 })
 
 test('uses file-specific MIME types for storage uploads', () => {
@@ -398,14 +173,15 @@ test('expands the configured skill root through remote HOME', async () => {
         skillRoot: '~/.agent-nexus/skills',
         hosts: [],
         skills: [],
-        agents: { hermes: true, openclaw: true, claude: true, opencode: true, codex: true },
-        runtime: {
-            openclawAgent: 'default',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        }
+        agents: {
+            hermes: true,
+            openclaw: true,
+            claude: true,
+            opencode: true,
+            codex: true,
+            pi: true
+        },
+        a2a: { remotes: [] }
     }
 
     await syncSkillSource(
@@ -481,14 +257,15 @@ test('redacts stored host secrets before returning console data', () => {
             }
         ],
         skills: [],
-        agents: { hermes: true, openclaw: true, claude: true, opencode: true, codex: true },
-        runtime: {
-            openclawAgent: 'default',
-            claudeSkipPermissions: false,
-            codexBypassSandbox: false,
-            opencodeAuto: true,
-            defaultTimeoutMs: 1000
-        }
+        agents: {
+            hermes: true,
+            openclaw: true,
+            claude: true,
+            opencode: true,
+            codex: true,
+            pi: true
+        },
+        a2a: { remotes: [] }
     }
 
     const redacted = redactNexusConfig(config)
@@ -529,7 +306,6 @@ test('keeps previous auth when password host is edited without auth field', () =
         username: 'root',
         auth: { type: 'password' as const, password: 'secret' },
         enabled: true,
-        defaultAgent: 'claude' as const,
         idleTimeoutMs: 30_000,
         cwd: '~/work'
     }
@@ -540,7 +316,6 @@ test('keeps previous auth when password host is edited without auth field', () =
         username: 'root'
     })
     assert.deepEqual(patched.auth, previous.auth)
-    assert.equal(patched.defaultAgent, 'claude')
     assert.equal(patched.idleTimeoutMs, 30_000)
     assert.equal(patched.cwd, '~/work')
     assert.equal(patched.host, '10.1.2.11')
@@ -603,78 +378,6 @@ test('resolves SSH hosts by ID, address, name, and connection target', () => {
     assert.equal(resolveHostReference(hosts, 'lumia@10.1.2.50:22')?.id, 'host-50')
 })
 
-test('parses labeled PDF artifacts and hides internal paths from replies', () => {
-    const output = `搞定了。
-pdf_path=/home/lumia/work/downloads/766045.pdf
-pdf_size=5.0MB
-pdf_password=972350
-漫画=[星穹铁道]花火的恶作剧惩罚`
-    const result = new HermesAdapter().parseResult(
-        output,
-        '',
-        0,
-        false,
-        'hermes chat'
-    )
-    assert.deepEqual(result.files, [
-        '/home/lumia/work/downloads/766045.pdf'
-    ])
-    assert.deepEqual(extractArtifacts(output), [
-        {
-            path: '/home/lumia/work/downloads/766045.pdf',
-            size: '5.0MB',
-            password: '972350',
-            title: '[星穹铁道]花火的恶作剧惩罚'
-        }
-    ])
-    assert.doesNotMatch(result.text, /pdf_path|\/home\/lumia/)
-    assert.match(result.text, /文件大小：5\.0MB/)
-    assert.match(result.text, /解压密码：972350/)
-    assert.match(result.text, /漫画：\[星穹铁道]/)
-})
-
-test('states explicitly when a PDF skill returns an empty password', () => {
-    const result = new HermesAdapter().parseResult(
-        'pdf_path=/workspace/a.pdf\npdf_password=',
-        '',
-        0,
-        false,
-        'hermes chat'
-    )
-    assert.equal(result.text, '解压密码：Skill 未返回密码')
-})
-
-test('list agents accepts a device name instead of filtering only by host id', async () => {
-    const status = {
-        enabled: true,
-        defaultHostId: 'host-computer',
-        hosts: [
-            {
-                id: 'host-computer',
-                name: 'computer',
-                host: 'lumia@10.1.2.50:22',
-                state: 'connected' as const,
-                agents: [],
-                sessionCount: 1
-            }
-        ],
-        skills: { total: 0, items: [] },
-        activeSessions: 0
-    }
-    const tool = new NexusListAgentsTool({
-        resolveHostId(reference: string) {
-            assert.equal(reference, 'computer')
-            return 'host-computer'
-        },
-        getStatus() {
-            return status
-        }
-    } as any)
-    const output = await tool._call({ hostId: 'computer' })
-    assert.match(output, /name: computer/)
-    assert.doesNotMatch(output, /No hosts configured/)
-})
-
 test('rejects ambiguous SSH host addresses', () => {
     const hosts = ['first', 'second'].map((id) => ({
         id,
@@ -704,64 +407,6 @@ test('repairs missing and duplicate SSH host IDs', () => {
     assert.equal(repaired.changed, true)
     assert.equal(new Set(repaired.hosts.map((host) => host.id)).size, 4)
     assert.ok(repaired.hosts.every((host) => host.id))
-})
-
-test('routes commands directly when only one SSH host is enabled', () => {
-    const hosts = [
-        {
-            id: 'only',
-            name: 'hermes',
-            host: '10.1.2.40',
-            port: 22,
-            username: 'lumia',
-            auth: { type: 'password' as const, password: 'secret' },
-            enabled: true,
-            idleTimeoutMs: 1000
-        }
-    ]
-    assert.deepEqual(routeCommandHost(hosts, '查看 Linux 版本'), {
-        hostId: 'only',
-        prompt: '查看 Linux 版本'
-    })
-})
-
-test('routes multi-host commands by leading device name', () => {
-    const hosts = ['hermes', 'claude'].map((name, index) => ({
-        id: `host-${index}`,
-        name,
-        host: `10.1.2.${40 + index}`,
-        port: 22,
-        username: 'lumia',
-        auth: { type: 'password' as const, password: 'secret' },
-        enabled: true,
-        idleTimeoutMs: 1000
-    }))
-    assert.deepEqual(routeCommandHost(hosts, 'hermes 查看 Linux 版本'), {
-        hostId: 'host-0',
-        prompt: '查看 Linux 版本'
-    })
-    assert.throws(() => routeCommandHost(hosts, '查看 Linux 版本'), /hermes、claude/)
-})
-
-test('routes multi-host commands by longest device name prefix', () => {
-    const hosts = ['build', 'build-server'].map((name, index) => ({
-        id: `host-${index}`,
-        name,
-        host: `10.1.2.${40 + index}`,
-        port: 22,
-        username: 'lumia',
-        auth: { type: 'password' as const, password: 'secret' },
-        enabled: true,
-        idleTimeoutMs: 1000
-    }))
-    assert.deepEqual(routeCommandHost(hosts, 'build-server 检查版本'), {
-        hostId: 'host-1',
-        prompt: '检查版本'
-    })
-    assert.deepEqual(routeCommandHost(hosts, 'build 修 bug'), {
-        hostId: 'host-0',
-        prompt: '修 bug'
-    })
 })
 
 function sshSession(maxOutputBytes = 1024) {
@@ -818,7 +463,7 @@ test('limits captured SSH output', async () => {
     assert.equal(result.truncated, true)
 })
 
-test('rejects oversized automatic SSH asset publishing before opening a stream', async () => {
+test('rejects oversized SSH asset reads before opening a stream', async () => {
     const session = sshSession()
     let opened = false
     ;(session as any).getSftp = async () => ({
@@ -831,7 +476,7 @@ test('rejects oversized automatic SSH asset publishing before opening a stream',
         size: 5,
         isFile: () => true
     })
-    await assert.rejects(() => session.openAsset('/tmp/large.bin', 4), /publish limit/)
+    await assert.rejects(() => session.openAsset('/tmp/large.bin', 4), /read limit/)
     assert.equal(opened, false)
 })
 
@@ -882,8 +527,10 @@ test('measures terminal WebSocket messages before parsing', () => {
 
 test('detects hermes outside bare non-interactive PATH', async () => {
     const adapter = new HermesAdapter()
+    const calls: string[] = []
     const session = {
         async exec(command: string) {
+            calls.push(command)
             if (command.includes('found=') || command.includes('command -v')) {
                 return {
                     exitCode: 0,
@@ -906,7 +553,8 @@ test('detects hermes outside bare non-interactive PATH', async () => {
     const result = await adapter.detect(session as any)
     assert.equal(result.installed, true)
     assert.equal(result.path, '/home/lumia/.local/bin/hermes')
-    assert.equal(result.version, 'hermes 0.9.0')
+    assert.equal(result.scanned, true)
+    assert.equal(calls.some((command) => command.includes('--version')), false)
 })
 
 test('reports hermes missing when no candidate path exists', async () => {
@@ -963,13 +611,16 @@ test('detects every supported agent through the shared SSH probe', async () => {
         new OpenClawAdapter(),
         new ClaudeAdapter(),
         new OpenCodeAdapter(),
-        new CodexAdapter()
+        new CodexAdapter(),
+        new PiAdapter()
     ]
     for (const adapter of adapters) {
         const bin = adapter.binNames[0]
         const executable = `/home/lumia/.${adapter.kind}/bin/${bin}`
+        const calls: string[] = []
         const session = {
             async exec(command: string) {
+                calls.push(command)
                 if (command.includes('--version')) {
                     return {
                         exitCode: 0,
@@ -989,98 +640,33 @@ test('detects every supported agent through the shared SSH probe', async () => {
         const result = await adapter.detect(session as any)
         assert.equal(result.installed, true, adapter.kind)
         assert.equal(result.path, executable, adapter.kind)
-        assert.equal(result.version, `${bin} smoke-version`, adapter.kind)
+        assert.equal(result.scanned, true, adapter.kind)
+        assert.equal(
+            calls.some((command) => command.includes('--version')),
+            false,
+            adapter.kind
+        )
     }
 })
 
-test('builds fixed user-scope maintenance plans and compares agent versions', () => {
-    assert.equal(normalizeAgentVersion('Hermes Agent v0.18.0 (2026.7.1)'), '0.18.0')
-    assert.equal(normalizeAgentVersion('2.1.205 (Claude Code)'), '2.1.205')
-    assert.equal(isVersionNewer('2.1.205', '2.1.214'), true)
-    assert.equal(isVersionNewer('1.18.3', '1.18.3'), false)
-
-    const codex = buildAgentMaintenancePlan('codex', false, undefined, '1.2.3')
+test('builds install-only maintenance plans without registry version checks', () => {
+    const codex = buildAgentMaintenancePlan('codex', false)
     assert.equal(codex.action, 'install')
     assert.match(codex.command, /npm_config_prefix="\$HOME\/\.local"/)
-    assert.match(codex.command, /'@openai\/codex@1\.2\.3'/)
+    assert.match(codex.command, /'@openai\/codex'/)
     assert.doesNotMatch(codex.command, /sudo/)
-    assert.throws(
-        () => buildAgentMaintenancePlan('codex', false),
-        /determine the registry version/i
-    )
 
-    const claudeInstall = buildAgentMaintenancePlan(
-        'claude',
-        false,
-        undefined,
-        '2.1.205'
-    )
-    assert.match(claudeInstall.command, /'@anthropic-ai\/claude-code@2\.1\.205'/)
+    const claudeInstall = buildAgentMaintenancePlan('claude', false)
+    assert.match(claudeInstall.command, /'@anthropic-ai\/claude-code'/)
     assert.doesNotMatch(claudeInstall.command, /claude\.ai\/install/)
 
-    const opencodeInstall = buildAgentMaintenancePlan(
-        'opencode',
-        false,
-        undefined,
-        '1.2.3'
-    )
-    assert.match(opencodeInstall.command, /'opencode-ai@1\.2\.3'/)
+    const opencodeInstall = buildAgentMaintenancePlan('opencode', false)
+    assert.match(opencodeInstall.command, /'opencode-ai'/)
     assert.doesNotMatch(opencodeInstall.command, /opencode\.ai\/install/)
 
-    const claude = buildAgentMaintenancePlan(
-        'claude',
-        true,
-        '/home/lumia/.local/bin/claude'
-    )
-    assert.equal(claude.action, 'update')
-    assert.equal(
-        claude.command,
-        "'/home/lumia/.local/bin/claude' update"
-    )
-
-    const homebrewClaude = buildAgentMaintenancePlan(
-        'claude',
-        true,
-        '/home/linuxbrew/.linuxbrew/bin/claude'
-    )
-    assert.equal(homebrewClaude.method, 'Homebrew（claude-code）')
-    assert.equal(
-        homebrewClaude.command,
-        "'/home/linuxbrew/.linuxbrew/bin/brew' upgrade 'claude-code'"
-    )
-    assert.equal(
-        buildAgentLatestVersionCommand(
-            'claude',
-            '/home/linuxbrew/.linuxbrew/bin/claude'
-        ),
-        "'/home/linuxbrew/.linuxbrew/bin/brew' info --json=v2 --cask 'claude-code'"
-    )
-    assert.equal(
-        parseHomebrewClaudeVersion(
-            JSON.stringify({
-                casks: [{ token: 'claude-code', version: '2.1.206' }]
-            })
-        ),
-        '2.1.206'
-    )
-
-    assert.equal(
-        validateAgentMaintenanceVersion(
-            'update',
-            '2.1.192 (Claude Code)',
-            '2.1.192 (Claude Code)',
-            '2.1.205'
-        ),
-        '更新命令已结束，但当前版本仍为 2.1.192，未达到最新版本 2.1.205。'
-    )
-    assert.equal(
-        validateAgentMaintenanceVersion(
-            'update',
-            '2.1.192 (Claude Code)',
-            '2.1.205 (Claude Code)',
-            '2.1.205'
-        ),
-        undefined
+    assert.throws(
+        () => buildAgentMaintenancePlan('claude', true),
+        /只提供安装，不提供更新/
     )
 
     const hermes = buildAgentMaintenancePlan('hermes', false)

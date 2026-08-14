@@ -10,21 +10,6 @@ import {
     validateSkillSubdir
 } from '../utils/security'
 
-const NEXUS_MARKER = '<nexus_files>'
-
-export function appendFileHint(prompt: string) {
-    if (prompt.includes(NEXUS_MARKER)) return prompt
-    return `${prompt.trim()}
-
-完成后：
-1) 把最终答案写在最后
-2) 仅当产生文件或图片时，用绝对路径列出：
-${NEXUS_MARKER}
-/abs/path/to/file
-</nexus_files>
-没有产生文件时不要输出上述标签。`
-}
-
 export async function syncSkillSource(
     session: SshSession,
     source: SkillSourceConfig,

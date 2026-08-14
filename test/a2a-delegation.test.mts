@@ -3,7 +3,6 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { Task, TaskState } from '@a2a-js/sdk'
 import {
     A2ADelegationManager,
     type A2ADelegationBackend
@@ -13,7 +12,6 @@ import {
     type A2ADelegationContext,
     type A2ADelegationTask
 } from '../src/a2a/delegation-store.ts'
-import { BoundedTaskStore } from '../src/bridge/task-store.ts'
 import { notifyChatLunaA2ADelegation } from '../src/a2a/chatluna-wakeup.ts'
 
 test('persists ChatLuna A2A job bindings', async () => {
@@ -163,44 +161,6 @@ test('runs A2A in background, wakes ChatLuna, and reuses bound context', async (
         assert.equal(sent[2].contextId, 'context-1')
     } finally {
         await manager.stop()
-        await rm(directory, { recursive: true, force: true })
-    }
-})
-
-test('restores bridge A2A tasks and marks interrupted work resumable', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-a2a-store-'))
-    const file = path.join(directory, 'tasks.json')
-    const context = {
-        tenant: '',
-        user: { isAuthenticated: true, userName: 'client-1' }
-    } as any
-    try {
-        const first = new BoundedTaskStore(8, file)
-        await first.init()
-        await first.save(
-            Task.fromJSON({
-                id: 'task-running',
-                contextId: 'context-1',
-                status: {
-                    state: 'TASK_STATE_WORKING',
-                    timestamp: new Date().toISOString()
-                },
-                artifacts: [],
-                history: []
-            }),
-            context
-        )
-        await first.flush()
-
-        const restored = new BoundedTaskStore(8, file)
-        await restored.init()
-        const task = await restored.load('task-running', context)
-        assert.equal(task?.status?.state, TaskState.TASK_STATE_INPUT_REQUIRED)
-        assert.match(
-            String((task?.status?.message as any)?.parts?.[0]?.content?.value || ''),
-            /restarted/i
-        )
-    } finally {
         await rm(directory, { recursive: true, force: true })
     }
 })

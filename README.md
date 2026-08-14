@@ -1,12 +1,17 @@
 # koishi-plugin-agent-nexus
 
-AgentNexus 是面向 ChatLuna 的 SSH Agent 管理器与 A2A Client。插件通过 SSH 连接
-远端机器、自动探测和维护已安装的 Code Agent，并通过外部 Agent Card 与不同框架
-或厂商的 A2A Server 发现、委托和续接任务。
+AgentNexus 是面向 ChatLuna 的 **SSH 运维面 + A2A Client**。
+
+- SSH 用于管理远端机器、探测和安装 Agent、同步 Skills、SFTP 文件管理与终端。
+- A2A 用于让 ChatLuna 发现并委托外部 Agent Server。
+
+AgentNexus 固定作为 A2A Client，不实现、部署或维护 A2A Server，也不再提供按框架点名的
+SSH 直调命令。ChatLuna 调用远端 Agent 时只走
+`nexus_a2a_delegate`，不会把 SSH Agent CLI 当作模型工具。
 
 [更新日志](./CHANGELOG.md)
 
-支持：
+## 支持的 Agent
 
 - Hermes
 - OpenClaw
@@ -15,345 +20,186 @@ AgentNexus 是面向 ChatLuna 的 SSH Agent 管理器与 A2A Client。插件通�
 - Codex
 - Pi
 
+这些适配器只负责通过 SSH 探测可执行文件、安装缺失的 Agent，以及提供 Skills 目录信息。
+不同框架的实际任务调用由各自的 A2A Server 负责。
+
 ## 功能
 
-- SSH 密码登录，配置后自动保持连接并在断线后重连
-- 自动扫描远端可用的 Code Agent
-- 对比官方最新版本，并在 Computer 页面一键安装或更新 Code Agent
-- 注册高层 A2A 后台委托工具与 SSH 工具；协议级 A2A 工具保留为调试能力
-- 提供命令直接调用各 Code Agent，无需经过 ChatLuna 工具选择
-- 从 Git 仓库同步 Skills，并软链接到各 Agent 的 Skills 目录
-- 通过 SFTP 回传远端生成的文件和图片
-- Koishi Console SFTP 文件管理：浏览、预览、编辑、上传下载、目录和重命名删除
-- Koishi Console 单实例交互终端
-- 支持远端工作目录和 Agent 自动路由
-- A2A v1.0 Client，并兼容 v0.3 Agent Card 与 JSON-RPC
-- 在 A2A 页面逐个管理外部 Agent Card、Bearer Token、传输方式和任务状态
-- 提供可选的独立 `agent-nexus-bridge`，在远端把本机 CLI 发布为 A2A Server
+- SSH 密码或私钥认证
+- SSH SHA-256 主机密钥 TOFU 或严格校验
+- 已启用设备自动保持连接与断线重连
+- 探测六类 Code Agent 的可执行文件
+- 一键安装未检测到的 Agent
+- 不执行版本检测、最新版查询或 Agent 更新
+- 从 Git 仓库同步 Skills，并软链接到已安装 Agent
+- SFTP 文件浏览、预览、编辑、上传、下载、重命名和删除
+- Koishi Console 交互终端
+- A2A v1.0 Client，并兼容常见 v0.3 Agent Card 与 JSON-RPC Server
+- 独立管理每个外部 Agent Card、Bearer Token、Card 路径和传输方式
+- 只向 ChatLuna 注册一个高层后台委托工具
 
 ## 安装
-
-在 Koishi 项目目录执行：
 
 ```bash
 npm install koishi-plugin-agent-nexus
 ```
 
-也可以通过 Koishi 插件市场搜索 `agent-nexus` 安装。
+也可以在 Koishi 插件市场搜索 `agent-nexus`。
 
-AgentNexus 需要 ChatLuna 和 `koishi-plugin-chatluna-storage-service`。
-Console 页面和交互终端还需要 Koishi 的 `console` 与 `server` 服务。
-当前版本要求 Node.js 20 或更高版本。
+运行要求：
+
+- Node.js 20 或更高版本
+- `koishi-plugin-chatluna`
+- `koishi-plugin-chatluna-storage-service`
+- Console 页面需要 Koishi `console`
+- 交互终端需要 Koishi `server`
 
 ## 快速开始
 
-1. 在 Koishi 配置中启用 `agent-nexus`。
-2. 打开 Koishi Console 左侧的 **AgentNexus** 页面。
-3. 在 **Computer** 页面填写远端 SSH 地址、端口、账号和密码。
-4. 点击 **连接并扫描**。
-5. 等待 Hermes、OpenClaw、Claude Code、OpenCode、Codex、Pi 状态标签亮起。
-6. ChatLuna 随后可以调用 AgentNexus 工具委托远端 Agent 执行任务。
+1. 在 Koishi 中启用 ChatLuna、ChatLuna Storage 和 AgentNexus。
+2. 打开 Console 左侧的 **AgentNexus**。
+3. 在 **Computer** 页添加远端 SSH 设备并连接扫描。
+4. 对未安装的 Agent 点击安装；需要时在 **Skills** 页同步技能仓库。
+5. 在远端按对应框架说明启动 A2A Server。
+6. 在 **A2A** 页逐个添加完整 Agent Card URL，然后点击发现。
+7. ChatLuna 使用 `nexus_a2a_delegate` 把任务交给外部 Agent。
 
-SSH 主机密钥默认采用 **首次信任并固定（TOFU）**：首次成功握手会保存服务器的
-SHA-256 指纹，后续指纹变化会拒绝连接。已知服务器指纹时可在 Computer 页面选择
-“严格校验”并预先填写 `SHA256:...`；只有兼容旧环境时才应选择“不校验”。
+## 职责边界
 
-如果 SSH 已连接但 Agent 显示 `0/6`，点击页面右上角的 **刷新并重扫**。扫描会读取
-远端 login + interactive shell 的 `HOME`、`PATH` 和 `SHELL`，并让实际执行使用扫描
-得到的绝对可执行文件路径；Computer 页面也会显示当前环境探测是否发生降级。
+### SSH 负责
 
-也可以直接发送 Koishi 命令调用指定 Agent：
+- 主机连接、重连和主机密钥校验
+- Agent 可执行文件存在性探测
+- 安装尚未安装的 Agent
+- Skills 同步与软链接
+- SFTP 文件管理
+- Console 交互终端
 
-```text
-nexus.hermes <任务>
-nexus.openclaw <任务>
-nexus.claudecode <任务>
-nexus.opencode <任务>
-nexus.codex <任务>
-nexus.pi <任务>
-nexus.cancel
-```
+### A2A 负责
 
-也可以进入指定设备和 Agent 的交互模式。点号与空格写法都支持：
+- Agent Card 和 Skills 发现
+- 创建、续接、查询、补充输入和取消远端任务
+- 维护 A2A Task ID 与 Context ID
+- 在任务完成、失败或等待输入时唤醒原 ChatLuna 会话
 
-```text
-nexus hermes 开发机
-# 等价于 nexus.hermes 开发机
-
-搜索漫画
-2
-下载到当前目录
-
-nexus hermes 开发机 -q
-```
-
-进入后，该用户在当前 Bot、平台和频道中的普通消息都会交给绑定的 Agent，
-不再需要重复输入命令与设备名。`-q` 主动退出；默认空闲 15 分钟自动退出，
-可通过插件配置 `interactiveSessionTtlMs` 调整。
-
-## Session Runtime
-
-AgentNexus 会在自身维护任务会话，并把消息历史、任务状态、Skill 状态和待处理动作
-重新编译进后续 prompt。每次调用仍是新的非交互进程；支持原生 checkpoint 的 CLI
-还会保存 provider session ID，让工具执行记录与模型上下文也能继续。
-
-对于 Hermes，Session Runtime 会使用 `hermes chat --quiet --yolo -q` 创建原生
-Hermes session，并保存 stderr 中的 `session_id`；后续调用通过 `--resume` 继续
-Hermes 的 Tool/Skill transcript。Nexus 仍负责用户路由、TTL、并发、确认和取消，
-Hermes session 只作为 provider checkpoint。普通 `delegate()` one-shot 调用仍使用
-`hermes -z`。
-
-Pi 在普通 one-shot 委托中使用 `pi -p --no-session`。在 ChatLuna managed session 和
-A2A Task 中改用官方 `--mode json` 事件流，保存首行 session header 的 `id`，后续通过
-`--session <id>` 恢复同一个 Pi session；最终回复从 assistant message event 中提取，
-不会把 JSONL 协议事件直接显示给用户。
-
-Hermes chat 会继承远端设备的 `~/.hermes/config.yaml`。如果回复中反复出现
-`Warning: Unknown toolsets: messaging`，说明 Hermes 升级后仍保留了已经移除的旧
-`messaging` toolset；请在远端运行 `hermes tools` 重新保存工具配置，或从
-`platform_toolsets.cli` 中删除 `messaging`。AgentNexus 会过滤这条启动警告，避免
-它污染聊天回复，但清理远端配置才能恢复正确的 Hermes 工具集。
-
-当 Agent 或 Skill 需要用户输入时，可以返回结构化控制结果：
-
-```json
-{
-  "status": "waiting_confirm",
-  "prompt": "请选择漫画",
-  "options": [
-    { "id": 1, "label": "漫画A", "value": { "comicId": "a" } },
-    { "id": 2, "label": "漫画B", "value": { "comicId": "b" } }
-  ],
-  "data": { "skill": "search_comic" }
-}
-```
-
-直接命令产生唯一待处理会话时，用户下一条普通消息（例如 `2`）会恢复该任务；
-也可以再次使用对应的 `nexus.*` 命令。ChatLuna 工具会按 conversation 隔离会话，
-下一轮应再次调用 `nexus_delegate` 并把用户答案作为 `prompt`。
-
-会话默认持久化到 `{koishi.baseDir}/data/agent-nexus/sessions.json`，插件重启后会
-恢复未结束的等待任务；已结束会话会在 WebUI 的“会话”页按标题、摘要、Agent 和
-状态查询，支持查看消息、删除历史和重新生成摘要。摘要默认调用 ChatLuna 默认模型，
-也可通过 `sessionSummaryModel` 指定模型；模型不可用时会保留本地 fallback 摘要。
-历史默认保留 30 天，可通过 `sessionHistoryRetentionMs` 调整。
-
-源码仓库可以复用实际 Nexus SSH 配置执行六 Agent 冒烟测试。测试不会主动读取或
-修改远端文件，会验证安装探测、one-shot 调用和两轮 managed Session 记忆：
-
-```bash
-npm run test:agents -- --config /path/to/data/agent-nexus/config.json
-```
-
-未安装的 Agent 会明确标记为 `installed: false`，不会被误报为已验证。
-
-只配置一台设备时，直接写任务即可。配置多台设备时，在任务前加上 **Computer
-页面里的设备名称**：
-
-```text
-nexus.hermes build 修登录页 bug
-nexus.hermes 开发机 检查版本
-nexus.claudecode build-server 跑测试
-```
-
-`nexus.claude` 是 `nexus.claudecode` 的别名。命令会直接回复 Agent 的文本输出，
-并自动通过 SFTP 发布和发送 Agent 声明的图片或其他文件。
-
-命令默认需要 Koishi 权限等级 4，可通过插件配置中的 `commandAuthority` 调整。
-每个用户和每台 SSH 主机都有并发限制，长任务可使用 `nexus.cancel` 中止。
-命令支持以下选项：
-
-```text
--H <host>       设备名称、地址或 ID（可选；多机时更推荐写「名称 任务」）
--C <cwd>        远端工作目录
--m <model>      模型名称
--t <seconds>    超时时间（秒）
--a <name>       OpenClaw Agent 名称
--q              退出当前 Agent 交互会话（也支持放在设备名之后）
-```
-
-SSH 配置保存后，插件会维持所有已启用设备的连接，并每 30 秒检查断线状态。
-进入 **终端** 页面时会自动创建一个 SSH 终端。
-Console 不会回传已保存的密码或私钥；编辑已有连接时对应字段留空会继续使用原凭据。
-设备名称必须唯一，因为它会用于多机命令路由。
-
-## SFTP 文件管理
-
-Console 的 **文件** 页面复用已建立的 SSH 连接，支持：
-
-- 浏览目录并查看大小、类型和修改时间
-- 预览图片及常见文本/代码文件
-- 在线修改并保存文本文件
-- 多文件上传和 Storage URL 下载
-- 新建目录、重命名、删除文件或空目录
-
-文件管理的安全根目录是设备的 **工作目录**；未配置工作目录时使用远端 HOME。
-所有路径都会通过 SFTP `realpath` 验证，不能跳出该根目录。为避免危险的跨目录递归
-删除，目录必须为空才能删除。文件上传默认单文件上限 32 MB，预览默认读取前 1 MB，
-可通过 `fileManagerMaxUploadBytes` 和 `fileManagerMaxPreviewBytes` 调整。文件 RPC 使用
-`commandAuthority` 作为 Console 权限门槛。
+SSH 与 A2A 配置相互独立。SSH 设备名称不代表 A2A Agent；每个 A2A Server 都应在
+**A2A** 页以独立 Agent Card 配置加入。
 
 ## ChatLuna 工具
 
-插件会注册以下工具：
+插件只注册：
 
 | 工具 | 用途 |
 |---|---|
-| `nexus_delegate` | 将复杂任务委托给远端 Code Agent |
-| `nexus_publish` | 通过 SFTP 拉取并发布远端文件 |
-| `nexus_list_agents` | 查看已探测到的 Code Agent |
-| `nexus_list_skills` | 查看远端已同步的 Skills |
-| `nexus_a2a_delegate` | 后台委托 A2A Agent，自动绑定 ChatLuna 会话并回送结果 |
-| `nexus_a2a_list` | 调试：列出 A2A 远端及其 Agent Card Skills |
-| `nexus_a2a_send` | 调试：直接创建/续接协议级 A2A Task |
-| `nexus_a2a_task` | 调试：按协议 Task ID 查询或取消 |
+| `nexus_a2a_delegate` | 后台委托外部 A2A Agent，并把结果回送到原 ChatLuna 会话 |
 
-`nexus_delegate` 支持指定 Agent、远端工作目录、模型、超时和是否自动发布产物。
-不指定 Agent 时会从当前可用 Agent 中自动选择；不指定 `publishFiles` 时默认发布产物并返回 Storage URL。
-
-`nexus_a2a_delegate` 默认以后台模式运行。工具立即返回 AgentNexus job ID，远端任务完成、
-失败或要求补充输入时，AgentNexus 会通过 ChatLuna `invoke` 把结果送回发起任务的原会话。
-ChatLuna 只需要使用 job ID 执行 `status`、`message` 或 `stop`；A2A Task ID、Context ID
-和远端 Hermes/Pi session ID 均由 AgentNexus 内部维护。低层三个 A2A 工具默认不启用，
-需要协议联调时可在 ChatLuna 工具配置中手动打开。
-
-高层工具动作：
+支持动作：
 
 ```text
-nexus_a2a_delegate action=run remote=hermes prompt="分析这个仓库"       # 默认后台
-nexus_a2a_delegate action=message id=<job> prompt="选择第二项"          # 补充输入/指导
-nexus_a2a_delegate action=status id=<job>                               # 手动查看
-nexus_a2a_delegate action=stop id=<job>                                 # 取消
+run      创建或续接任务
+message  给运行中或等待输入的任务补充消息
+status   查询任务状态
+list     列出当前 ChatLuna conversation 的任务
+agents   列出已配置的 Agent Card 与 Skills
+stop     取消任务
 ```
 
-未指定远端且当前 conversation 已有绑定时会沿用该远端；只有一个启用远端时会自动选择。
-指定 `skill` 时，AgentNexus 会按已发现的 Agent Card Skills 选择远端，并在必要时先刷新 Card。
+示例：
 
-## A2A
+```text
+nexus_a2a_delegate action=run remote=hermes prompt="查询橘鸦新闻"
+nexus_a2a_delegate action=message id=<job> prompt="选择第二项"
+nexus_a2a_delegate action=status id=<job>
+nexus_a2a_delegate action=stop id=<job>
+```
 
-A2A 位于 Agent 与 Agent 之间，与 Agent 调用工具所用的 MCP 互补。Koishi 中的
-AgentNexus 固定作为 **A2A Client**，不注册 Agent Card 或 JSON-RPC 入站路由。每个
-外部 Agent Server 都通过完整 Agent Card URL 独立加入，因此不同 Agent 可以使用
-不同主机、端口、Card 路径、Bearer Token 和传输方式。
+`run` 默认后台执行并立即返回 AgentNexus job ID。任务结束或需要补充输入时，插件会通过
+ChatLuna `invoke` 回送结果。用户明确要求调用某个远端 Agent 时，ChatLuna 应把要求直接
+写入 `prompt`，不先自行搜索、求解或改写。
 
-SSH 与 A2A 的职责相互独立：Computer 页面负责机器连接、Agent 探测、安装和更新；
-A2A 页面负责外部 Agent Card 与任务。远端既可以运行各框架原生的 A2A 插件，也可以
-运行可选的单端口 `agent-nexus-bridge`。Bridge 复用 AgentNexus 的 CLI adapters、
-Session Runtime 和 A2A Executor，把远端已安装并启用的 Code Agent 发布为 Skills。
-Bridge 按 A2A Context 绑定 managed session，并将 Task Store 写入 `dataDir/a2a-tasks.json`；
-空闲会话和 Hermes/Pi provider checkpoint 写入 `dataDir/sessions.json`。Bridge 重启后可以继续
-查询已保存 Task；重启时正在执行的任务会转换为 `input-required`，由下一条消息确认续接或取消。
+未指定远端时：
+
+- 当前 conversation 已绑定远端：沿用该远端。
+- 只有一个启用远端：自动选择。
+- 指定 `skill`：按已发现的 Agent Card Skills 选择远端。
+
+## A2A Client
+
+AgentNexus 不注册入站 Agent Card 或任务路由。每个外部 Agent Server 都通过完整 Card URL
+单独配置，例如：
+
+```text
+http://10.1.2.50:9101/.well-known/agent-card.json
+http://10.1.2.50:9201/.well-known/agent-card.json
+```
+
+不同 Agent 可以使用不同的主机、端口、Card 路径、Bearer Token 和首选传输方式。
+Token 支持 `env:VAR`；Console 返回配置时会脱敏，编辑时留空会保留原值。
 
 ### 两台机器示例
 
 ```text
 10.1.2.30
-  Koishi + ChatLuna + AgentNexus A2A Client
-          │
-          │ A2A JSON-RPC/SSE :8787
-          ▼
+  Koishi + ChatLuna + AgentNexus
+      ├─ SSH 运维 ───────────────┐
+      └─ A2A Client ─────────────┤
+                                  ▼
 10.1.2.50
-  agent-nexus-bridge
-    ├─ OpenCode
-    ├─ Claude Code
-    ├─ Hermes
-    ├─ OpenClaw
-    └─ Pi / Codex
-
-10.1.2.30 --SSH:22--> 10.1.2.50
-  仅用于安装、更新、写配置、systemd 和诊断
+  ├─ Hermes A2A Server      :PORT
+  ├─ OpenCode A2A Server    :PORT
+  ├─ Claude Code A2A Server :PORT
+  ├─ Pi A2A Server          :PORT
+  └─ 其他 Agent A2A Server  :PORT
 ```
 
-配置流程：
+配置顺序：
 
-1. 在 `10.1.2.30` 的 Computer 页面添加 SSH 设备 `10.1.2.50`，扫描、安装或更新所需 Agent。
-2. 在 `10.1.2.50` 启动各框架的 A2A 插件/Server，并记录各自完整 Agent Card URL；
-   也可以选择下面的独立 `agent-nexus-bridge`。
-3. 回到 `10.1.2.30` 的 A2A 页面，逐个添加完整 Card URL、名称、Bearer Token 和首选传输。
-4. 点击发现按钮读取 Card 与 Skills，再由 ChatLuna 调用 `nexus_a2a_delegate` 后台委托；
-   AgentNexus 会自动绑定会话、续接远端 Context，并在任务结束或等待输入时回送结果。
-   `nexus_a2a_send` / `nexus_a2a_task` 及 Task/Context ID 仅用于协议调试。
+1. 在 `10.1.2.30` 的 Computer 页添加 `10.1.2.50`，用于安装 Agent、Skills 和运维。
+2. 在 `10.1.2.50` 启动各框架自己的 A2A Server。
+3. 回到 A2A 页，逐个添加完整 Agent Card URL。
+4. 点击发现，确认 Card、Skills 和传输方式可用。
+5. 由 ChatLuna 调用 `nexus_a2a_delegate`。
 
-同网段直连时需要允许 Koishi 机器访问每个 A2A Server 的实际端口。不要开放无 Token
-的 Server 到不可信网络；跨公网时使用 HTTPS 反向代理。
+常见接入项目以各框架当前文档为准：
 
-### 独立 Bridge CLI
+| 框架 | 常见 A2A 接入 |
+|---|---|
+| Claude Code | `a2a-claude` 或其他 Claude Code A2A Server |
+| OpenCode | `opencode-a2a` / `a2a-opencode` |
+| Pi | `pi-a2a-communication` |
+| Hermes | 官方 `platforms/a2a` 或兼容 Hermes A2A 服务 |
+| OpenClaw | ACP/A2A 适配服务 |
 
-`agent-nexus-bridge` 也可脱离 Koishi 手动运行。npm 包安装后创建配置：
+## Computer 与 Agent 安装
 
-```json
-{
-  "host": "0.0.0.0",
-  "port": 8787,
-  "publicBaseUrl": "http://10.1.2.50:8787",
-  "token": "env:AGENT_NEXUS_BRIDGE_TOKEN",
-  "dataDir": "~/.agent-nexus/bridge",
-  "cwd": "/srv/agent-workspace",
-  "agents": ["opencode", "claude", "hermes", "pi"]
-}
-```
+Computer 页用于管理 SSH 设备。配置保存后，插件会维持启用设备的连接，并定期尝试重连。
 
-```bash
-agent-nexus-bridge --config ~/.agent-nexus/bridge/config.json
-```
+主机密钥默认使用首次信任并固定（TOFU）：首次成功握手保存 SHA-256 指纹，后续指纹变化
+会拒绝连接。已知指纹时可改为严格校验；仅兼容旧环境时才使用不校验模式。
 
-Bridge 暴露：
+Agent 管理是 **install-only**：
 
-```text
-GET  /health                         # 服务、任务数和 Agent 探测状态
-GET  /.well-known/agent-card.json   # A2A v1.0 Agent Card
-GET  /.well-known/agent.json        # A2A v0.3 兼容 Agent Card
-POST /a2a                           # JSON-RPC / SSE
-GET  /artifacts/{id}                # 有效期内的受限工作目录产物
-```
-
-CLI 还支持 `--host`、`--port`、`--public-base-url`、`--token`、`--cwd`、
-`--data-dir`、`--agents`、`--timeout-ms`、`--max-output-bytes`、
-`--max-request-bytes`、`--max-artifact-bytes`、`--max-artifacts`、
-`--max-concurrent`、`--max-tracked`、`--max-stored` 和 `--artifact-ttl-ms`。执行
-`agent-nexus-bridge --help` 可查看完整参数。
-
-Bridge 默认最多同时运行 2 个任务、跟踪 64 个运行/等待任务、保留 256 条任务记录和
-256 个产物链接，单个产物上限 128 MB。AgentNexus A2A Client 默认最多读取单个 HTTP/SSE 响应 32 MB，
-可通过插件配置 `a2aMaxResponseBytes` 调整。
-
-### 外部 Agent Cards
-
-Console 的 **A2A** 页面主要管理外部 Agent。添加时填写完整 Agent Card URL，例如
-`http://10.1.2.50:9101/.well-known/agent-card.json`。每张 Card 可使用不同端口、
-Bearer Token 和首选传输。页面中的手动发送、Task ID、Context ID、刷新和取消属于协议调试入口；
-日常调用应由 ChatLuna 使用 `nexus_a2a_delegate`。Token 支持
-`env:VAR`，Console 回传配置时会脱敏，输入框留空会保留原值。
-
-参考图中的框架 bridge 可以直接作为 AgentNexus A2A Client 的远端：
-
-| 框架 | 常见 bridge / 插件 | 接入方式 |
-|---|---|---|
-| Claude Code | `a2a-bridge`（推荐）或 `a2a-claude` | 启动 bridge 后，将其基础 URL 添加为远端；可双向调用 |
-| OpenCode | `opencode-a2a` 或 `a2a-opencode` | 暴露 A2A Server，并可通过其 outbound 能力调用其他 Agent |
-| Pi | `pi-a2a-communication` | 启动其 A2A Server（例如 `/a2a-server start`）后添加为远端 |
-| Hermes | 官方 `platforms/a2a` 或早期 `hermes-a2a` | 可作为 Client/Server，消息可进入当前 live session |
-| OpenClaw | `a2a-bridge`（ACP 侧） | 通常作为 Client 调用或由 bridge 暴露 Server |
-
-AgentNexus 自带的单端口 Bridge 负责统一 CLI 适配。如果需要保留某个框架原生的
-A2A live-session 语义，仍可改用表中的原生 bridge；其包名、启动命令和协议版本以
-对应项目的当前说明为准。
+- 未发现可执行文件：显示安装按钮。
+- 已发现可执行文件：只显示路径和已安装状态。
+- 不查询远端或注册表版本。
+- 不提供升级、降级或重新安装操作。
 
 ## Skills
 
-在 **Skills** 页面填写 Git 仓库地址即可同步。仓库中应包含 `SKILL.md`。
-仓库地址只接受 HTTPS、SSH URL 或 `git@host:path`，指定分支不存在时会直接失败，
-不会回退到默认分支。同步也不会覆盖 Agent 目录中已有的真实 Skill 目录。
+在 **Skills** 页填写 Git 仓库地址。仓库中应包含 `SKILL.md`。
 
-远端默认目录：
+仓库地址只接受 HTTPS、SSH URL 或 `git@host:path`。指定分支不存在时直接失败，不回退到
+默认分支；同步不会覆盖 Agent 目录中已经存在的真实 Skill 目录。
+
+默认中心目录：
 
 ```text
 ~/.agent-nexus/
-  repos/                 # Git 仓库缓存
-  skills/                # AgentNexus Skills 中心目录
+  repos/
+  skills/
 ```
 
-同步完成后，AgentNexus 会将 Skill 软链接到已安装 Agent 的目录，例如：
+同步后会按已安装 Agent 建立软链接，例如：
 
 ```text
 ~/.claude/skills
@@ -365,73 +211,61 @@ A2A live-session 语义，仍可改用表中的原生 bridge；其包名、启�
 ~/.pi/skills
 ```
 
-## 文件回传与 Storage
+## SFTP 文件与终端
 
-`koishi-plugin-chatluna-storage-service` 是必需依赖。请安装并在 AgentNexus 之前启用：
+**文件** 页复用 SSH 连接，支持：
 
-```bash
-npm install koishi-plugin-chatluna-storage-service
-```
+- 浏览目录、大小、类型和修改时间
+- 预览图片及常见文本/代码文件
+- 在线编辑并保存文本
+- 多文件上传和 Storage URL 下载
+- 新建目录、重命名、删除文件或空目录
 
-Agent 产物回传和文件管理下载会通过 SFTP 流式同步到 ChatLuna Storage，不受文件管理
-上传上限影响。Agent 自动回传默认单文件上限为 128 MB，可通过插件配置
-`maxPublishFileBytes` 调整。
-直接命令调用会使用 Storage URL 发送 `h.image` 或 `h.file`；ChatLuna 工具调用则在工具结果中返回 URL。
-没有产生文件时不会上传或发送文件，也不会显示内部的 `<nexus_files>` 标记。
+文件安全根目录是设备工作目录；未配置时使用远端 HOME。路径会通过 SFTP `realpath`
+校验，不能跳出根目录。上传默认上限 32 MB，预览默认读取前 1 MB。
 
-## 非交互命令
+下载会流式写入 ChatLuna Storage，因此 `koishi-plugin-chatluna-storage-service` 是必需服务。
 
-AgentNexus 当前使用以下 CLI 方式：
+**终端** 页提供基于现有 SSH 连接的 PTY 终端。关闭页面或终端后会清理对应通道。
 
-```bash
-hermes -z "..."                                      # 普通 one-shot delegate
-hermes chat --quiet --yolo -q "..."                  # Nexus managed session 首轮
-hermes chat --quiet --yolo --resume <id> -q "..."    # 后续恢复
-openclaw agent --local --agent default --message "..." --json
-claude -p "..." --output-format json --dangerously-skip-permissions
-opencode run --format json --auto "..."
-codex exec --json --ephemeral --dangerously-bypass-approvals-and-sandbox "..."
-pi -p --no-session "..."
-pi --mode json "..."                                # managed session 首轮
-pi --mode json --session <id> "..."                 # 后续恢复
-```
+## 主要配置
 
-## 安全警告
+| 配置 | 说明 |
+|---|---|
+| `skillRoot` | 远端 Skills 中心目录 |
+| `commandAuthority` | Console 管理 RPC 的 Koishi 权限等级 |
+| `maxOutputBytes` | 单次 SSH 命令输出捕获上限 |
+| `a2aMaxResponseBytes` | 单个 A2A HTTP/SSE 响应读取上限 |
+| `fileManagerMaxUploadBytes` | SFTP 单文件上传上限 |
+| `fileManagerMaxPreviewBytes` | SFTP 文件预览读取上限 |
 
-AgentNexus 的定位是受信任远端机器上的自动化 Code Agent 网关。
+## 安全建议
 
-Claude Code、OpenCode 和 Codex 默认使用跳过确认或沙箱限制的参数；Pi one-shot
-不保存 session，managed/A2A 调用会在远端 Pi session 目录保存 checkpoint。远端 Agent
-可能读取、修改和删除工作目录中的文件，也可能执行系统命令。请遵守以下原则：
-
-- 只连接你信任的机器
-- 使用权限受限的专用系统账号
-- 不要将工作目录设置到包含敏感数据的位置
-- 优先使用隔离虚拟机或容器
-- 不要将 Koishi Console 暴露给不可信用户
-- 为外部 A2A Server 配置强随机 Bearer Token，并优先通过 HTTPS 反向代理暴露
-- Agent Card 按 A2A 规范公开；不要在名称、描述或 Skill 元数据中写入秘密
+- 只连接可信机器，并使用权限受限的专用 SSH 账号。
+- 优先使用严格主机密钥校验或 TOFU 固定指纹。
+- 不把文件管理根目录设置到包含无关敏感数据的位置。
+- 不把 Koishi Console 暴露给不可信用户。
+- 为外部 A2A Server 配置强随机 Bearer Token。
+- 跨公网时使用 HTTPS 反向代理，并限制来源地址。
+- 不在 Agent Card 名称、描述或 Skill 元数据中写入秘密。
 
 ## 开发
 
 ```bash
-# Node.js >= 20
 npm install
 npm test
 npm run typecheck
 npm run build
-npm pack --dry-run
+npm pack --dry-run --json
 ```
 
-`npm pack` / `npm publish` 会通过 `prepack` 自动执行完整构建，避免发布缺少 `lib/`
-或 `dist/` 的包。仓库 CI 使用 Node.js 20 运行测试、类型检查、构建、打包检查和高危依赖审计。
+`npm pack` 与 `npm publish` 会通过 `prepack` 自动执行完整构建。
 
 构建产物：
 
 ```text
-lib/index.js   # Koishi 后端
-lib/bridge.js  # agent-nexus-bridge CLI
-dist/    # Koishi Console 前端
+lib/index.js
+dist/
 ```
 
 ## License

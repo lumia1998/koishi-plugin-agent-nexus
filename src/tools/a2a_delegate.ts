@@ -7,9 +7,10 @@ export class NexusA2ADelegateTool extends NexusToolBase {
     name = 'nexus_a2a_delegate'
 
     description = `Delegate work to a configured remote A2A agent through AgentNexus.
+When the user asks to call a named remote agent, pass the requested task directly in prompt without researching, solving, or rewriting it first.
 Use action=run for a new task; long tasks run in the background by default and their result is delivered automatically to the same ChatLuna conversation.
 AgentNexus keeps A2A task/context identifiers private and automatically resumes a waiting task or the previous remote context.
-Actions: run, status, list, agents, message, stop. Use message to answer an input-required task or guide a running task. Low-level A2A protocol tools are only for debugging.`
+Actions: run, status, list, agents, message, stop. Use message to answer an input-required task or guide a running task.`
 
     schema = z.object({
         action: z
@@ -40,11 +41,7 @@ Actions: run, status, list, agents, message, stop. Use message to answer an inpu
         skill: z
             .string()
             .optional()
-            .describe('Agent Card skill id/name used to select or hint the remote agent.'),
-        agent: z
-            .enum(['auto', 'hermes', 'openclaw', 'claude', 'opencode', 'codex', 'pi'])
-            .optional()
-            .describe('AgentNexus Bridge agent hint for compatible A2A peers.')
+            .describe('Agent Card skill id/name used to select or hint the remote agent.')
     })
 
     async _call(

@@ -1,8 +1,7 @@
 import { randomUUID } from 'crypto'
 import type {
     A2ARemoteStatus,
-    A2ATaskView,
-    AgentKind
+    A2ATaskView
 } from '../types'
 import type { A2ASendInput } from './client'
 import {
@@ -28,7 +27,6 @@ export interface A2ADelegateToolInput {
     background?: boolean
     newTask?: boolean
     skill?: string
-    agent?: AgentKind | 'auto'
 }
 
 export interface A2ADelegationBackend {
@@ -58,15 +56,6 @@ const DEFAULT_RETENTION = 7 * 24 * 60 * 60 * 1000
 const MAX_STORED_PROMPT_CHARS = 64 * 1024
 const MAX_STORED_OUTPUT_CHARS = 256 * 1024
 const MAX_STORED_ARTIFACTS = 64
-const AGENT_KINDS = new Set<AgentKind>([
-    'hermes',
-    'openclaw',
-    'claude',
-    'opencode',
-    'codex',
-    'pi'
-])
-
 export class A2ADelegationManager {
     private readonly pollIntervalMs: number
     private readonly activeTtlMs: number
@@ -169,7 +158,6 @@ export class A2ADelegationManager {
             background: input.background !== false,
             prompt: clip(prompt, MAX_STORED_PROMPT_CHARS),
             skill: clean(input.skill),
-            agent: input.agent,
             contextId: previous?.contextId,
             artifacts: [],
             createdAt: now,
@@ -219,20 +207,12 @@ export class A2ADelegationManager {
         this.stopMonitor(original.id)
         const now = this.now()
         const background = input.background !== false
-        const requestedAgent =
-            input.agent && input.agent !== 'auto' ? input.agent : undefined
-        const resetContext = Boolean(
-            input.newTask ||
-                (requestedAgent &&
-                    original.contextId &&
-                    original.agent !== requestedAgent)
-        )
+        const resetContext = Boolean(input.newTask)
         let task: A2ADelegationTask = {
             ...original,
             background,
             prompt: clip(prompt, MAX_STORED_PROMPT_CHARS),
             skill: clean(input.skill) ?? original.skill,
-            agent: input.agent ?? original.agent,
             state: 'running',
             remoteState: undefined,
             output: undefined,
@@ -256,9 +236,6 @@ export class A2ADelegationManager {
                 contextId: task.contextId,
                 returnImmediately: background,
                 metadata: {
-                    ...(task.agent && task.agent !== 'auto'
-                        ? { agent: task.agent }
-                        : {}),
                     ...(task.skill
                         ? { skill: task.skill, skillId: task.skill }
                         : {})
@@ -586,7 +563,6 @@ function applyView(
         ...task,
         a2aTaskId: view.taskId ?? task.a2aTaskId,
         contextId: view.contextId ?? task.contextId,
-        agent: inferredAgent(view) ?? task.agent,
         remoteState: view.state,
         state,
         output: clip(view.text ?? task.output, MAX_STORED_OUTPUT_CHARS),
@@ -686,9 +662,10 @@ export function formatTask(task: A2ADelegationTask) {
 }
 
 function requiredPrompt(value: unknown) {
-    const prompt = clean(value)
-    if (!prompt) throw new Error('A2A task prompt is required.')
-    return prompt
+    if (typeof value !== 'string' || !value.trim()) {
+        throw new Error('A2A task prompt is required.')
+    }
+    return value
 }
 
 function clean(value: unknown) {
@@ -725,16 +702,6 @@ function storedMetadata(value: Record<string, unknown> | undefined) {
     } catch {
         return undefined
     }
-}
-
-function inferredAgent(view: A2ATaskView): AgentKind | undefined {
-    for (const artifact of view.artifacts || []) {
-        const value = artifact.metadata?.agent
-        if (typeof value === 'string' && AGENT_KINDS.has(value as AgentKind)) {
-            return value as AgentKind
-        }
-    }
-    return undefined
 }
 
 function errorMessage(error: unknown) {

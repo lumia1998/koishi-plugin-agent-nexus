@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import { Context, Service } from 'koishi'
 import path from 'path'
 import type {
@@ -9,55 +9,32 @@ import type {
     AgentKind,
     AgentMaintenanceInput,
     AgentMaintenanceResult,
-    AgentResult,
-    BridgeHostStatus,
-    BridgeMaintenanceInput,
-    BridgeMaintenanceResult,
-    DelegateInput,
     DetectedAgent,
     HostStatus,
     NexusConfig,
     NexusConsoleData,
     NexusStatus,
-    PublishResult,
     SkillInfo,
     SkillSourceConfig,
     SshHostConfig,
     TerminalInfo
 } from './types'
-import type {
-    NexusSession,
-    SessionHistoryQuery,
-    SessionIdentity
-} from './sessions/types'
 import { createDefaultNexusConfig, createHost } from './config'
 import { SshSessionPool } from './ssh/pool'
-import type { SshSession, TerminalHandle } from './ssh/session'
+import type { TerminalHandle } from './ssh/session'
 import { getAdapter, listAdapters } from './adapters'
 import {
-    appendFileHint,
     enabledAgentKinds,
     listRemoteSkills,
     syncSkillSource
 } from './skills/sync'
 import { NexusTerminalProxy } from './proxy'
-import { NexusDelegateTool } from './tools/delegate'
-import { NexusPublishTool } from './tools/publish'
-import { NexusListAgentsTool } from './tools/list_agents'
-import { NexusListSkillsTool } from './tools/list_skills'
-import { NexusA2AListTool } from './tools/a2a_list'
-import { NexusA2ASendTool } from './tools/a2a_send'
-import { NexusA2ATaskTool } from './tools/a2a_task'
 import { NexusA2ADelegateTool } from './tools/a2a_delegate'
 import { getErrorMessage } from './utils/shell'
 import {
     moveCorruptFileAside,
     writeTextFileAtomic
 } from './utils/atomic-file'
-import {
-    buildRemoteRealpathCommand,
-    isRemotePathWithinRoot
-} from './utils/security'
 import {
     assertUniqueHostName,
     hostConnectionChanged,
@@ -69,20 +46,7 @@ import {
     repairHostIds,
     resolveHostReference
 } from './utils/config'
-import { registerNexusCommands } from './commands'
 import type { Config } from './config'
-import { FileSessionStorage } from './sessions/file-storage'
-import { SessionManager } from './sessions/manager'
-import {
-    buildSummaryPrompt,
-    fallbackSummary,
-    parseModelSummary
-} from './sessions/summary'
-import {
-    AgentRunner,
-    type SessionInvocationContext,
-    type SessionRunOutcome
-} from './runtime/runner'
 import { SftpFileManager } from './files/manager'
 import { A2AClientService, validateRemoteUrl } from './a2a/client'
 import {
@@ -95,20 +59,7 @@ import {
     type A2ADelegationTask
 } from './a2a/delegation-store'
 import { notifyChatLunaA2ADelegation } from './a2a/chatluna-wakeup'
-import {
-    buildAgentLatestVersionCommand,
-    buildAgentMaintenancePlan,
-    isVersionNewer,
-    latestAgentVersion,
-    parseHomebrewClaudeVersion,
-    validateAgentMaintenanceVersion
-} from './agents/maintenance'
-import {
-    bridgePublicBaseUrl,
-    buildBridgeMaintenancePlan,
-    buildBridgeStatusCommand,
-    parseBridgeStatus
-} from './bridge/maintenance'
+import { buildAgentMaintenancePlan } from './agents/maintenance'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -133,23 +84,13 @@ export class AgentNexusService extends Service {
     private agentCache = new Map<string, DetectedAgent[]>()
     private skillCache = new Map<string, SkillInfo[]>()
     private toolDispose: (() => void)[] = []
-    private commandDispose?: () => void
     private reconnectTimer?: NodeJS.Timeout
-    private sessionCleanupTimer?: NodeJS.Timeout
-    private sessionStorage: FileSessionStorage
-    private summaryQueue = new Set<string>()
-    private summaryDrain?: Promise<void>
-    private summaryStopped = true
     private hostKeyWriteQueue = Promise.resolve()
     private reconnecting = false
     private nexusConfig: NexusConfig
     private dataPath: string
-    private activeByHost = new Map<string, number>()
     private hostErrors = new Map<string, string>()
-    private bridgeCache = new Map<string, BridgeHostStatus>()
     private maintenanceLocks = new Set<string>()
-    readonly sessionManager: SessionManager
-    private agentRunner: AgentRunner
 
     constructor(
         ctx: Context,
@@ -187,32 +128,10 @@ export class AgentNexusService extends Service {
             }
         )
         this.proxy = new NexusTerminalProxy(ctx, this)
-        this.sessionStorage = new FileSessionStorage(
-            path.join(this.dataPath, 'sessions.json')
-        )
-        this.sessionManager = new SessionManager(this.sessionStorage, {
-            historyRetentionMs: pluginConfig.sessionHistoryRetentionMs,
-            onArchived: (session) => this.enqueueSessionSummary(session)
-        })
-        this.agentRunner = new AgentRunner(this.sessionManager, (input) =>
-            this.delegate(input)
-        )
     }
 
     async start() {
-        this.summaryStopped = false
         await this.loadConfig()
-        await this.sessionStorage.init()
-        await this.sessionManager.recoverTasks()
-        for (const session of await this.sessionManager.listPendingSummaries()) {
-            this.enqueueSessionSummary(session)
-        }
-        this.commandDispose?.()
-        this.commandDispose = registerNexusCommands(
-            this.ctx,
-            this,
-            this.pluginConfig
-        )
         this.pool.startIdleCleanup((hostId) => {
             const host = this.nexusConfig.hosts.find((h) => h.id === hostId)
             return host?.idleTimeoutMs ?? 15 * 60 * 1000
@@ -224,33 +143,19 @@ export class AgentNexusService extends Service {
         this.reconnectTimer = setInterval(() => {
             void this.ensureEnabledConnections()
         }, 30000)
-        this.sessionCleanupTimer = setInterval(() => {
-            void this.sessionManager.cleanupExpired().catch((err) => {
-                this.ctx.logger.warn(
-                    `[agent-nexus] session cleanup failed: ${getErrorMessage(err)}`
-                )
-            })
-        }, 60000)
         await this.refreshConsoleData()
     }
 
     async stop() {
-        this.summaryStopped = true
         await this.a2aDelegations.stop()
-        await this.agentRunner.shutdown()
-        this.commandDispose?.()
-        this.commandDispose = undefined
         for (const d of this.toolDispose) d()
         this.toolDispose = []
         this.proxy.stop()
         if (this.reconnectTimer) clearInterval(this.reconnectTimer)
         this.reconnectTimer = undefined
-        if (this.sessionCleanupTimer) clearInterval(this.sessionCleanupTimer)
-        this.sessionCleanupTimer = undefined
         this.pool.stopIdleCleanup()
         await this.closeAllTerminals()
         await this.pool.clear()
-        await this.summaryDrain
         await this.hostKeyWriteQueue
     }
 
@@ -414,186 +319,12 @@ export class AgentNexusService extends Service {
         return this.pluginConfig.commandAuthority
     }
 
-    listSessionHistory(query: SessionHistoryQuery = {}) {
-        return this.sessionManager.listHistory(query)
-    }
-
-    async getSessionHistory(id: string) {
-        const session = await this.sessionManager.getHistoryDetail(id)
-        if (!session) throw new Error('会话不存在或已被清理。')
-        return session
-    }
-
-    async deleteSessionHistory(id: string) {
-        await this.sessionManager.deleteHistory(id)
-        this.summaryQueue.delete(id)
-        return { success: true }
-    }
-
-    async retrySessionSummary(id: string) {
-        const session = await this.sessionManager.retrySummary(id)
-        if (!session) throw new Error('只有已结束的会话可以重新生成摘要。')
-        this.enqueueSessionSummary(session)
-        return { success: true }
-    }
-
-    runInSession(
-        identity: SessionIdentity,
-        input: DelegateInput,
-        context?: SessionInvocationContext
-    ): Promise<SessionRunOutcome> {
-        return this.agentRunner.run(
-            identity,
-            { ...input, sessionMode: input.sessionMode ?? 'managed' },
-            context
-        )
-    }
-
-    resumeSession(
-        identity: SessionIdentity,
-        message: string,
-        signal?: AbortSignal,
-        context?: SessionInvocationContext
-    ): Promise<SessionRunOutcome> {
-        return this.agentRunner.resume(identity, message, signal, context)
-    }
-
-    cancelSessions(identity: SessionIdentity) {
-        return this.agentRunner.cancel(identity)
-    }
-
-    hasWaitingSession(identity: SessionIdentity) {
-        return this.agentRunner.hasWaiting(identity)
-    }
-
-    async startInteractiveSession(
-        identity: SessionIdentity,
-        input: Omit<DelegateInput, 'prompt' | 'signal'>
-    ) {
-        const host = this.resolveHost(input.hostId)
-        const ssh = await this.pool.getOrCreate(host)
-        const detectedAgent = await this.resolveAgent(host, ssh.sessionId, input.agent)
-        const agent = detectedAgent.kind
-        const session = await this.agentRunner.startInteractive(
-            identity,
-            {
-                ...input,
-                hostId: host.id,
-                agent,
-                publishFiles: input.publishFiles ?? true,
-                sessionMode: 'managed'
-            },
-            this.pluginConfig.interactiveSessionTtlMs
-        )
-        return { session, hostId: host.id, hostName: host.name, agent }
-    }
-
-    endInteractiveSession(
-        identity: SessionIdentity,
-        agent?: AgentKind | 'auto',
-        hostId?: string
-    ) {
-        return this.agentRunner.endInteractive(identity, agent, hostId)
-    }
-
-    private enqueueSessionSummary(session: NexusSession) {
-        if (!session.endedAt || session.summary?.status !== 'pending') return
-        this.summaryQueue.add(session.id)
-        if (this.summaryStopped || this.summaryDrain) return
-        this.summaryDrain = this.drainSessionSummaries().finally(() => {
-            this.summaryDrain = undefined
-            if (!this.summaryStopped && this.summaryQueue.size) {
-                const next = this.summaryQueue.values().next().value as string
-                void this.sessionManager.get(next).then((session) => {
-                    if (session) this.enqueueSessionSummary(session)
-                })
-            }
-        })
-    }
-
-    private async drainSessionSummaries() {
-        while (!this.summaryStopped && this.summaryQueue.size) {
-            const id = this.summaryQueue.values().next().value as string
-            this.summaryQueue.delete(id)
-            await this.summarizeSession(id)
-        }
-    }
-
-    private async summarizeSession(id: string) {
-        const session = await this.sessionManager.get(id)
-        if (!session?.endedAt || session.summary?.status !== 'pending') return
-        const revision = session.summary.revision ?? 0
-        const fallback = fallbackSummary(session)
-        const readyFallback = async (error?: unknown) => {
-            await this.sessionManager.setSummary(id, {
-                status: 'ready',
-                revision,
-                source: 'fallback',
-                title: fallback.title,
-                abstract: fallback.abstract,
-                topics: [],
-                generatedAt: Date.now(),
-                ...(error ? { error: getErrorMessage(error) } : {})
-            }, revision)
-        }
-        if (!this.pluginConfig.sessionSummaryEnabled) {
-            await readyFallback()
-            return
-        }
-
-        try {
-            const chatluna = this.ctx.chatluna as any
-            const modelName =
-                this.pluginConfig.sessionSummaryModel.trim() ||
-                chatluna?.currentConfig?.defaultModel
-            if (!modelName) throw new Error('ChatLuna 未配置默认模型')
-            const modelRef = await chatluna.createChatModel(modelName)
-            const model = modelRef?.value
-            if (!model) throw new Error(`无法创建 ChatLuna 模型：${modelName}`)
-            const result = await model.invoke(
-                buildSummaryPrompt(
-                    session,
-                    this.pluginConfig.sessionSummaryMaxInputChars
-                ),
-                {
-                    temperature: 0,
-                    maxTokens: 400,
-                    stream: false,
-                    timeout: 20000
-                }
-            )
-            const { getMessageContent } = require(
-                'koishi-plugin-chatluna/utils/string'
-            ) as { getMessageContent(content: unknown): string }
-            const parsed = parseModelSummary(
-                getMessageContent(result.content),
-                fallback
-            )
-            if (!parsed) throw new Error('摘要模型没有返回有效 JSON')
-            await this.sessionManager.setSummary(id, {
-                status: 'ready',
-                revision,
-                source: 'model',
-                ...parsed,
-                generatedAt: Date.now()
-            }, revision)
-        } catch (error) {
-            this.ctx.logger.warn(
-                `[agent-nexus] session summary failed: ${getErrorMessage(error)}`
-            )
-            await readyFallback(error)
-        }
-    }
-
     async saveConfig(cfg: NexusConfig) {
         const previousHosts = new Map(this.nexusConfig.hosts.map((host) => [host.id, host]))
         const hosts = (cfg.hosts || []).map((host) => {
             const previous = previousHosts.get(host.id)
             return mergeHostSecrets(
-                createHost({
-                    ...host,
-                    bridge: host.bridge || previous?.bridge
-                }),
+                createHost(host),
                 previous
             )
         })
@@ -605,8 +336,14 @@ export class AgentNexusService extends Service {
             })
             .map((host) => host.id)
         const nextConfig: NexusConfig = {
-            ...cfg,
             hosts,
+            agents: {
+                ...createDefaultNexusConfig(this.pluginConfig).agents,
+                ...(cfg.agents || {})
+            },
+            skills: cfg.skills || [],
+            skillRoot: cfg.skillRoot || this.pluginConfig.skillRoot,
+            defaultHostId: cfg.defaultHostId,
             a2a: mergeA2ASecrets(
                 {
                     ...createDefaultNexusConfig(this.pluginConfig).a2a,
@@ -614,21 +351,7 @@ export class AgentNexusService extends Service {
                     remotes: cfg.a2a?.remotes || this.nexusConfig.a2a.remotes
                 },
                 this.nexusConfig.a2a
-            ),
-            runtime: {
-                ...cfg.runtime,
-                defaultTimeoutMs:
-                    cfg.runtime?.defaultTimeoutMs ??
-                    this.pluginConfig.defaultTimeoutMs
-            },
-            skillRoot: cfg.skillRoot || this.pluginConfig.skillRoot
-        }
-        for (const host of hosts) {
-            if (host.bridge.enabled || !host.bridge.remoteId) continue
-            const remote = nextConfig.a2a.remotes.find(
-                (item) => item.id === host.bridge.remoteId
             )
-            if (remote) remote.enabled = false
         }
         const nextHostIds = new Set(hosts.map((host) => host.id))
         for (const previous of this.nexusConfig.hosts) {
@@ -639,9 +362,6 @@ export class AgentNexusService extends Service {
                 this.agentCache.delete(previous.id)
                 this.skillCache.delete(previous.id)
                 this.hostErrors.delete(previous.id)
-            }
-            if (!next || JSON.stringify(previous.bridge) !== JSON.stringify(next.bridge)) {
-                this.bridgeCache.delete(previous.id)
             }
             if (!nextHostIds.has(previous.id)) {
                 this.pool.release(previous.id)
@@ -733,7 +453,6 @@ export class AgentNexusService extends Service {
     }
 
     async removeHost(hostId: string) {
-        this.bridgeCache.delete(hostId)
         const hosts = this.nexusConfig.hosts.filter((h) => h.id !== hostId)
         await this.saveConfig({
             ...this.nexusConfig,
@@ -770,9 +489,6 @@ export class AgentNexusService extends Service {
                 sessionCount: this.pool.countByHost(host.id),
                 lastConnectedAt: connected?.lastConnectedAt,
                 environment: connected?.environmentInfo,
-                bridge:
-                    this.bridgeCache.get(host.id) ||
-                    initialBridgeStatus(host)
             }
         })
 
@@ -842,17 +558,6 @@ export class AgentNexusService extends Service {
         const hosts = hostId
             ? [this.requireHost(hostId)]
             : this.nexusConfig.hosts.filter((h) => h.enabled)
-        const latestVersions = new Map(
-            await Promise.all(
-                listAdapters()
-                    .filter((adapter) => adapter.kind !== 'claude')
-                    .map(async (adapter) => [
-                        adapter.kind,
-                        await latestAgentVersion(adapter.kind)
-                    ] as const)
-            )
-        )
-
         for (const host of hosts) {
             try {
                 const session = await this.pool.getOrCreate(host)
@@ -862,6 +567,7 @@ export class AgentNexusService extends Service {
                         detected.push({
                             kind: adapter.kind,
                             installed: false,
+                            scanned: true,
                             skillDirs: adapter.skillDirs('~')
                         })
                         continue
@@ -869,15 +575,14 @@ export class AgentNexusService extends Service {
                     try {
                         detected.push(
                             await this.withAgentMaintenanceInfo(
-                                await adapter.detect(session),
-                                session,
-                                latestVersions.get(adapter.kind)
+                                await adapter.detect(session)
                             )
                         )
                     } catch (err) {
                         detected.push({
                             kind: adapter.kind,
                             installed: false,
+                            scanned: true,
                             skillDirs: adapter.skillDirs('~')
                         })
                         this.ctx.logger.warn(
@@ -886,7 +591,6 @@ export class AgentNexusService extends Service {
                     }
                 }
                 this.agentCache.set(host.id, detected)
-                await this.refreshBridgeStatus(host.id)
                 this.hostErrors.delete(host.id)
             } catch (err) {
                 this.agentCache.set(
@@ -909,7 +613,7 @@ export class AgentNexusService extends Service {
     ): Promise<AgentMaintenanceResult> {
         const key = `${input.hostId}:${input.kind}`
         if (this.maintenanceLocks.has(key)) {
-            throw new Error('该 Agent 正在安装或更新，请稍候。')
+            throw new Error('该 Agent 正在安装，请稍候。')
         }
         this.maintenanceLocks.add(key)
         try {
@@ -921,12 +625,13 @@ export class AgentNexusService extends Service {
                     .get(host.id)
                     ?.find((agent) => agent.kind === input.kind) ??
                 (await adapter.detect(session))
-            const latest = await latestAgentVersion(input.kind)
+            if (current.installed) {
+                throw new Error('该 Agent 已安装，AgentNexus 只提供安装，不提供更新。')
+            }
             const plan = buildAgentMaintenancePlan(
                 input.kind,
                 current.installed,
-                current.path,
-                latest.value
+                current.path
             )
             const result = await session.exec(plan.command, {
                 timeoutMs: 10 * 60 * 1000
@@ -944,19 +649,11 @@ export class AgentNexusService extends Service {
                 )
             }
             const agent = await this.withAgentMaintenanceInfo(
-                await adapter.detect(session),
-                session
+                await adapter.detect(session)
             )
             if (!agent.installed) {
                 throw new Error('安装命令已结束，但重新扫描仍未发现可执行文件。')
             }
-            const versionError = validateAgentMaintenanceVersion(
-                plan.action,
-                current.version,
-                agent.version,
-                agent.latestVersion
-            )
-            if (versionError) throw new Error(versionError)
             const agents = this.agentCache.get(host.id) ?? emptyAgents()
             this.agentCache.set(
                 host.id,
@@ -976,270 +673,15 @@ export class AgentNexusService extends Service {
         }
     }
 
-    async refreshBridgeStatus(hostId: string): Promise<BridgeHostStatus> {
-        const host = this.requireHost(hostId)
-        if (!host.bridge.enabled) {
-            const disabled = initialBridgeStatus(host)
-            this.bridgeCache.set(host.id, disabled)
-            return disabled
-        }
-        try {
-            const session = await this.pool.getOrCreate(host)
-            const result = await session.exec(buildBridgeStatusCommand(host.bridge), {
-                timeoutMs: 15_000
-            })
-            const status = parseBridgeStatus(result.stdout, host, result.stderr)
-            this.bridgeCache.set(host.id, status)
-            return status
-        } catch (error) {
-            const status: BridgeHostStatus = {
-                ...initialBridgeStatus(host),
-                state: 'error',
-                lastCheckedAt: Date.now(),
-                error: getErrorMessage(error)
-            }
-            this.bridgeCache.set(host.id, status)
-            return status
-        }
-    }
-
-    async maintainBridge(
-        input: BridgeMaintenanceInput
-    ): Promise<BridgeMaintenanceResult> {
-        const key = `${input.hostId}:bridge`
-        if (this.maintenanceLocks.has(key)) {
-            throw new Error('该 Bridge 正在部署或变更状态，请稍候。')
-        }
-        this.maintenanceLocks.add(key)
-        try {
-            let host = this.requireHost(input.hostId)
-            if (input.bridge) {
-                host = this.persistBridgeConfig(host, input.bridge)
-                await this.writeConfigFile()
-            }
-            if (!host.bridge.enabled && input.action !== 'stop') {
-                throw new Error('请先在设备配置中启用 A2A Bridge。')
-            }
-            if (
-                (input.action === 'install' || input.action === 'update') &&
-                !host.bridge.token?.trim()
-            ) {
-                host = this.updateBridgeHost(host.id, {
-                    token: randomBytes(32).toString('base64url')
-                })
-                await this.writeConfigFile()
-            }
-            const plan = buildBridgeMaintenancePlan(
-                input.action,
-                host,
-                this.nexusConfig
-            )
-            this.bridgeCache.set(host.id, {
-                ...initialBridgeStatus(host),
-                state:
-                    input.action === 'install' || input.action === 'update'
-                        ? 'installing'
-                        : input.action === 'stop'
-                          ? 'stopped'
-                          : 'starting'
-            })
-            const localPackage = plan.localPackagePath
-                ? await packLocalBridgePackage()
-                : undefined
-            const session = await this.pool.getOrCreate(host)
-            if (plan.prepareCommand) {
-                const prepared = await session.exec(plan.prepareCommand, {
-                    timeoutMs: 10 * 60 * 1000
-                })
-                this.assertBridgeMaintenanceResult(prepared, `${plan.method}准备`)
-                for (const file of plan.files || []) {
-                    await session.writeFile(
-                        session.resolveRemotePath(file.path),
-                        file.content,
-                        file.mode
-                    )
-                }
-                if (plan.localPackagePath && localPackage) {
-                    await session.writeFile(
-                        session.resolveRemotePath(plan.localPackagePath),
-                        localPackage,
-                        0o600
-                    )
-                }
-            }
-            const result = await session.exec(plan.command, {
-                timeoutMs:
-                    input.action === 'install' || input.action === 'update'
-                        ? 10 * 60 * 1000
-                        : 60_000
-            })
-            this.assertBridgeMaintenanceResult(result, plan.method)
-            const shouldRun = input.action !== 'stop'
-            const bridge = await this.waitForBridgeState(host, shouldRun)
-            if (shouldRun && bridge.state !== 'running') {
-                throw new Error(
-                    bridge.error ||
-                        `Bridge 服务未就绪，当前状态：${bridge.state}。请检查 systemd user 日志。`
-                )
-            }
-            const remoteId = await this.syncBridgeRemote(host, shouldRun)
-            if (shouldRun) await this.discoverA2ARemote(remoteId)
-            return {
-                action: input.action,
-                method: plan.method,
-                bridge,
-                status: this.getStatus()
-            }
-        } catch (error) {
-            const host = this.nexusConfig.hosts.find((item) => item.id === input.hostId)
-            if (host) {
-                this.bridgeCache.set(host.id, {
-                    ...initialBridgeStatus(host),
-                    state: 'error',
-                    lastCheckedAt: Date.now(),
-                    error: getErrorMessage(error)
-                })
-            }
-            throw error
-        } finally {
-            this.maintenanceLocks.delete(key)
-        }
-    }
-
-    private assertBridgeMaintenanceResult(
-        result: {
-            timedOut: boolean
-            truncated?: boolean
-            exitCode: number
-            stdout: string
-            stderr: string
-        },
-        method: string
-    ) {
-        if (result.timedOut) throw new Error(`${method}执行超时。`)
-        if (result.truncated) {
-            throw new Error(`${method}输出过长，无法确认执行结果。`)
-        }
-        if (result.exitCode !== 0) {
-            const output = (result.stderr || result.stdout).trim()
-            throw new Error(
-                `${method}失败（exit ${result.exitCode}）：${output.slice(-3000)}`
-            )
-        }
-    }
-
-    private updateBridgeHost(
-        hostId: string,
-        patch: Partial<SshHostConfig['bridge']>
-    ) {
-        const index = this.nexusConfig.hosts.findIndex((host) => host.id === hostId)
-        if (index < 0) throw new Error(`Host not found: ${hostId}`)
-        const host = this.nexusConfig.hosts[index]
-        const next = {
-            ...host,
-            bridge: { ...host.bridge, ...patch }
-        }
-        this.nexusConfig.hosts[index] = next
-        return next
-    }
-
-    private persistBridgeConfig(host: SshHostConfig, bridge: SshHostConfig['bridge']) {
-        const index = this.nexusConfig.hosts.findIndex((item) => item.id === host.id)
-        if (index < 0) throw new Error(`Host not found: ${host.id}`)
-        const next = patchHostConfig(host, { bridge })
-        this.nexusConfig.hosts[index] = next
-        this.bridgeCache.delete(host.id)
-        return next
-    }
-
-    private async waitForBridgeState(host: SshHostConfig, running: boolean) {
-        let status = await this.refreshBridgeStatus(host.id)
-        for (let attempt = 0; attempt < 5; attempt += 1) {
-            if (
-                (running && status.state === 'running') ||
-                (!running && status.state === 'stopped')
-            ) {
-                return status
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-            status = await this.refreshBridgeStatus(host.id)
-        }
-        return status
-    }
-
-    private async syncBridgeRemote(host: SshHostConfig, enabled: boolean) {
-        const remoteId = host.bridge.remoteId || `bridge-${host.id}`
-        if (host.bridge.remoteId !== remoteId) {
-            host = this.updateBridgeHost(host.id, { remoteId })
-        }
-        const remotes = [...this.nexusConfig.a2a.remotes]
-        const index = remotes.findIndex((remote) => remote.id === remoteId)
-        const remote: A2ARemoteConfig = {
-            id: remoteId,
-            name: `${host.name} Bridge`,
-            baseUrl: bridgePublicBaseUrl(host),
-            authToken: host.bridge.token,
-            enabled,
-            preferredTransport: 'JSONRPC'
-        }
-        if (index >= 0) remotes[index] = { ...remotes[index], ...remote }
-        else remotes.push(remote)
-        this.nexusConfig = {
-            ...this.nexusConfig,
-            a2a: { ...this.nexusConfig.a2a, remotes }
-        }
-        this.a2aRemoteStatus.delete(remoteId)
-        await this.writeConfigFile()
-        return remoteId
-    }
-
     private async withAgentMaintenanceInfo(
-        agent: DetectedAgent,
-        session: SshSession,
-        resolvedLatest?: {
-            value?: string
-            error?: string
-        }
+        agent: DetectedAgent
     ) {
-        const channelCommand = buildAgentLatestVersionCommand(
-            agent.kind,
-            agent.path
-        )
-        let latest = resolvedLatest
-        if (channelCommand) {
-            try {
-                const result = await session.exec(channelCommand, {
-                    timeoutMs: 30_000
-                })
-                if (result.timedOut) throw new Error('Homebrew 版本查询超时。')
-                if (result.truncated) throw new Error('Homebrew 版本查询输出过长。')
-                if (result.exitCode !== 0) {
-                    throw new Error(
-                        (result.stderr || result.stdout).trim() ||
-                            `Homebrew 版本查询失败（exit ${result.exitCode}）。`
-                    )
-                }
-                latest = {
-                    value: parseHomebrewClaudeVersion(result.stdout)
-                }
-            } catch (error) {
-                latest = { error: getErrorMessage(error) }
-            }
-        }
-        latest ??= await latestAgentVersion(agent.kind)
-        const plan = buildAgentMaintenancePlan(
-            agent.kind,
-            agent.installed,
-            agent.path
-        )
+        const plan = !agent.installed
+            ? buildAgentMaintenancePlan(agent.kind, false)
+            : undefined
         return {
             ...agent,
-            latestVersion: latest.value,
-            updateAvailable: agent.installed
-                ? isVersionNewer(agent.version, latest.value)
-                : undefined,
-            maintenanceMethod: plan.method,
-            maintenanceError: latest.error
+            maintenanceMethod: plan?.method
         }
     }
 
@@ -1283,120 +725,6 @@ export class AgentNexusService extends Service {
             await this.writeConfigFile()
             throw err
         }
-    }
-
-    async delegate(input: DelegateInput): Promise<
-        AgentResult & { published?: PublishResult[]; hostId: string }
-    > {
-        const host = this.resolveHost(input.hostId)
-        const active = this.activeByHost.get(host.id) || 0
-        if (active >= this.pluginConfig.maxConcurrentPerHost) {
-            throw new Error(`Host ${host.name} has reached its Agent task limit`)
-        }
-        this.activeByHost.set(host.id, active + 1)
-        try {
-            const session = await this.pool.getOrCreate(host)
-            const detectedAgent = await this.resolveAgent(
-                host,
-                session.sessionId,
-                input.agent
-            )
-            const adapter = getAdapter(detectedAgent.kind)
-            const executionCwd = session.resolveRemotePath(
-                input.cwd || host.cwd || session.cwd
-            )
-
-            const prompt = appendFileHint(input.prompt)
-            const timeoutMs =
-                input.timeoutMs ??
-                this.nexusConfig.runtime.defaultTimeoutMs ??
-                this.pluginConfig.defaultTimeoutMs
-
-            const command = adapter.buildCommand({
-                prompt,
-                cwd: executionCwd,
-                model: input.model,
-                timeoutMs,
-                openclawAgent: input.openclawAgent,
-                runtime: this.nexusConfig.runtime,
-                sessionMode: input.sessionMode,
-                providerState: input.providerState,
-                executablePath: detectedAgent.path
-            })
-
-            const exec = await session.exec(command, {
-                cwd: executionCwd,
-                timeoutMs,
-                signal: input.signal
-            })
-
-            const result = adapter.parseResult(
-                exec.stdout,
-                exec.stderr,
-                exec.exitCode,
-                exec.timedOut,
-                command
-            )
-            result.truncated = exec.truncated
-
-            let published: PublishResult[] | undefined
-            if (input.publishFiles && result.files.length) {
-                published = await this.publishFiles(
-                    result.files,
-                    host.id,
-                    executionCwd
-                )
-            }
-
-            return { ...result, published, hostId: host.id }
-        } finally {
-            const remaining = (this.activeByHost.get(host.id) || 1) - 1
-            if (remaining > 0) this.activeByHost.set(host.id, remaining)
-            else this.activeByHost.delete(host.id)
-        }
-    }
-
-    async publishFiles(
-        paths: string[],
-        hostId?: string,
-        cwd?: string
-    ): Promise<PublishResult[]> {
-        const host = this.resolveHost(hostId)
-        const session = await this.pool.getOrCreate(host)
-        const out: PublishResult[] = []
-        const publishRoot = await this.resolvePublishRoot(session, cwd || host.cwd)
-
-        for (const remotePath of paths) {
-            const name = path.posix.basename(remotePath.replaceAll('\\', '/'))
-            try {
-                const canonicalPath = await this.resolveRemotePath(
-                    session,
-                    remotePath,
-                    cwd || host.cwd
-                )
-                if (!isRemotePathWithinRoot(canonicalPath, publishRoot)) {
-                    throw new Error(`File is outside the publish root: ${publishRoot}`)
-                }
-                const asset = await session.openAsset(
-                    canonicalPath,
-                    this.pluginConfig.maxPublishFileBytes
-                )
-                const file = await this.ctx.chatluna_storage.createTempFileFromStream(
-                    asset.stream,
-                    name,
-                    { size: asset.size, mimeType: asset.mimeType }
-                )
-                out.push({ path: remotePath, name, url: file.url })
-            } catch (err) {
-                out.push({
-                    path: remotePath,
-                    name,
-                    error: getErrorMessage(err)
-                })
-            }
-        }
-
-        return out
     }
 
     async listRemoteFiles(input: { hostId?: string; path?: string } = {}) {
@@ -1479,30 +807,6 @@ export class AgentNexusService extends Service {
             maxUploadBytes: this.pluginConfig.fileManagerMaxUploadBytes,
             maxPreviewBytes: this.pluginConfig.fileManagerMaxPreviewBytes
         })
-    }
-
-    private async resolvePublishRoot(session: SshSession, cwd?: string) {
-        const requested = cwd || session.cwd
-        const result = await session.exec('pwd -P', {
-            cwd: requested,
-            timeoutMs: 10000
-        })
-        if (result.exitCode !== 0 || !result.stdout.trim().startsWith('/')) {
-            throw new Error(`Cannot resolve publish root: ${requested}`)
-        }
-        return result.stdout.trim().split('\n').pop() as string
-    }
-
-    private async resolveRemotePath(session: SshSession, remotePath: string, cwd?: string) {
-        const result = await session.exec(buildRemoteRealpathCommand(remotePath), {
-            cwd,
-            timeoutMs: 10000
-        })
-        const canonical = result.stdout.trim().split('\n').pop() || ''
-        if (result.exitCode !== 0 || !canonical.startsWith('/')) {
-            throw new Error(`Cannot resolve remote file: ${remotePath}`)
-        }
-        return canonical
     }
 
     async createTerminal(
@@ -1614,86 +918,25 @@ export class AgentNexusService extends Service {
         const platform = (this.ctx as any).chatluna?.platform
         if (!platform?.registerTool) return
 
-        const tools = [
-            { tool: new NexusDelegateTool(this), debug: false },
-            { tool: new NexusPublishTool(this), debug: false },
-            { tool: new NexusListAgentsTool(this), debug: false },
-            { tool: new NexusListSkillsTool(this), debug: false },
-            { tool: new NexusA2ADelegateTool(this), debug: false },
-            { tool: new NexusA2AListTool(this), debug: true },
-            { tool: new NexusA2ASendTool(this), debug: true },
-            { tool: new NexusA2ATaskTool(this), debug: true }
-        ]
-
-        for (const entry of tools) {
-            const { tool, debug } = entry
-            this.toolDispose.push(
-                platform.registerTool(tool.name, {
-                    description: tool.description,
-                    selector: () => true,
-                    createTool: () => tool,
-                    meta: {
-                        source: 'extension',
-                        group: 'agent-nexus',
-                        tags: debug
-                            ? ['agent-nexus', 'a2a', 'debug']
-                            : ['agent-nexus', 'a2a', 'ssh', 'computer'],
-                        defaultAvailability: {
-                            enabled: !debug,
-                            main: !debug,
-                            chatluna: !debug,
-                            characterScope: 'all'
-                        }
+        const tool = new NexusA2ADelegateTool(this)
+        this.toolDispose.push(
+            platform.registerTool(tool.name, {
+                description: tool.description,
+                selector: () => true,
+                createTool: () => tool,
+                meta: {
+                    source: 'extension',
+                    group: 'agent-nexus',
+                    tags: ['agent-nexus', 'a2a'],
+                    defaultAvailability: {
+                        enabled: true,
+                        main: true,
+                        chatluna: true,
+                        characterScope: 'all'
                     }
-                })
-            )
-        }
-    }
-
-    private async resolveAgent(
-        host: SshHostConfig,
-        _sessionId: string,
-        preferred?: AgentKind | 'auto'
-    ): Promise<DetectedAgent> {
-        let agents = this.agentCache.get(host.id)
-        if (!agents?.length) {
-            await this.scanAgents(host.id)
-            agents = this.agentCache.get(host.id) || []
-        }
-
-        const installed = agents.filter(
-            (a) => a.installed && this.nexusConfig.agents[a.kind]
+                }
+            })
         )
-        if (!installed.length) {
-            throw new Error(`No code agents installed on host ${host.name}`)
-        }
-
-        const want =
-            preferred && preferred !== 'auto'
-                ? preferred
-                : host.defaultAgent && host.defaultAgent !== 'auto'
-                  ? host.defaultAgent
-                  : undefined
-
-        if (want) {
-            const hit = installed.find((a) => a.kind === want)
-            if (hit) return hit
-            throw new Error(`Agent ${want} is not available on host ${host.name}`)
-        }
-
-        const order: AgentKind[] = [
-            'hermes',
-            'openclaw',
-            'claude',
-            'opencode',
-            'codex',
-            'pi'
-        ]
-        for (const kind of order) {
-            const hit = installed.find((a) => a.kind === kind)
-            if (hit) return hit
-        }
-        return installed[0]
     }
 
     private installedAgentKinds(hostId: string): AgentKind[] {
@@ -1797,14 +1040,13 @@ export class AgentNexusService extends Service {
             ) {
                 throw new Error('AgentNexus config a2a must be an object')
             }
-            for (const key of ['agents', 'runtime'] as const) {
-                const item = candidate[key]
-                if (
-                    item !== undefined &&
-                    (!item || typeof item !== 'object' || Array.isArray(item))
-                ) {
-                    throw new Error(`AgentNexus config ${key} must be an object`)
-                }
+            if (
+                candidate.agents !== undefined &&
+                (!candidate.agents ||
+                    typeof candidate.agents !== 'object' ||
+                    Array.isArray(candidate.agents))
+            ) {
+                throw new Error('AgentNexus config agents must be an object')
             }
             parsed = candidate as NexusConfig
         } catch (error) {
@@ -1820,14 +1062,6 @@ export class AgentNexusService extends Service {
         const defaults = createDefaultNexusConfig(this.pluginConfig)
         const parsedA2A = (parsed.a2a || {}) as A2AConfig &
             Record<string, unknown>
-        const legacyA2AServerConfig = [
-            'enabled',
-            'publicBaseUrl',
-            'serverToken',
-            'cardName',
-            'cardDescription'
-        ].some((key) => key in parsedA2A)
-        const missingBridge = (parsed.hosts || []).some((host) => !host.bridge)
         const missingHostKeyPolicy = (parsed.hosts || []).some(
             (host) => !host.hostKeyPolicy
         )
@@ -1840,30 +1074,23 @@ export class AgentNexusService extends Service {
             ? parsed.defaultHostId
             : repaired.hosts.find((host) => host.enabled)?.id || repaired.hosts[0]?.id
         this.nexusConfig = {
-            ...defaults,
-            ...parsed,
+            hosts: repaired.hosts,
             agents: {
                 ...defaults.agents,
                 ...parsed.agents
             },
-            runtime: {
-                ...defaults.runtime,
-                ...parsed.runtime
-            },
+            skills: parsed.skills || [],
+            skillRoot: parsed.skillRoot || defaults.skillRoot,
+            defaultHostId,
             a2a: {
                 remotes: parsedA2A.remotes || []
-            },
-            hosts: repaired.hosts,
-            skills: parsed.skills || [],
-            defaultHostId
+            }
         }
         if (
             repaired.changed ||
             defaultHostId !== parsed.defaultHostId ||
             !parsed.a2a ||
-            legacyA2AServerConfig ||
             parsed.agents?.pi === undefined ||
-            missingBridge ||
             missingHostKeyPolicy
         ) {
             await this.writeConfigFile()
@@ -1893,108 +1120,11 @@ export class AgentNexusService extends Service {
     }
 }
 
-async function packLocalBridgePackage() {
-    const { access, mkdtemp, readFile, rm } = await import('fs/promises')
-    const { tmpdir } = await import('os')
-    const { execFile } = await import('child_process')
-    const root = path.resolve(__dirname, '..')
-    const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
-    if (manifest?.name !== 'koishi-plugin-agent-nexus') {
-        throw new Error(`AgentNexus package root not found: ${root}`)
-    }
-    await access(path.join(root, 'lib', 'bridge.js')).catch(() => {
-        throw new Error('本地包缺少 lib/bridge.js，请先执行 npm run build。')
-    })
-
-    const temp = await mkdtemp(path.join(tmpdir(), 'agent-nexus-bridge-pack-'))
-    try {
-        const args = [
-            'pack',
-            '--json',
-            '--ignore-scripts',
-            '--pack-destination',
-            temp
-        ]
-        const npmExecPath = await resolveNpmExecPath(access)
-        const command = npmExecPath ? process.execPath : 'npm'
-        const commandArgs = npmExecPath ? [npmExecPath, ...args] : args
-        const stdout = await new Promise<string>((resolve, reject) => {
-            execFile(
-                command,
-                commandArgs,
-                {
-                    cwd: root,
-                    encoding: 'utf8',
-                    maxBuffer: 4 * 1024 * 1024
-                },
-                (error, output, stderr) => {
-                    if (error) {
-                        reject(
-                            new Error(
-                                `本地 Bridge 打包失败：${String(stderr || error.message).trim()}`
-                            )
-                        )
-                    } else {
-                        resolve(output)
-                    }
-                }
-            )
-        })
-        const packed = JSON.parse(stdout)
-        const filename = Array.isArray(packed) ? packed[0]?.filename : undefined
-        if (typeof filename !== 'string' || !filename) {
-            throw new Error('npm pack 未返回 Bridge 压缩包名称。')
-        }
-        return await readFile(path.join(temp, filename))
-    } finally {
-        await rm(temp, { recursive: true, force: true })
-    }
-}
-
-async function resolveNpmExecPath(
-    access: (path: string) => Promise<void>
-): Promise<string | undefined> {
-    const configured = process.env.npm_execpath
-    const candidates = [
-        configured && /npm-cli\.js$/i.test(configured) ? configured : undefined,
-        path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-        path.resolve(
-            path.dirname(process.execPath),
-            '..',
-            'lib',
-            'node_modules',
-            'npm',
-            'bin',
-            'npm-cli.js'
-        )
-    ].filter((value): value is string => Boolean(value))
-    for (const candidate of candidates) {
-        try {
-            await access(candidate)
-            return candidate
-        } catch {}
-    }
-    if (process.platform === 'win32') {
-        throw new Error('未找到 npm-cli.js，无法打包本地 Bridge。')
-    }
-    return undefined
-}
-
-function initialBridgeStatus(host: SshHostConfig): BridgeHostStatus {
-    const publicBaseUrl = bridgePublicBaseUrl(host)
-    return {
-        enabled: host.bridge.enabled,
-        state: host.bridge.enabled ? 'unknown' : 'disabled',
-        endpointUrl: `${publicBaseUrl}/a2a`,
-        cardUrl: `${publicBaseUrl}/.well-known/agent-card.json`,
-        agents: []
-    }
-}
-
 function emptyAgents(): DetectedAgent[] {
     return listAdapters().map((a) => ({
         kind: a.kind,
         installed: false,
+        scanned: false,
         skillDirs: a.skillDirs('~')
     }))
 }

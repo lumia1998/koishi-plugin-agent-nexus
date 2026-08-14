@@ -5,7 +5,6 @@ import type {
     SshHostConfig
 } from '../types'
 import { randomUUID } from 'crypto'
-import { normalizeSshBridgeConfig } from './bridge-config'
 
 export function mergeHostSecrets(
     incoming: SshHostConfig,
@@ -38,9 +37,7 @@ export function mergeHostSecrets(
             }
         }
     }
-    const bridge = normalizeSshBridgeConfig(merged.bridge || previous.bridge)
-    if (!bridge.token) bridge.token = previous.bridge?.token || ''
-    return { ...merged, bridge }
+    return merged
 }
 
 function isEmptyAuth(auth: SshAuth) {
@@ -57,10 +54,6 @@ export function redactNexusConfig(config: NexusConfig): NexusConfig {
                 host.auth.type === 'password'
                     ? { type: 'password', password: '' }
                     : { type: 'key', privateKey: '' },
-            bridge: {
-                ...normalizeSshBridgeConfig(host.bridge),
-                token: ''
-            }
         })),
         a2a: redactA2AConfig(config.a2a)
     }
@@ -152,8 +145,7 @@ export function patchHostConfig(
         ...previous,
         ...input,
         id: previous.id,
-        auth: previous.auth,
-        bridge: normalizeSshBridgeConfig(input.bridge || previous.bridge)
+        auth: previous.auth
     }
 
     if (input.auth) {
@@ -166,8 +158,6 @@ export function patchHostConfig(
             next.auth = input.auth
         }
     }
-
-    if (!next.bridge.token) next.bridge.token = previous.bridge?.token || ''
 
     return mergeHostSecrets(next, previous)
 }
@@ -195,50 +185,4 @@ export function resolveHostReference(hosts: SshHostConfig[], reference: string) 
         throw new Error(`设备引用“${reference}”有歧义，请使用设备 ID。`)
     }
     return matches[0]
-}
-
-export function routeCommandHost(
-    hosts: SshHostConfig[],
-    prompt: string,
-    reference?: string
-) {
-    const enabled = hosts.filter((host) => host.enabled)
-    if (!enabled.length) throw new Error('No enabled SSH host configured.')
-
-    if (reference) {
-        const host = resolveHostReference(enabled, reference)
-        if (!host) throw new Error(`Host not found: ${reference}`)
-        return { hostId: host.id, prompt }
-    }
-
-    if (enabled.length === 1) return { hostId: enabled[0].id, prompt }
-
-    const value = prompt.trimStart()
-    const matches = enabled
-        .map((host) => ({ host, name: normalizeHostName(host.name) }))
-        .filter(({ name }) => {
-            if (!name) return false
-            return (
-                value.localeCompare(name, undefined, { sensitivity: 'accent' }) === 0 ||
-                value.toLocaleLowerCase().startsWith(`${name.toLocaleLowerCase()} `)
-            )
-        })
-        .sort((a, b) => b.name.length - a.name.length)
-
-    if (!matches.length) {
-        throw new Error(
-            `已配置多台设备，请在任务前指定设备名称：${enabled.map((host) => host.name).join('、')}`
-        )
-    }
-
-    // longest name wins; if two equal-length names both match (duplicate names), reject
-    const best = matches[0]
-    const tied = matches.filter((item) => item.name.length === best.name.length)
-    if (tied.length > 1) {
-        throw new Error('设备名称重复，请使用 -H 指定设备 ID。')
-    }
-
-    const task = value.slice(best.name.length).trimStart()
-    if (!task) throw new Error(`请在设备名称 ${best.name} 后填写任务内容。`)
-    return { hostId: best.host.id, prompt: task }
 }

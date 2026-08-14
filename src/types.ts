@@ -22,10 +22,8 @@ export interface SshHostConfig {
     hostKeyPolicy?: SshHostKeyPolicy
     hostKeyFingerprint?: string
     enabled: boolean
-    defaultAgent?: AgentKind | 'auto'
     cwd?: string
     idleTimeoutMs: number
-    bridge: SshBridgeConfig
 }
 
 export interface AgentEnableConfig {
@@ -35,27 +33,6 @@ export interface AgentEnableConfig {
     opencode: boolean
     codex: boolean
     pi: boolean
-}
-
-export interface SshBridgeConfig {
-    enabled: boolean
-    bindHost: string
-    port: number
-    publicBaseUrl?: string
-    token?: string
-    dataDir: string
-    cwd?: string
-    packageSpec: string
-    agents: AgentEnableConfig
-    remoteId?: string
-}
-
-export interface AgentRuntimeOptions {
-    openclawAgent: string
-    claudeSkipPermissions: boolean
-    codexBypassSandbox: boolean
-    opencodeAuto: boolean
-    defaultTimeoutMs: number
 }
 
 export interface SkillSourceConfig {
@@ -142,7 +119,6 @@ export interface A2AStatus {
 export interface NexusConfig {
     hosts: SshHostConfig[]
     agents: AgentEnableConfig
-    runtime: AgentRuntimeOptions
     skills: SkillSourceConfig[]
     skillRoot: string
     defaultHostId?: string
@@ -152,12 +128,9 @@ export interface NexusConfig {
 export interface DetectedAgent {
     kind: AgentKind
     installed: boolean
+    scanned?: boolean
     path?: string
-    version?: string
-    latestVersion?: string
-    updateAvailable?: boolean
     maintenanceMethod?: string
-    maintenanceError?: string
     skillDirs: string[]
 }
 
@@ -167,60 +140,9 @@ export interface AgentMaintenanceInput {
 }
 
 export interface AgentMaintenanceResult {
-    action: 'install' | 'update'
+    action: 'install'
     method: string
     agent: DetectedAgent
-    status: NexusStatus
-}
-
-export type BridgeMaintenanceAction =
-    | 'install'
-    | 'update'
-    | 'start'
-    | 'stop'
-    | 'restart'
-
-export interface BridgeMaintenanceInput {
-    hostId: string
-    action: BridgeMaintenanceAction
-    /** Current console form values, persisted before the requested action. */
-    bridge?: SshBridgeConfig
-}
-
-export type BridgeServiceState =
-    | 'disabled'
-    | 'unknown'
-    | 'installing'
-    | 'not-installed'
-    | 'starting'
-    | 'running'
-    | 'stopped'
-    | 'error'
-
-export interface BridgeAgentStatus {
-    kind: AgentKind
-    installed: boolean
-    path?: string
-    version?: string
-}
-
-export interface BridgeHostStatus {
-    enabled: boolean
-    state: BridgeServiceState
-    endpointUrl?: string
-    cardUrl?: string
-    version?: string
-    activeTasks?: number
-    agents: BridgeAgentStatus[]
-    pid?: number
-    lastCheckedAt?: number
-    error?: string
-}
-
-export interface BridgeMaintenanceResult {
-    action: BridgeMaintenanceAction
-    method: string
-    bridge: BridgeHostStatus
     status: NexusStatus
 }
 
@@ -234,7 +156,6 @@ export interface HostStatus {
     sessionCount: number
     lastConnectedAt?: number
     environment?: SshEnvironmentInfo
-    bridge: BridgeHostStatus
 }
 
 export interface SshEnvironmentInfo {
@@ -265,53 +186,6 @@ export interface SkillInfo {
     sourceId?: string
     path: string
     linkedAgents: AgentKind[]
-}
-
-export interface DelegateInput {
-    hostId?: string
-    agent?: AgentKind | 'auto'
-    prompt: string
-    cwd?: string
-    model?: string
-    timeoutMs?: number
-    openclawAgent?: string
-    publishFiles?: boolean
-    signal?: AbortSignal
-    sessionMode?: 'oneshot' | 'managed'
-    providerState?: AgentProviderState
-}
-
-export interface AgentProviderState {
-    sessionId?: string
-    [key: string]: unknown
-}
-
-export interface AgentArtifact {
-    path: string
-    size?: string
-    password?: string
-    title?: string
-}
-
-export interface AgentResult {
-    agent: AgentKind
-    text: string
-    files: string[]
-    images: string[]
-    artifacts?: AgentArtifact[]
-    raw: string
-    exitCode: number
-    timedOut: boolean
-    command: string
-    truncated?: boolean
-    providerState?: AgentProviderState
-}
-
-export interface PublishResult {
-    path: string
-    url?: string
-    name: string
-    error?: string
 }
 
 export interface TerminalInfo {

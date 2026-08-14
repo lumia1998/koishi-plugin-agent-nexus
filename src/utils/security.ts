@@ -1,5 +1,4 @@
 import path from 'path'
-import { quoteShell } from './shell'
 
 const SAFE_SEGMENT = /^[a-zA-Z0-9._-]+$/
 const SAFE_GIT_REF = /^(?!-)(?!.*(?:^|\/)\.\.?($|\/))[a-zA-Z0-9._/-]+$/
@@ -48,10 +47,6 @@ export function validateRepoUrl(value: string): string {
         throw new Error('Skill repository must use https:// or ssh://')
     }
     return candidate
-}
-
-export function buildRemoteRealpathCommand(remotePath: string): string {
-    return `readlink -f -- ${quoteShell(remotePath)}`
 }
 
 export function isRemotePathWithinRoot(remotePath: string, root: string): boolean {

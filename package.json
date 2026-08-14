@@ -4,9 +4,6 @@
   "version": "0.1.32-alpha.5",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
-  "bin": {
-    "agent-nexus-bridge": "lib/bridge.js"
-  },
   "files": [
     "CHANGELOG.md",
     "lib",
@@ -31,7 +28,6 @@
     "build:client": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build-client.cjs'))\"",
     "typecheck": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
     "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
-    "test:agents": "node ./scripts/smoke-agents.cjs",
     "prepack": "npm run build"
   },
   "koishi": {
@@ -41,12 +37,12 @@
     },
     "service": {
       "required": [
-        "chatluna"
+        "chatluna",
+        "chatluna_storage"
       ],
       "optional": [
         "console",
-        "server",
-        "chatluna_storage"
+        "server"
       ]
     }
   },

@@ -2,13 +2,11 @@ import { Context } from 'koishi'
 import { resolve } from 'path'
 import type { AgentNexusService } from '../service'
 import type {
-    AgentKind,
     NexusConfig,
     SkillSourceConfig,
     SshHostConfig
 } from '../types'
 import { randomUUID } from 'crypto'
-import type { SessionHistoryQuery } from '../sessions/types'
 
 export const name = 'agent-nexus-webui'
 export const inject = ['console', 'agent_nexus']
@@ -26,28 +24,6 @@ export function apply(ctx: Context) {
     ctx.console.addListener('agent-nexus/getStatus', async () => nexus().getStatus())
     ctx.console.addListener('agent-nexus/getConsoleData', async () =>
         nexus().getConsoleData()
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/listSessionHistory',
-        async (query: SessionHistoryQuery = {}) =>
-            nexus().listSessionHistory(query),
-        commandAuthority
-    )
-    ctx.console.addListener(
-        'agent-nexus/getSessionHistory',
-        async (id: string) => nexus().getSessionHistory(id),
-        commandAuthority
-    )
-    ctx.console.addListener(
-        'agent-nexus/deleteSessionHistory',
-        async (id: string) => nexus().deleteSessionHistory(id),
-        commandAuthority
-    )
-    ctx.console.addListener(
-        'agent-nexus/retrySessionSummary',
-        async (id: string) => nexus().retrySessionSummary(id),
-        commandAuthority
     )
 
     ctx.console.addListener(
@@ -93,19 +69,6 @@ export function apply(ctx: Context) {
         'agent-nexus/maintainAgent',
         async (input: import('../types').AgentMaintenanceInput) =>
             nexus().maintainAgent(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/getBridgeStatus',
-        async (hostId: string) => nexus().refreshBridgeStatus(hostId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/maintainBridge',
-        async (input: import('../types').BridgeMaintenanceInput) =>
-            nexus().maintainBridge(input),
         commandAuthority
     )
 
@@ -263,18 +226,6 @@ export function apply(ctx: Context) {
         }
     )
 
-    ctx.console.addListener(
-        'agent-nexus/delegate',
-        async (input: {
-            prompt: string
-            agent?: AgentKind | 'auto'
-            hostId?: string
-            cwd?: string
-            publishFiles?: boolean
-        }) => {
-            return await nexus().delegate(input)
-        }
-    )
 }
 
 declare module '@koishijs/plugin-console' {
@@ -282,18 +233,6 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/getConfig'(): Promise<import('../types').NexusConfig>
         'agent-nexus/getStatus'(): Promise<import('../types').NexusStatus>
         'agent-nexus/getConsoleData'(): Promise<import('../types').NexusConsoleData>
-        'agent-nexus/listSessionHistory'(
-            query?: import('../sessions/types').SessionHistoryQuery
-        ): Promise<import('../sessions/types').SessionHistoryPage>
-        'agent-nexus/getSessionHistory'(
-            id: string
-        ): Promise<import('../sessions/types').SessionHistoryDetail>
-        'agent-nexus/deleteSessionHistory'(
-            id: string
-        ): Promise<{ success: boolean }>
-        'agent-nexus/retrySessionSummary'(
-            id: string
-        ): Promise<{ success: boolean }>
         'agent-nexus/saveConfig'(cfg: import('../types').NexusConfig): Promise<{ success: boolean }>
         'agent-nexus/saveHost'(
             input: Partial<import('../types').SshHostConfig> & { setAsDefault?: boolean }
@@ -308,12 +247,6 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/maintainAgent'(
             input: import('../types').AgentMaintenanceInput
         ): Promise<import('../types').AgentMaintenanceResult>
-        'agent-nexus/getBridgeStatus'(
-            hostId: string
-        ): Promise<import('../types').BridgeHostStatus>
-        'agent-nexus/maintainBridge'(
-            input: import('../types').BridgeMaintenanceInput
-        ): Promise<import('../types').BridgeMaintenanceResult>
         'agent-nexus/saveA2ARemote'(
             input: Partial<import('../types').A2ARemoteConfig> & {
                 clearAuthToken?: boolean
@@ -399,12 +332,5 @@ declare module '@koishijs/plugin-console' {
             sessionId: string,
             terminalId: string
         ): Promise<{ success: boolean }>
-        'agent-nexus/delegate'(input: {
-            prompt: string
-            agent?: import('../types').AgentKind | 'auto'
-            hostId?: string
-            cwd?: string
-            publishFiles?: boolean
-        }): ReturnType<import('../service').AgentNexusService['delegate']>
     }
 }

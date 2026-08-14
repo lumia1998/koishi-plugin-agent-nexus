@@ -4,8 +4,7 @@
             <div>
                 <div class="panel-title">SSH Computer</div>
                 <div class="panel-description">
-                    管理远端机器。多台设备时，命令请写：
-                    <code>nexus.hermes 设备名 任务</code>
+                    管理远端机器，用于 Agent 安装、Skills、SFTP 和终端。
                 </div>
             </div>
             <div class="panel-actions">
@@ -52,7 +51,7 @@
                     <div class="field-label">设备名称</div>
                     <el-input
                         v-model="name"
-                        placeholder="例如 build、开发机（多机命令前缀）"
+                        placeholder="例如 build、开发机"
                         clearable
                     />
                 </div>
@@ -137,9 +136,7 @@
 
             <div class="connection-footer">
                 <div class="connection-copy">
-                    设备名称会用于命令路由：
-                    <code>nexus.hermes {{ nameHint }} 修 bug</code>
-                    。Code Agent 默认非交互高权限运行。
+                    设备名称用于 Computer、Skills、文件和终端页面中的主机选择。
                 </div>
                 <div class="connection-actions">
                     <el-button
@@ -163,7 +160,7 @@
                 <div>
                     <div class="section-title">可用 Code Agents</div>
                     <div class="section-description">
-                        连接成功后自动扫描。亮起的 Agent 会进入自动路由候选。
+                        连接成功后自动扫描；未安装的 Agent 可在这里一键安装。
                     </div>
                 </div>
                 <div class="section-meta">{{ availableCount }}/{{ kinds.length }} 可用</div>
@@ -202,21 +199,14 @@
                         </el-tag>
                     </div>
                     <div class="agent-version">
-                        {{ agent(kind)?.version || (isScanned(kind) ? '未安装' : '等待扫描') }}
-                    </div>
-                    <div class="agent-latest">
-                        最新：{{ agent(kind)?.latestVersion || (agent(kind)?.maintenanceError ? '检查失败' : '等待检查') }}
+                        {{ isScanned(kind) ? (agent(kind)?.installed ? '已探测到可执行文件' : '未安装') : '等待扫描' }}
                     </div>
                     <div class="agent-path">{{ agent(kind)?.path || 'PATH 中未找到可执行文件' }}</div>
                     <div class="agent-actions">
-                        <span class="maintenance-method">
-                            {{ agent(kind)?.maintenanceMethod || '官方安装渠道' }}
-                        </span>
                         <el-button
                             size="small"
-                            :type="agent(kind)?.installed && agent(kind)?.updateAvailable ? 'warning' : 'primary'"
-                            :plain="agent(kind)?.installed"
-                            :disabled="!connected || !isScanned(kind) || (agent(kind)?.installed && agent(kind)?.updateAvailable !== true)"
+                            type="primary"
+                            :disabled="!connected || !isScanned(kind) || agent(kind)?.installed"
                             :loading="maintaining.includes(maintenanceKey(kind))"
                             @click="maintain(kind)"
                         >
@@ -379,20 +369,13 @@ function maintenanceKey(kind: AgentKind) {
 function maintenanceLabel(kind: AgentKind) {
     const value = agent(kind)
     if (!value?.installed) return '一键安装'
-    if (value.updateAvailable === true) return '更新'
-    if (value.updateAvailable === undefined && !value.maintenanceError) {
-        return '版本未知'
-    }
-    if (value.maintenanceError) return '无法检查更新'
-    return '已是最新'
+    return '已安装'
 }
 
 function isScanned(kind: AgentKind) {
     const value = agent(kind)
     return Boolean(
-        value?.installed ||
-            value?.latestVersion ||
-            value?.maintenanceError
+        value?.scanned || value?.installed
     )
 }
 

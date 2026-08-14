@@ -1,20 +1,4 @@
-import type { SessionIdentity } from '../sessions/types'
 import type { A2ADelegationContext, A2ADelegationRouting } from '../a2a/delegation-store'
-
-export function toolSessionIdentity(parentConfig: any): SessionIdentity | undefined {
-    const configurable = parentConfig?.configurable
-    const session = configurable?.session
-    const userId = String(configurable?.userId ?? session?.userId ?? '').trim()
-    if (!userId) return undefined
-    return {
-        userId,
-        channelId: configurable?.conversationId
-            ? `${String(session?.channelId ?? '')}#chatluna:${String(configurable.conversationId)}`
-            : String(session?.channelId ?? ''),
-        platform: String(session?.platform ?? 'chatluna'),
-        selfId: String(session?.selfId ?? '')
-    }
-}
 
 export function toolA2ADelegationContext(
     parentConfig: any

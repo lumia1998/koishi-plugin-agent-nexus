@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises'
-import type { AgentKind, A2ATaskView } from '../types'
+import type { A2ATaskView } from '../types'
 import {
     moveCorruptFileAside,
     writeTextFileAtomic
@@ -40,7 +40,6 @@ export interface A2ADelegationTask {
     background: boolean
     prompt: string
     skill?: string
-    agent?: AgentKind | 'auto'
     a2aTaskId?: string
     contextId?: string
     remoteState?: string
@@ -201,7 +200,7 @@ function normalizeTask(value: unknown): A2ADelegationTask | undefined {
         return undefined
     }
     const now = Date.now()
-    return {
+    const normalized: A2ADelegationTask = {
         ...structuredClone(task as A2ADelegationTask),
         schemaVersion: 1,
         background: task.background !== false,
@@ -214,6 +213,8 @@ function normalizeTask(value: unknown): A2ADelegationTask | undefined {
         startedAt: finiteNumber(task.startedAt, now),
         expiresAt: finiteNumber(task.expiresAt, now + 24 * 60 * 60 * 1000)
     }
+    delete (normalized as unknown as Record<string, unknown>).agent
+    return normalized
 }
 
 function stringValue(value: unknown) {

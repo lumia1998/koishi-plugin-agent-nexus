@@ -623,7 +623,7 @@ export class SshSession {
         if (!stat.isFile()) throw new Error(`Asset is not a regular file: ${remotePath}`)
         if (maxBytes && stat.size > maxBytes) {
             throw new Error(
-                `Asset exceeds publish limit (${stat.size} > ${maxBytes} bytes): ${remotePath}`
+                `Asset exceeds read limit (${stat.size} > ${maxBytes} bytes): ${remotePath}`
             )
         }
         const stream = sftp.createReadStream(remotePath)

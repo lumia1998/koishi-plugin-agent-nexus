@@ -9,7 +9,7 @@
                     </el-tag>
                 </div>
                 <div class="subtitle">
-                    SSH Agent 管理 · A2A Client · 远端委托 · Skills · 文件与终端
+                    SSH 运维 · A2A Client · Agent 安装 · Skills · 文件与终端
                 </div>
             </div>
             <div class="actions">
@@ -79,10 +79,6 @@
                 :status="status"
                 :visible="active === 'files'"
             />
-            <sessions-panel
-                v-show="active === 'sessions'"
-                :visible="active === 'sessions'"
-            />
             <!-- Keep terminal mounted so tabs/WebSocket survive Computer/Skills switches. -->
             <terminal-panel
                 v-show="active === 'terminal'"
@@ -102,7 +98,6 @@ import ComputerPanel from './components/computer-panel.vue'
 import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
 import FileManagerPanel from './components/file-manager-panel.vue'
-import SessionsPanel from './components/sessions-panel.vue'
 import A2aPanel from './components/a2a-panel.vue'
 import type {
     AgentKind,
@@ -124,13 +119,12 @@ type ComputerConnectInput = {
     setAsDefault?: boolean
 }
 
-const tabs = ['computer', 'a2a', 'skills', 'files', 'sessions', 'terminal'] as const
+const tabs = ['computer', 'a2a', 'skills', 'files', 'terminal'] as const
 const tabLabel = {
     computer: 'Computer',
     a2a: 'A2A',
     skills: 'Skills',
     files: '文件',
-    sessions: '会话',
     terminal: '终端'
 }
 
@@ -148,13 +142,6 @@ const config = ref<NexusConfig>({
         opencode: true,
         codex: true,
         pi: true
-    },
-    runtime: {
-        openclawAgent: 'default',
-        claudeSkipPermissions: true,
-        codexBypassSandbox: true,
-        opencodeAuto: true,
-        defaultTimeoutMs: 600000
     },
     skills: [],
     skillRoot: '~/.agent-nexus/skills',
@@ -319,7 +306,7 @@ async function maintainAgent(input: AgentMaintenanceInput) {
     statusGeneration += 1
     const host = status.value.hosts.find((item) => item.id === input.hostId)
     const agent = host?.agents.find((item) => item.kind === input.kind)
-    const action = agent?.installed ? '更新' : '安装'
+    const action = '安装'
     const labels: Record<AgentKind, string> = {
         hermes: 'Hermes',
         openclaw: 'OpenClaw',
@@ -342,7 +329,7 @@ async function maintainAgent(input: AgentMaintenanceInput) {
         statusGeneration += 1
         status.value = result.status
         ElMessage.success(
-            `${labels[input.kind]} ${result.action === 'install' ? '安装' : '更新'}完成`
+            `${labels[input.kind]} 安装完成`
         )
     } catch (error: any) {
         if (error === 'cancel' || error === 'close') return
