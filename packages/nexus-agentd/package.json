@@ -1,6 +1,6 @@
 {
   "name": "nexus-agentd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local Nexus Gateway daemon that exposes allowlisted Coding Agents through HTTP/SSE and ACP",
   "type": "module",
   "main": "dist/index.js",

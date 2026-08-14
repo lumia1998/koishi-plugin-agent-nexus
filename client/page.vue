@@ -56,9 +56,13 @@
                 :status="status"
                 :connecting="connecting"
                 :maintaining="maintaining"
+                :deploying-agentd="deployingAgentd"
+                :agentd-progress="agentdProgress"
                 @connect="connectComputer"
                 @remove="removeComputer"
                 @maintain="maintainAgent"
+                @deploy-agentd="deployAgentd"
+                @open-acp="active = 'a2a'"
             />
             <skills-panel
                 v-if="active === 'skills'"
@@ -101,6 +105,8 @@ import FileManagerPanel from './components/file-manager-panel.vue'
 import A2aPanel from './components/a2a-panel.vue'
 import type {
     AgentKind,
+    AgentdDeploymentInput,
+    AgentdDeploymentProgress,
     AgentMaintenanceInput,
     NexusConfig,
     NexusConsoleData,
@@ -132,6 +138,8 @@ const active = ref<(typeof tabs)[number]>('computer')
 const loading = ref(false)
 const connecting = ref(false)
 const maintaining = ref<string[]>([])
+const deployingAgentd = ref<string[]>([])
+const agentdProgress = ref<Record<string, AgentdDeploymentProgress>>({})
 let statusGeneration = 0
 const config = ref<NexusConfig>({
     hosts: [],
@@ -193,6 +201,24 @@ const overview = computed(() => {
     }
 })
 
+async function refreshAgentdProgress(hostId: string) {
+    try {
+        const progress = await send(
+            'agent-nexus/getAgentdDeploymentProgress',
+            hostId
+        )
+        if (progress) {
+            agentdProgress.value = {
+                ...agentdProgress.value,
+                [hostId]: progress
+            }
+        }
+        return progress || undefined
+    } catch {
+        return agentdProgress.value[hostId]
+    }
+}
+
 async function reload(scan = false) {
     const generation = ++statusGeneration
     loading.value = true
@@ -201,10 +227,18 @@ async function reload(scan = false) {
         if (generation !== statusGeneration) return
         config.value = data.config
         status.value = data.status
+        await Promise.all(
+            data.config.hosts.map((host) => refreshAgentdProgress(host.id))
+        )
         if (scan && data.config.hosts.some((host) => host.enabled)) {
             const scanned = await send('agent-nexus/scanAgents')
             if (generation !== statusGeneration) return
             status.value = scanned
+        }
+        if (scan) {
+            const refreshed = await send('agent-nexus/refreshRemoteStatuses')
+            if (generation !== statusGeneration) return
+            status.value = refreshed
         }
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
@@ -278,13 +312,20 @@ async function connectComputer(input: ComputerConnectInput, done: (hostId: strin
 }
 
 async function reloadQuiet() {
-    if (maintaining.value.length) return
+    if (maintaining.value.length || deployingAgentd.value.length) return
     const generation = ++statusGeneration
     try {
         const data = await send('agent-nexus/getConsoleData')
-        if (generation !== statusGeneration || maintaining.value.length) return
+        if (
+            generation !== statusGeneration ||
+            maintaining.value.length ||
+            deployingAgentd.value.length
+        ) return
         config.value = data.config
         status.value = data.status
+        await Promise.all(
+            data.config.hosts.map((host) => refreshAgentdProgress(host.id))
+        )
     } catch {
         // ignore background refresh errors
     }
@@ -293,8 +334,13 @@ async function reloadQuiet() {
 async function removeComputer(hostId: string) {
     try {
         const host = config.value.hosts.find((item) => item.id === hostId)
+        const managedGateways = config.value.gateway.remotes.filter(
+            (remote) => remote.managedHostId === hostId
+        ).length
         await ElMessageBox.confirm(
-            `确定删除设备“${host?.name || hostId}”吗？`,
+            managedGateways
+                ? `确定删除设备“${host?.name || hostId}”吗？关联的 ${managedGateways} 个 Gateway 会解除 SSH 托管并保留，远端服务不会卸载。`
+                : `确定删除设备“${host?.name || hostId}”吗？`,
             '删除 SSH 设备',
             {
                 confirmButtonText: '删除',
@@ -349,6 +395,60 @@ async function maintainAgent(input: AgentMaintenanceInput) {
     } finally {
         maintaining.value = maintaining.value.filter((item) => item !== key)
     }
+}
+
+async function deployAgentd(input: AgentdDeploymentInput, done: () => void) {
+    if (deployingAgentd.value.includes(input.hostId)) return
+    try {
+        deployingAgentd.value = [...deployingAgentd.value, input.hostId]
+        statusGeneration += 1
+        let progress = await send('agent-nexus/deployAgentd', input)
+        agentdProgress.value = {
+            ...agentdProgress.value,
+            [input.hostId]: progress
+        }
+        const deadline = Date.now() + 6 * 60 * 1000
+        while (progress.state === 'running' && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 800))
+            progress =
+                (await refreshAgentdProgress(input.hostId)) || progress
+        }
+        if (progress.state === 'running') {
+            throw new Error('前端等待部署结果超时；后台任务仍在运行，请稍后查看当前阶段。')
+        }
+        if (progress.state === 'error') {
+            throw new Error(progress.error || 'ACP Gateway 部署失败')
+        }
+        statusGeneration += 1
+        const data = await send('agent-nexus/getConsoleData')
+        config.value = data.config
+        status.value = data.status
+        done()
+        if (progress.warning) ElMessage.warning(progress.warning)
+        else ElMessage.success('ACP Gateway 已部署并注册')
+    } catch (error: any) {
+        const progress = await refreshAgentdProgress(input.hostId)
+        const detail = progress?.error || readableConsoleError(error)
+        await ElMessageBox.alert(detail, 'ACP Gateway 部署失败', {
+            confirmButtonText: '知道了',
+            type: 'error'
+        }).catch(() => undefined)
+    } finally {
+        await refreshAgentdProgress(input.hostId)
+        deployingAgentd.value = deployingAgentd.value.filter(
+            (hostId) => hostId !== input.hostId
+        )
+    }
+}
+
+function readableConsoleError(error: unknown) {
+    const value =
+        error && typeof error === 'object' && 'message' in error
+            ? String((error as { message?: unknown }).message || error)
+            : String(error)
+    const normalized = value.replace(/^Error:\s*/i, '').trim()
+    const stack = normalized.search(/\n\s*at\s+/)
+    return (stack >= 0 ? normalized.slice(0, stack) : normalized) || '部署失败'
 }
 
 async function syncSkill(input: {

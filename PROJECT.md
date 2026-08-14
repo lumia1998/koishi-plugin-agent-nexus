@@ -20,11 +20,11 @@ AgentNexus 不实现 A2A Server，也不通过 SSH 执行 Agent 任务。
 ## 2. 核心原则
 
 - A2A 完整保留，不改成 ACP-only。
-- SSH 只承担连接、安装、探测、Skills、SFTP、Terminal 和诊断。
+- SSH 只承担连接、安装、探测、agentd 部署、Skills、SFTP、Terminal 和诊断。
 - ChatLuna 第一阶段继续只注册 `nexus_a2a_delegate`。
 - 每个逻辑 Agent 独立选择 A2A 或 Gateway+ACP。
 - AgentNexus 持有稳定 Job ID；协议 ID 只保存在 `providerState`。
-- A2A/Gateway Remote 与 SSH Computer 不隐式绑定。
+- A2A/Gateway Remote 与 SSH Computer 不按地址隐式绑定；一键部署产生的 Gateway 使用显式 `managedHostId`。
 - `nexus-agentd` 是独立 ESM package。
 - `nexus-agentd` 面向 Linux/Unix Agent 主机，不维护 Windows command shim。
 - ACP Driver 支持 OpenCode、Claude Code、Codex、Pi 和 OpenClaw；Hermes 保持原生 A2A。
@@ -148,6 +148,7 @@ interface DelegationAgentConfig {
   workspace?: string
   description?: string
   skills?: string[]
+  managedHostId?: string
 }
 ```
 
@@ -155,6 +156,7 @@ interface DelegationAgentConfig {
 - Gateway 路由还必须提供 `agentId` 和 `workspace`。
 - 未被显式逻辑路由引用的旧 A2A Remote 继续作为隐式 Agent 暴露。
 - 删除 Remote 不级联删除逻辑 Agent，后者会显示为不可用，便于修复配置。
+- SSH 自动创建的 ACP 路由记录 `managedHostId`；重新部署会对这些路由执行增删和 workspace 对账，但不会改动用户手工创建的路由。
 
 ## 6. A2A Provider
 
@@ -226,6 +228,25 @@ message
 ```
 
 可执行文件、argv、环境变量、认证假设和权限策略只能存在于 agentd 本机配置。
+
+### 8.1 SSH 一键部署
+
+Computer 页可以对已连接 Linux 主机执行一次部署事务：
+
+1. 校验 Linux、Node.js、npm、systemd 和服务管理权限。
+2. install-only 安装缺失的 `nexus-agentd` 与固定白名单 ACP Adapter。
+3. 通过 SFTP 原子写入 `0600` Token 环境文件和 JSON 配置；同步 Shell、locale 和稳定 XDG 路径，不复制 API Key 等敏感环境变量。
+4. 创建 systemd system service；没有 root/免密 sudo 时回退到可用的 user service。
+5. 在远端执行 `/health`，再从 Koishi 发现 `/v1/agents`。
+6. 显式保存托管 Gateway、所选 Agent 和 workspace 根，并对自动逻辑委托 Agent 执行增删对账。
+
+Token 不进入 SSH command、systemd unit、stdout 或 Console 返回值。客户端不能提供 npm 包名、
+command、argv、unit 名称或远端配置路径。未配置 SSH cwd 时使用并创建 `~/projects`，不默认把
+整个 HOME 设为 workspace allowlist。
+
+systemd 启动或健康检查失败时会自动读取服务状态和最近 journal，避免用户再手工定位日志。
+删除 SSH Host 会解除关联 Gateway/路由的托管标记并保留远端服务；修改 Host 地址会同步重写
+托管 Gateway URL。
 
 ## 9. 权限与输入
 
@@ -302,7 +323,9 @@ src/service.ts                  服务装配、SSH 运维和 Console 数据
 src/ssh/                        SSH 连接、执行、SFTP 与主机密钥
 src/adapters/                   Agent 探测和 Skills 目录
 src/agents/maintenance.ts       install-only 安装计划
+src/agentd/deployment.ts        Linux/systemd agentd 一键部署
 src/webui/index.ts              Console RPC
+client/components/computer-panel.vue SSH 主机、Agent 安装和 ACP Gateway 部署
 client/components/a2a-panel.vue Agent/Remote/Gateway 配置
 packages/nexus-agentd/          独立 Gateway + ACP daemon
 ```
@@ -320,12 +343,13 @@ packages/nexus-agentd/          独立 Gateway + ACP daemon
 
 ## 14. 后续优先级
 
-1. 在真实 Koishi + ChatLuna 环境验证 Gateway 后台 wakeup 和权限交互。
-2. 增加可选的 Gateway SSE 实时监听与断线重连策略。
-3. 评估 agentd Session 恢复或明确的 daemon 重启恢复流程。
-4. 在真实安装环境分别完成 Claude Code、Codex、Pi、OpenClaw 的协议互操作测试。
-5. Hermes 继续使用原生 A2A，不为协议统一而增加多余 ACP Bridge。
-6. 稳定后再评估把工具名迁移为 `nexus_delegate`。
+1. 在真实 Linux SSH 主机验证一键部署、system/user service 回退和 LAN 防火墙诊断。
+2. 在真实 Koishi + ChatLuna 环境验证 Gateway 后台 wakeup 和权限交互。
+3. 增加可选的 Gateway SSE 实时监听与断线重连策略。
+4. 评估 agentd Session 恢复或明确的 daemon 重启恢复流程。
+5. 在真实安装环境分别完成 Claude Code、Codex、Pi、OpenClaw 的协议互操作测试。
+6. Hermes 继续使用原生 A2A，不为协议统一而增加多余 ACP Bridge。
+7. 稳定后再评估把工具名迁移为 `nexus_delegate`。
 
 ## 15. 构建验证
 

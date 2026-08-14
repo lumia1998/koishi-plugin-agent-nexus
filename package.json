@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
   "description": "SSH operations plus A2A and Nexus Gateway/ACP delegation for ChatLuna",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

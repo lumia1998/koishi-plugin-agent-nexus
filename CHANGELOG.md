@@ -2,6 +2,30 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.1.33] - 2026-08-14
+
+### 新功能
+
+- Computer 页新增 Linux/systemd **部署 ACP 网关**：通过 SSH install-only 安装 `nexus-agentd` 和缺失 Adapter，自动生成 Token、配置与 systemd 服务。
+- 部署成功后自动注册显式绑定 SSH 设备的托管 Gateway，并可为 OpenCode、Claude Code、Codex、Pi、OpenClaw 创建逻辑委托 Agent。
+
+### 改进
+
+- 自动部署的 Token 只写入远端 `0600` 环境文件和 Koishi 服务端配置，不进入 SSH 命令、systemd unit 或 Console 返回值。
+- 未配置 SSH 工作目录时创建并使用 `~/projects`，避免默认把整个 HOME 加入 workspace allowlist。
+- A2A / ACP 页使用 Gateway discovery 结果选择 Agent ID，并为托管 Gateway 自动带出 workspace 根；托管 URL 和 Token 统一回到 Computer 页管理。
+- agentd 部署不查询版本或执行更新；已存在的 daemon/Adapter 直接复用，只补装缺失组件并重新生成配置。
+- 托管 Gateway 持久保存所选 Agent；重新配置时自动清理取消选择的自动路由，并修正超出新 allowlist 的 workspace。
+- systemd 服务继承远端用户的 Shell、locale 和稳定 XDG 路径；启动/健康检查失败时自动附带服务状态与 journal 诊断。
+- 删除 SSH 设备会将关联 Gateway 和自动路由解除托管并保留，修改 SSH 地址会同步更新托管 Gateway URL。
+- 页面启动时自动发现已启用的 A2A/Gateway，顶部“刷新并重扫”同时刷新 SSH Agent 与协议远端状态。
+- ACP Gateway 部署改为后台任务，Console 持续显示当前阶段、进度和耗时；失败时展示根因与远端 systemd 诊断，不再只显示长堆栈或无信息转圈。
+- 缺失的 npm 包合并为一次安装；遇到 `ENOSPC` 时仅清理经过路径校验的 npm 缓存并自动重试，SFTP 写入和网络下载均有单步超时。
+
+### 修复
+
+- 修复 systemd 权限探测 Shell 缺少换行、unit 绝对路径被写成字面量引号、健康检查脚本缺少语句分隔以及服务启动后的端口竞态。
+
 ## [0.1.32] - 2026-08-14
 
 ### 新功能
@@ -91,6 +115,7 @@
 
 - 这是 `alpha` 预发布版本；自动会话绑定与 Bridge 恢复已通过自动化测试，但仍需在真实 Koishi + ChatLuna + 远端 Bridge 环境完成端到端联调。
 
+[0.1.33]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32...v0.1.33
 [0.1.32]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.5...v0.1.32
 [0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
 [0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2

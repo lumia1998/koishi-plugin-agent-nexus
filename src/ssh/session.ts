@@ -77,6 +77,18 @@ export class SshSession {
         }
     }
 
+    get serviceEnvironment() {
+        const output: Record<string, string> = {}
+        for (const [key, value] of Object.entries(this.remoteEnvironment)) {
+            if (SERVICE_ENV_ALLOW.has(key) || key.startsWith('LC_')) {
+                output[key] = value
+            }
+        }
+        output.HOME = this.home
+        output.PATH = this.path
+        return output
+    }
+
     resolveRemotePath(value?: string) {
         const input = value?.trim() || this.home
         if (input === '~') return this.home
@@ -919,6 +931,18 @@ const ENV_ALLOW = new Set([
     'XDG_DATA_HOME',
     'XDG_CACHE_HOME',
     'XDG_RUNTIME_DIR'
+])
+
+const SERVICE_ENV_ALLOW = new Set([
+    'HOME',
+    'PATH',
+    'SHELL',
+    'LANG',
+    'LANGUAGE',
+    'LC_ALL',
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+    'XDG_CACHE_HOME'
 ])
 
 function isAllowedEnvironmentKey(key: string) {

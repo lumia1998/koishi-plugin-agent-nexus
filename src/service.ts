@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import { Context, Service } from 'koishi'
 import path from 'path'
 import type {
@@ -6,6 +6,10 @@ import type {
     A2ARemoteConfig,
     A2ARemoteStatus,
     A2ATaskView,
+    AgentdAgentKind,
+    AgentdDeploymentInput,
+    AgentdDeploymentPhase,
+    AgentdDeploymentProgress,
     AgentKind,
     AgentMaintenanceInput,
     AgentMaintenanceResult,
@@ -66,6 +70,12 @@ import {
 import { A2ADelegationProvider, NexusGatewayProvider } from './providers'
 import { NexusGatewayClient, validateGatewayUrl } from './gateway'
 import { buildAgentMaintenancePlan } from './agents/maintenance'
+import {
+    deployNexusAgentdRemote,
+    normalizeAgentdAgents,
+    reconcileManagedDelegationAgents,
+    validateAgentdPort
+} from './agentd'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -100,6 +110,7 @@ export class AgentNexusService extends Service {
     private dataPath: string
     private hostErrors = new Map<string, string>()
     private maintenanceLocks = new Set<string>()
+    private agentdDeploymentProgress = new Map<string, AgentdDeploymentProgress>()
 
     constructor(
         ctx: Context,
@@ -155,6 +166,11 @@ export class AgentNexusService extends Service {
         this.syncTools()
         await this.delegations.start()
         void this.ensureEnabledConnections(true)
+        void this.refreshRemoteStatuses().catch((error) => {
+            this.ctx.logger.warn(
+                `[agent-nexus] initial remote discovery failed: ${getErrorMessage(error)}`
+            )
+        })
         this.reconnectTimer = setInterval(() => {
             void this.ensureEnabledConnections()
         }, 30000)
@@ -176,6 +192,11 @@ export class AgentNexusService extends Service {
 
     getConfig() {
         return redactNexusConfig(this.nexusConfig)
+    }
+
+    getAgentdDeploymentProgress(hostId: string): AgentdDeploymentProgress | null {
+        const progress = this.agentdDeploymentProgress.get(hostId)
+        return progress ? { ...progress } : null
     }
 
     getA2AStatus() {
@@ -372,7 +393,11 @@ export class AgentNexusService extends Service {
             authToken: input.clearAuthToken
                 ? ''
                 : input.authToken?.trim() || previous?.authToken,
-            enabled: input.enabled ?? previous?.enabled ?? true
+            enabled: input.enabled ?? previous?.enabled ?? true,
+            managedHostId: previous?.managedHostId,
+            managedWorkspaceRoots: previous?.managedWorkspaceRoots,
+            managedServiceMode: previous?.managedServiceMode,
+            managedAgents: previous?.managedAgents
         }
         if (index >= 0) remotes[index] = next
         else remotes.push(next)
@@ -404,6 +429,18 @@ export class AgentNexusService extends Service {
         return this.gatewayProvider.discoverRemote(id)
     }
 
+    async refreshRemoteStatuses() {
+        await Promise.allSettled([
+            ...this.nexusConfig.a2a.remotes
+                .filter((remote) => remote.enabled)
+                .map((remote) => this.discoverA2ARemote(remote.id)),
+            ...this.nexusConfig.gateway.remotes
+                .filter((remote) => remote.enabled)
+                .map((remote) => this.discoverGatewayRemote(remote.id))
+        ])
+        return this.getStatus()
+    }
+
     async saveDelegationAgent(input: Partial<DelegationAgentConfig>) {
         const name = String(input.name || '').trim()
         const provider = input.provider
@@ -431,6 +468,7 @@ export class AgentNexusService extends Service {
         const agents = [...this.nexusConfig.delegation.agents]
         const id = String(input.id || '').trim() || randomUUID()
         const index = agents.findIndex((agent) => agent.id === id)
+        const previous = index >= 0 ? agents[index] : undefined
         const next: DelegationAgentConfig = {
             id,
             name,
@@ -442,7 +480,14 @@ export class AgentNexusService extends Service {
             description: String(input.description || '').trim() || undefined,
             skills: Array.isArray(input.skills)
                 ? input.skills.map((item) => String(item).trim()).filter(Boolean)
-                : agents[index]?.skills
+                : previous?.skills,
+            managedHostId:
+                previous?.managedHostId &&
+                provider === 'gateway' &&
+                remoteId === previous.remoteId &&
+                agentId === previous.agentId
+                    ? previous.managedHostId
+                    : undefined
         }
         if (index >= 0) agents[index] = next
         else agents.push(next)
@@ -582,10 +627,26 @@ export class AgentNexusService extends Service {
             const hosts = this.nexusConfig.hosts.map((host, index) =>
                 index === idx ? patched : host
             )
+            const remotes = this.nexusConfig.gateway.remotes.map((remote) => {
+                if (remote.managedHostId !== patched.id) return remote
+                try {
+                    const current = new URL(remote.baseUrl)
+                    const gatewayPort =
+                        Number(current.port) ||
+                        (current.protocol === 'https:' ? 443 : 80)
+                    return {
+                        ...remote,
+                        baseUrl: managedGatewayUrl(patched.host, gatewayPort)
+                    }
+                } catch {
+                    return remote
+                }
+            })
             hostId = patched.id
             await this.saveConfig({
                 ...this.nexusConfig,
                 hosts,
+                gateway: { ...this.nexusConfig.gateway, remotes },
                 defaultHostId:
                     input.setAsDefault || !this.nexusConfig.defaultHostId
                         ? hostId
@@ -622,9 +683,28 @@ export class AgentNexusService extends Service {
 
     async removeHost(hostId: string) {
         const hosts = this.nexusConfig.hosts.filter((h) => h.id !== hostId)
+        const remotes = this.nexusConfig.gateway.remotes.map((remote) =>
+            remote.managedHostId === hostId
+                ? {
+                      ...remote,
+                      managedHostId: undefined,
+                      managedServiceMode: undefined
+                  }
+                : remote
+        )
+        const delegationAgents = this.nexusConfig.delegation.agents.map((agent) =>
+            agent.managedHostId === hostId
+                ? { ...agent, managedHostId: undefined }
+                : agent
+        )
         await this.saveConfig({
             ...this.nexusConfig,
             hosts,
+            gateway: { ...this.nexusConfig.gateway, remotes },
+            delegation: {
+                ...this.nexusConfig.delegation,
+                agents: delegationAgents
+            },
             defaultHostId:
                 this.nexusConfig.defaultHostId === hostId
                     ? hosts[0]?.id
@@ -853,6 +933,206 @@ export class AgentNexusService extends Service {
             ...agent,
             maintenanceMethod: plan?.method
         }
+    }
+
+    async deployAgentd(
+        input: AgentdDeploymentInput
+    ): Promise<AgentdDeploymentProgress> {
+        this.requireHost(input.hostId)
+        validateAgentdPort(input.port)
+        if (!normalizeAgentdAgents(input.agents).length) {
+            throw new Error('请至少选择一个已安装的 ACP Agent。')
+        }
+        const key = `${input.hostId}:nexus-agentd`
+        if (this.maintenanceLocks.has(key)) {
+            throw new Error('该设备正在部署 nexus-agentd，请稍候。')
+        }
+        this.maintenanceLocks.add(key)
+        this.updateAgentdDeploymentProgress(
+            input.hostId,
+            'running',
+            'checking',
+            '准备部署',
+            1,
+            undefined,
+            true
+        )
+        void this.performAgentdDeployment(input, key)
+        return this.getAgentdDeploymentProgress(input.hostId)!
+    }
+
+    private async performAgentdDeployment(
+        input: AgentdDeploymentInput,
+        key: string
+    ) {
+        try {
+            const host = this.requireHost(input.hostId)
+            const port = validateAgentdPort(input.port)
+            const selected = normalizeAgentdAgents(input.agents)
+            if (!selected.length) throw new Error('请至少选择一个已安装的 ACP Agent。')
+            if (!this.agentCache.has(host.id)) await this.scanAgents(host.id)
+            const installed = new Set(
+                (this.agentCache.get(host.id) || [])
+                    .filter((agent) => agent.installed)
+                    .map((agent) => agent.kind)
+            )
+            const missing = selected.filter((kind) => !installed.has(kind))
+            if (missing.length) {
+                throw new Error(
+                    `请先安装这些 Agent：${missing.map(agentDisplayName).join('、')}`
+                )
+            }
+
+            const existing = this.nexusConfig.gateway.remotes.find(
+                (remote) => remote.managedHostId === host.id
+            )
+            const token =
+                existing?.authToken && !existing.authToken.startsWith('env:')
+                    ? existing.authToken
+                    : randomBytes(32).toString('base64url')
+            const session = await this.pool.getOrCreate(host)
+            const deployment = await deployNexusAgentdRemote(
+                session,
+                {
+                    port,
+                    workspaceRoots: input.workspaceRoots,
+                    agents: selected,
+                    token
+                },
+                (phase, label, percent) =>
+                    this.updateAgentdDeploymentProgress(
+                        host.id,
+                        'running',
+                        phase,
+                        label,
+                        percent
+                    )
+            )
+
+            this.updateAgentdDeploymentProgress(
+                host.id,
+                'running',
+                'registering',
+                '注册 Gateway 与委托 Agent',
+                96
+            )
+            const gatewayId = existing?.id || randomUUID()
+            const gateway: GatewayRemoteConfig = {
+                id: gatewayId,
+                name: existing?.name || `${host.name} ACP`,
+                baseUrl: managedGatewayUrl(host.host, port),
+                authToken: token,
+                enabled: true,
+                managedHostId: host.id,
+                managedWorkspaceRoots: deployment.workspaceRoots,
+                managedServiceMode: deployment.serviceMode,
+                managedAgents: selected
+            }
+            const remotes = [...this.nexusConfig.gateway.remotes]
+            const gatewayIndex = remotes.findIndex((remote) => remote.id === gatewayId)
+            if (gatewayIndex >= 0) remotes[gatewayIndex] = gateway
+            else remotes.push(gateway)
+
+            const delegationAgents = reconcileManagedDelegationAgents(
+                this.nexusConfig.delegation.agents,
+                {
+                    hostId: host.id,
+                    hostName: host.name,
+                    gatewayId,
+                    agents: selected,
+                    workspaceRoots: deployment.workspaceRoots,
+                    createMissing: input.createDelegationAgents !== false
+                }
+            )
+
+            this.nexusConfig = {
+                ...this.nexusConfig,
+                gateway: { ...this.nexusConfig.gateway, remotes },
+                delegation: {
+                    ...this.nexusConfig.delegation,
+                    agents: delegationAgents
+                }
+            }
+            this.gatewayProvider.clearStatus(gatewayId)
+            await this.writeConfigFile()
+            this.updateAgentdDeploymentProgress(
+                host.id,
+                'running',
+                'discovering',
+                '从 Koishi 验证 Gateway',
+                98
+            )
+            const gatewayStatus = await this.discoverGatewayRemote(gatewayId)
+            const warnings = [deployment.warning]
+            if (gatewayStatus.state === 'error') {
+                warnings.push(
+                    `远端服务已启动，但 Koishi 无法访问 Gateway：${gatewayStatus.error || 'unknown error'}。请检查 ${gateway.baseUrl} 的路由、防火墙和监听端口。`
+                )
+            } else {
+                const unavailable = selected.filter(
+                    (kind) =>
+                        !gatewayStatus.agents.some(
+                            (agent) => agent.id === kind && agent.ready
+                        )
+                )
+                if (unavailable.length) {
+                    warnings.push(
+                        `这些 Agent 尚未就绪：${unavailable.map(agentDisplayName).join('、')}`
+                    )
+                }
+            }
+            const warning = warnings.filter(Boolean).join('；') || undefined
+            this.updateAgentdDeploymentProgress(
+                host.id,
+                'success',
+                'complete',
+                'ACP Gateway 已部署并注册',
+                100,
+                undefined,
+                false,
+                warning
+            )
+        } catch (error) {
+            const message = getErrorMessage(error)
+            this.updateAgentdDeploymentProgress(
+                input.hostId,
+                'error',
+                'failed',
+                '部署失败',
+                100,
+                message
+            )
+            this.ctx.logger.warn(
+                `[agent-nexus] nexus-agentd deployment failed on ${input.hostId}: ${message}`
+            )
+        } finally {
+            this.maintenanceLocks.delete(key)
+        }
+    }
+
+    private updateAgentdDeploymentProgress(
+        hostId: string,
+        state: AgentdDeploymentProgress['state'],
+        phase: AgentdDeploymentPhase,
+        label: string,
+        percent: number,
+        error?: string,
+        reset = false,
+        warning?: string
+    ) {
+        const now = Date.now()
+        const previous = this.agentdDeploymentProgress.get(hostId)
+        this.agentdDeploymentProgress.set(hostId, {
+            hostId,
+            state,
+            phase,
+            label,
+            percent: Math.max(0, Math.min(100, Math.round(percent))),
+            startedAt: reset || !previous ? now : previous.startedAt,
+            updatedAt: now,
+            error,
+            warning
+        })
     }
 
     async refreshSkills(hostId?: string) {
@@ -1335,6 +1615,30 @@ function emptyAgents(): DetectedAgent[] {
         scanned: false,
         skillDirs: a.skillDirs('~')
     }))
+}
+
+function managedGatewayUrl(host: string, port: number) {
+    const value = host.trim()
+    if (!value || /[\s/?#@]/.test(value)) {
+        throw new Error(`SSH 主机地址不能用于 Gateway URL：${host}`)
+    }
+    const hostname = value.startsWith('[') && value.endsWith(']')
+        ? value
+        : value.includes(':')
+          ? `[${value}]`
+          : value
+    return validateGatewayUrl(`http://${hostname}:${port}`)
+}
+
+function agentDisplayName(kind: AgentdAgentKind) {
+    const labels: Record<AgentdAgentKind, string> = {
+        openclaw: 'OpenClaw',
+        claude: 'Claude Code',
+        opencode: 'OpenCode',
+        codex: 'Codex',
+        pi: 'Pi'
+    }
+    return labels[kind]
 }
 
 declare module 'koishi' {

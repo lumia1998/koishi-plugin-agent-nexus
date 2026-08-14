@@ -2,7 +2,7 @@
 
 AgentNexus 是面向 ChatLuna 的 **SSH 运维面 + 统一 Agent 委托层**。
 
-- SSH 用于连接远端机器、探测和安装 Agent、同步 Skills、SFTP 文件管理、终端和诊断。
+- SSH 用于连接远端机器、探测和安装 Agent、一键部署 `nexus-agentd`、同步 Skills、SFTP 文件管理、终端和诊断。
 - A2A Provider 用于调用标准远程 A2A Agent。
 - Nexus Gateway Provider 通过 HTTP/SSE 调用远端 `nexus-agentd`，再由 agentd 使用本机 ACP 连接 Coding Agent。
 
@@ -32,7 +32,8 @@ AgentNexus SSH Operations
    └─ 连接 / 安装 / 探测 / Skills / SFTP / Terminal / 诊断
 ```
 
-SSH Computer、A2A Remote 和 Nexus Gateway 是三类独立配置，不建立隐式一一映射。
+SSH Computer、A2A Remote 和 Nexus Gateway 是三类独立配置，不根据地址建立隐式映射。通过
+Computer 页部署的 Gateway 会保存明确的托管设备 ID，用于后续重新配置和状态展示。
 
 ## 当前支持范围
 
@@ -61,6 +62,8 @@ ACP 默认入口分别为 `opencode acp`、`claude-agent-acp`、`codex-acp`、`p
 - 已启用设备自动保持连接与断线重连
 - 探测六类 Code Agent 的可执行文件
 - 一键安装未检测到的 Agent
+- 通过 SSH 一键部署 `nexus-agentd`、缺失 ACP Adapter 和 systemd 服务
+- 自动生成强随机 Token、注册 Gateway，并创建对应的委托 Agent
 - 不执行 SSH Agent 版本检测、最新版查询或更新
 - 从 Git 仓库同步 Skills，并软链接到已安装 Agent
 - SFTP 文件浏览、预览、编辑、上传、下载、重命名和删除
@@ -80,7 +83,7 @@ Koishi 插件：
 npm install koishi-plugin-agent-nexus
 ```
 
-Linux/Unix Agent 主机：
+手动部署 Linux Agent 主机时：
 
 ```bash
 npm install -g nexus-agentd
@@ -115,9 +118,27 @@ SSH 设备只负责机器管理。后续 A2A/Gateway 配置可以指向同一台
 
 未建立显式逻辑路由的旧 A2A Agent Card 仍可直接调用，兼容已有配置。
 
-### 2B. 添加 ACP Agent
+### 2B. 一键部署 ACP Agent
 
-在 Linux/Unix Coding Agent 主机部署 `nexus-agentd`：
+1. 在 **Computer** 页选择已经连接的 Linux 设备。
+2. 先安装需要使用的 OpenCode、Claude Code、Codex、Pi 或 OpenClaw。
+3. 点击 **部署 ACP 网关**。
+4. 选择端口、workspace 根目录和启用的 Agent，点击部署。
+
+AgentNexus 会自动完成：
+
+- install-only 安装 `nexus-agentd` 和缺失的 ACP Adapter，不查询版本或执行更新。
+- 生成 Token，并通过 SFTP 写入权限为 `0600` 的环境文件。
+- 同步远端登录环境中的 Shell、locale 与 XDG 配置目录，让 systemd 服务沿用同一用户的 CLI 登录状态；API Key 等敏感变量不会自动复制。
+- 生成 agentd JSON、启动脚本和 systemd unit。
+- 优先创建系统服务；没有 root/免密 sudo 时使用可用的用户 systemd。
+- 从 Koishi 侧验证 Gateway，保存 Token，并在 **A2A / ACP** 页注册托管 Gateway。
+- 默认按所选 Agent 创建逻辑委托 Agent，workspace 使用第一个允许根目录。
+- 重新配置时自动移除已取消的托管路由，并在允许根变化后修正失效 workspace。
+
+未配置 SSH 工作目录时默认创建并使用 `~/projects`，不会默认允许整个 HOME。
+
+命令行手动部署仍可用于高级配置或故障恢复：
 
 ```bash
 npm install -g nexus-agentd
@@ -195,12 +216,19 @@ message
 如果 Koishi 在另一台机器，把 `listen.host` 显式改成 agentd 的内网地址或 `0.0.0.0`，并同时
 配置强随机 Token 和主机防火墙。默认只监听 `127.0.0.1`。
 
-回到 Koishi：
+手动部署后回到 Koishi：
 
 1. 在 **A2A / ACP** 页添加 Nexus Gateway，例如 `http://10.1.2.40:8787`。
 2. 填入同一个 Bearer Token 并点击发现。
 3. 添加“委托 Agent”，连接方式选择 **Nexus Gateway + ACP**。
 4. 选择 Gateway，填写 agentd 中对应的 `agentId` 和允许范围内的绝对 workspace。
+
+SSH 一键部署创建的 Gateway 会标记为 **SSH 托管**。其 URL、Token 和 workspace 根由
+Computer 页重新配置；新增委托 Agent 时，Gateway Agent ID 使用发现结果选择器，workspace
+会自动带出托管根目录，同时仍允许填写根目录下的具体项目路径。
+
+删除 SSH 设备只会解除对应 Gateway 和自动路由的托管标记，不会卸载远端服务或删除 Gateway；
+解除托管后可在 **A2A / ACP** 页继续手工维护。修改 SSH 主机地址时，托管 Gateway 地址会同步更新。
 
 ## 每个 Agent 选择连接方式
 
@@ -370,6 +398,13 @@ Agent 管理是 **install-only**：
 - 不查询远端或注册表版本。
 - 不提供升级、降级或重新安装操作。
 
+同一页的 **ACP Gateway** 区域用于部署 `nexus-agentd`。每台 SSH Computer 最多维护一个显式
+托管 Gateway；同一 Gateway 可以向多个 OpenCode、Claude Code、Codex、Pi、OpenClaw 逻辑
+Agent 提供服务。重新配置只补装缺失组件和更新配置/systemd，不执行 npm 版本查询或升级。
+部署在后台分阶段执行，页面会显示环境检查、安装、配置、启动和健康检查的实时进度。若 npm
+因磁盘空间不足返回 `ENOSPC`，部署器只会清理校验后的远端 npm 缓存并重试，不会删除 Agent
+数据、项目目录或其他工具缓存。
+
 ## Skills
 
 在 **Skills** 页填写 Git 仓库地址。仓库中应包含 `SKILL.md`。
@@ -411,6 +446,8 @@ Agent 管理是 **install-only**：
 - Console RPC 不回传密码、私钥、passphrase、A2A Token 或 Gateway Token。
 - A2A/Gateway Token 支持 `env:VAR`。
 - agentd 默认监听 localhost，并要求 Bearer Token。
+- SSH 一键部署监听配置为 LAN 可达地址，使用随机 Token；仍应通过主机防火墙限制 Koishi 来源。
+- 自动生成的 Token 只写入远端 `0600` 环境文件和 Koishi 服务端配置，不进入 SSH 命令或 Console 返回值。
 - agentd 客户端请求不能指定 command/argv。
 - workspace 在启动 ACP 前执行 `realpath`，并限制在 `workspaceRoots` 内，阻止 traversal 和
   symlink escape。

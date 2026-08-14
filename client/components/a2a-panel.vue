@@ -51,6 +51,14 @@
                                 <el-tag v-if="!agent.enabled" size="small" effect="plain">
                                     已禁用
                                 </el-tag>
+                                <el-tag
+                                    v-if="agent.managedHostId"
+                                    size="small"
+                                    effect="plain"
+                                    type="info"
+                                >
+                                    SSH 自动
+                                </el-tag>
                             </div>
                             <div class="remote-url">
                                 {{ delegationTarget(agent) }}
@@ -127,6 +135,14 @@
                                 </el-tag>
                                 <el-tag v-if="!gateway.enabled" size="small" effect="plain">
                                     已禁用
+                                </el-tag>
+                                <el-tag
+                                    v-if="gateway.managedHostId"
+                                    size="small"
+                                    effect="plain"
+                                    type="info"
+                                >
+                                    SSH 托管
                                 </el-tag>
                             </div>
                             <div class="remote-url">{{ gateway.baseUrl }}</div>
@@ -318,7 +334,11 @@
                     <span class="field-label">
                         {{ agentForm.provider === 'a2a' ? 'A2A Agent Card' : 'Nexus Gateway' }}
                     </span>
-                    <el-select v-model="agentForm.remoteId" class="full-width">
+                    <el-select
+                        v-model="agentForm.remoteId"
+                        class="full-width"
+                        @change="agentRemoteChanged"
+                    >
                         <el-option
                             v-for="remote in agentRemoteOptions"
                             :key="remote.id"
@@ -329,11 +349,40 @@
                 </label>
                 <label v-if="agentForm.provider === 'gateway'" class="setting">
                     <span class="field-label">Gateway Agent ID</span>
-                    <el-input v-model="agentForm.agentId" placeholder="opencode" />
+                    <el-select
+                        v-model="agentForm.agentId"
+                        class="full-width"
+                        filterable
+                        allow-create
+                        default-first-option
+                        placeholder="选择已发现的 Agent"
+                    >
+                        <el-option
+                            v-for="item in gatewayAgentOptions"
+                            :key="item.id"
+                            :label="item.ready ? item.name : `${item.name}（不可用）`"
+                            :value="item.id"
+                            :disabled="!item.ready"
+                        />
+                    </el-select>
                 </label>
                 <label v-if="agentForm.provider === 'gateway'" class="setting wide-setting">
                     <span class="field-label">Workspace</span>
-                    <el-input v-model="agentForm.workspace" placeholder="/data/repos/project" />
+                    <el-select
+                        v-model="agentForm.workspace"
+                        class="full-width"
+                        filterable
+                        allow-create
+                        default-first-option
+                        placeholder="选择或输入项目目录"
+                    >
+                        <el-option
+                            v-for="root in gatewayWorkspaceOptions"
+                            :key="root"
+                            :label="root"
+                            :value="root"
+                        />
+                    </el-select>
                 </label>
                 <label class="setting wide-setting">
                     <span class="field-label">说明</span>
@@ -369,7 +418,11 @@
                 </label>
                 <label class="setting wide-setting">
                     <span class="field-label">Gateway URL</span>
-                    <el-input v-model="gatewayForm.baseUrl" placeholder="http://10.1.2.50:PORT" />
+                    <el-input
+                        v-model="gatewayForm.baseUrl"
+                        :disabled="gatewayForm.managed"
+                        placeholder="http://10.1.2.50:PORT"
+                    />
                 </label>
                 <div class="setting wide-setting">
                     <span class="field-label">Bearer Token</span>
@@ -377,10 +430,13 @@
                         v-model="gatewayForm.authToken"
                         type="password"
                         show-password
-                        :disabled="gatewayForm.clearAuthToken"
+                        :disabled="gatewayForm.managed || gatewayForm.clearAuthToken"
                         placeholder="留空保持现有 Token，支持 env:VAR"
                     />
-                    <el-checkbox v-model="gatewayForm.clearAuthToken">
+                    <el-checkbox
+                        v-if="!gatewayForm.managed"
+                        v-model="gatewayForm.clearAuthToken"
+                    >
                         清除已保存 Token
                     </el-checkbox>
                 </div>
@@ -632,7 +688,8 @@ const gatewayForm = reactive({
     baseUrl: '',
     authToken: '',
     clearAuthToken: false,
-    enabled: true
+    enabled: true,
+    managed: false
 })
 
 const taskForm = reactive({
@@ -647,19 +704,37 @@ const agentRemoteOptions = computed(() =>
         ? props.config.a2a.remotes
         : props.config.gateway.remotes
 )
+const selectedGateway = computed(() =>
+    props.config.gateway.remotes.find((remote) => remote.id === agentForm.remoteId)
+)
+const gatewayAgentOptions = computed(() =>
+    props.status.gateway.remotes.find((remote) => remote.id === agentForm.remoteId)?.agents || []
+)
+const gatewayWorkspaceOptions = computed(() =>
+    selectedGateway.value?.managedWorkspaceRoots || []
+)
 
 function openAddAgent() {
+    const provider = props.config.a2a.remotes.length
+        ? 'a2a'
+        : props.config.gateway.remotes.length
+          ? 'gateway'
+          : 'a2a'
     Object.assign(agentForm, {
         id: '',
         name: '',
-        provider: 'a2a',
-        remoteId: props.config.a2a.remotes[0]?.id || '',
+        provider,
+        remoteId:
+            provider === 'a2a'
+                ? props.config.a2a.remotes[0]?.id || ''
+                : props.config.gateway.remotes[0]?.id || '',
         agentId: '',
         workspace: '',
         description: '',
         skills: '',
         enabled: true
     })
+    if (provider === 'gateway') fillGatewayDefaults()
     agentDialog.value = true
 }
 
@@ -686,9 +761,23 @@ function agentProviderChanged() {
     if (agentForm.provider === 'a2a') {
         agentForm.agentId = ''
         agentForm.workspace = ''
-    } else if (!agentForm.agentId) {
-        agentForm.agentId = 'opencode'
+    } else {
+        fillGatewayDefaults()
     }
+}
+
+function agentRemoteChanged() {
+    if (agentForm.provider === 'gateway') fillGatewayDefaults(true)
+}
+
+function fillGatewayDefaults(reset = false) {
+    const ready = gatewayAgentOptions.value.find((item) => item.ready)
+    const first = ready || gatewayAgentOptions.value[0]
+    if (reset || !agentForm.agentId) agentForm.agentId = first?.id || ''
+    if (reset || !agentForm.workspace) {
+        agentForm.workspace = gatewayWorkspaceOptions.value[0] || ''
+    }
+    if (!agentForm.name && first) agentForm.name = first.name
 }
 
 async function saveAgent() {
@@ -758,7 +847,8 @@ function openAddGateway() {
         baseUrl: '',
         authToken: '',
         clearAuthToken: false,
-        enabled: true
+        enabled: true,
+        managed: false
     })
     gatewayDialog.value = true
 }
@@ -770,7 +860,8 @@ function openEditGateway(gateway: GatewayRemoteConfig) {
         baseUrl: gateway.baseUrl,
         authToken: '',
         clearAuthToken: false,
-        enabled: gateway.enabled
+        enabled: gateway.enabled,
+        managed: Boolean(gateway.managedHostId)
     })
     gatewayDialog.value = true
 }

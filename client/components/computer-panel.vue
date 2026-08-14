@@ -220,14 +220,166 @@
                 SSH 已连接，但没有在远端 PATH 中发现支持的 Code Agent。
             </div>
         </section>
+
+        <section class="agentd-section">
+            <div class="section-head">
+                <div>
+                    <div class="section-title">ACP Gateway</div>
+                    <div class="section-description">nexus-agentd · Linux/systemd</div>
+                </div>
+                <el-tag size="small" effect="plain" :type="agentdTagType">
+                    {{ agentdStateLabel }}
+                </el-tag>
+            </div>
+
+            <div v-if="managedGateway" class="agentd-summary">
+                <div class="agentd-address">
+                    <span class="field-label">Gateway</span>
+                    <code>{{ managedGateway.baseUrl }}</code>
+                </div>
+                <div class="agentd-meta">
+                    <el-tag size="small" effect="plain">
+                        {{ managedGateway.managedServiceMode === 'user' ? '用户服务' : '系统服务' }}
+                    </el-tag>
+                    <el-tag
+                        v-for="item in managedGatewayStatus?.agents || []"
+                        :key="item.id"
+                        size="small"
+                        effect="plain"
+                        :type="item.ready ? 'success' : 'danger'"
+                    >
+                        {{ item.name }}
+                    </el-tag>
+                </div>
+                <div v-if="managedGatewayStatus?.error" class="agentd-error">
+                    {{ managedGatewayStatus.error }}
+                </div>
+            </div>
+
+            <div
+                v-if="currentAgentdProgress && (isDeployingAgentd || currentAgentdProgress.state === 'error')"
+                class="agentd-progress-block"
+            >
+                <div class="agentd-progress-head">
+                    <span>{{ currentAgentdProgress.label }}</span>
+                    <span>{{ agentdProgressElapsed }}</span>
+                </div>
+                <el-progress
+                    :percentage="currentAgentdProgress.percent"
+                    :status="agentdProgressStatus"
+                    :stroke-width="8"
+                />
+                <div v-if="currentAgentdProgress.error" class="agentd-error">
+                    {{ currentAgentdProgress.error }}
+                </div>
+            </div>
+
+            <div class="agentd-actions">
+                <el-button
+                    type="primary"
+                    :disabled="!connected || !availableAcpKinds.length"
+                    :loading="isDeployingAgentd"
+                    @click="openAgentdDialog"
+                >
+                    {{ managedGateway ? '重新配置' : '部署 ACP 网关' }}
+                </el-button>
+                <el-button v-if="managedGateway" @click="$emit('open-acp')">
+                    查看委托 Agent
+                </el-button>
+            </div>
+        </section>
+
+        <el-dialog
+            v-model="agentdDialog"
+            :title="managedGateway ? '重新配置 ACP Gateway' : '部署 ACP Gateway'"
+            width="min(640px, 92vw)"
+            destroy-on-close
+        >
+            <div class="agentd-dialog-grid">
+                <label class="field">
+                    <span class="field-label">监听端口</span>
+                    <el-input-number
+                        v-model="agentdForm.port"
+                        :min="1"
+                        :max="65535"
+                        :disabled="isDeployingAgentd"
+                        controls-position="right"
+                    />
+                </label>
+                <label class="field workspace-field">
+                    <span class="field-label">Workspace 根目录</span>
+                    <el-input
+                        v-model="agentdForm.workspaceRoots"
+                        type="textarea"
+                        :rows="3"
+                        :disabled="isDeployingAgentd"
+                        placeholder="每行一个目录"
+                    />
+                </label>
+                <div class="field workspace-field">
+                    <span class="field-label">启用 ACP Agent</span>
+                    <el-checkbox-group
+                        v-model="agentdForm.agents"
+                        class="agentd-agent-options"
+                        :disabled="isDeployingAgentd"
+                    >
+                        <el-checkbox
+                            v-for="kind in acpKinds"
+                            :key="kind"
+                            :label="kind"
+                            :disabled="!agent(kind)?.installed"
+                        >
+                            {{ labels[kind] }}
+                        </el-checkbox>
+                    </el-checkbox-group>
+                </div>
+                <label class="field auto-route-field">
+                    <span class="field-label">自动创建委托 Agent</span>
+                    <el-switch
+                        v-model="agentdForm.createDelegationAgents"
+                        :disabled="isDeployingAgentd"
+                    />
+                </label>
+                <div
+                    v-if="currentAgentdProgress && (isDeployingAgentd || currentAgentdProgress.state === 'error')"
+                    class="agentd-dialog-progress"
+                >
+                    <div class="agentd-progress-head">
+                        <span>{{ currentAgentdProgress.label }}</span>
+                        <span>{{ agentdProgressElapsed }}</span>
+                    </div>
+                    <el-progress
+                        :percentage="currentAgentdProgress.percent"
+                        :status="agentdProgressStatus"
+                        :stroke-width="8"
+                    />
+                    <div v-if="currentAgentdProgress.error" class="agentd-error">
+                        {{ currentAgentdProgress.error }}
+                    </div>
+                </div>
+            </div>
+            <template #footer>
+                <el-button @click="agentdDialog = false">取消</el-button>
+                <el-button
+                    type="primary"
+                    :loading="isDeployingAgentd"
+                    @click="submitAgentdDeployment"
+                >
+                    部署
+                </el-button>
+            </template>
+        </el-dialog>
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type {
     AgentKind,
+    AgentdAgentKind,
+    AgentdDeploymentInput,
+    AgentdDeploymentProgress,
     NexusConfig,
     NexusStatus,
     SshAuth,
@@ -253,12 +405,16 @@ const props = defineProps<{
     status: NexusStatus
     connecting: boolean
     maintaining: string[]
+    deployingAgentd: string[]
+    agentdProgress: Record<string, AgentdDeploymentProgress>
 }>()
 
 const emit = defineEmits<{
     connect: [input: ComputerConnectInput, done: (hostId: string) => void]
     remove: [hostId: string]
     maintain: [input: { hostId: string; kind: AgentKind }]
+    deployAgentd: [input: AgentdDeploymentInput, done: () => void]
+    'open-acp': []
 }>()
 
 const kinds: AgentKind[] = [
@@ -277,6 +433,7 @@ const labels: Record<AgentKind, string> = {
     codex: 'Codex',
     pi: 'Pi'
 }
+const acpKinds: AgentdAgentKind[] = ['openclaw', 'claude', 'opencode', 'codex', 'pi']
 const name = ref('')
 const host = ref('')
 const port = ref(22)
@@ -291,6 +448,13 @@ const authType = ref<'password' | 'key'>('password')
 const asDefault = ref(false)
 const selectedHostId = ref('')
 const creating = ref(false)
+const agentdDialog = ref(false)
+const agentdForm = reactive({
+    port: 8787,
+    workspaceRoots: '',
+    agents: [] as AgentdAgentKind[],
+    createDelegationAgents: true
+})
 
 watch(
     () => props.config.hosts,
@@ -337,6 +501,58 @@ const hostStatus = computed(() =>
 )
 const availableCount = computed(() => kinds.filter((kind) => agent(kind)?.installed).length)
 const connected = computed(() => hostStatus.value?.state === 'connected')
+const availableAcpKinds = computed(() =>
+    acpKinds.filter((kind) => agent(kind)?.installed)
+)
+const managedGateway = computed(() =>
+    props.config.gateway.remotes.find(
+        (remote) => remote.managedHostId === selectedHostId.value
+    )
+)
+const managedGatewayStatus = computed(() =>
+    props.status.gateway.remotes.find(
+        (remote) => remote.id === managedGateway.value?.id
+    )
+)
+const currentAgentdProgress = computed(
+    () => props.agentdProgress[selectedHostId.value]
+)
+const isDeployingAgentd = computed(
+    () =>
+        props.deployingAgentd.includes(selectedHostId.value) ||
+        currentAgentdProgress.value?.state === 'running'
+)
+const agentdProgressStatus = computed(() => {
+    if (currentAgentdProgress.value?.state === 'error') return 'exception'
+    if (currentAgentdProgress.value?.state === 'success') return 'success'
+    return undefined
+})
+const agentdProgressElapsed = computed(() => {
+    const progress = currentAgentdProgress.value
+    if (!progress) return ''
+    const seconds = Math.max(
+        0,
+        Math.round((progress.updatedAt - progress.startedAt) / 1000)
+    )
+    if (seconds < 60) return `${seconds} 秒`
+    return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+})
+const agentdStateLabel = computed(() => {
+    if (isDeployingAgentd.value) return '部署中'
+    if (currentAgentdProgress.value?.state === 'error') return '部署失败'
+    if (!managedGateway.value) return '未部署'
+    if (managedGatewayStatus.value?.state === 'ready') return '在线'
+    if (managedGatewayStatus.value?.state === 'checking') return '检查中'
+    if (managedGatewayStatus.value?.state === 'error') return '异常'
+    return '已配置'
+})
+const agentdTagType = computed(() => {
+    if (isDeployingAgentd.value || managedGatewayStatus.value?.state === 'checking') return 'warning'
+    if (currentAgentdProgress.value?.state === 'error') return 'danger'
+    if (managedGatewayStatus.value?.state === 'ready') return 'success'
+    if (managedGatewayStatus.value?.state === 'error') return 'danger'
+    return 'info'
+})
 const nameHint = computed(() => name.value.trim() || '设备名')
 const statusLabel = computed(() => {
     if (props.connecting) return '连接中'
@@ -382,6 +598,62 @@ function isScanned(kind: AgentKind) {
 function maintain(kind: AgentKind) {
     if (!selectedHostId.value) return
     emit('maintain', { hostId: selectedHostId.value, kind })
+}
+
+function openAgentdDialog() {
+    if (!selectedHostId.value || !connected.value) return
+    const gateway = managedGateway.value
+    let port = 8787
+    if (gateway?.baseUrl) {
+        try {
+            port = Number(new URL(gateway.baseUrl).port) || 8787
+        } catch {}
+    }
+    const host = props.config.hosts.find((item) => item.id === selectedHostId.value)
+    agentdForm.port = port
+    agentdForm.workspaceRoots = (
+        gateway?.managedWorkspaceRoots?.length
+            ? gateway.managedWorkspaceRoots
+            : [host?.cwd || '~/projects']
+    ).join('\n')
+    agentdForm.agents = gateway?.managedAgents?.length
+        ? gateway.managedAgents.filter((kind) => acpKinds.includes(kind))
+        : managedGatewayStatus.value?.agents.length
+        ? managedGatewayStatus.value.agents
+              .map((item) => item.id)
+              .filter((kind): kind is AgentdAgentKind => acpKinds.includes(kind as AgentdAgentKind))
+        : [...availableAcpKinds.value]
+    agentdForm.createDelegationAgents = true
+    agentdDialog.value = true
+}
+
+function submitAgentdDeployment() {
+    if (!selectedHostId.value) return
+    const workspaceRoots = agentdForm.workspaceRoots
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    if (!workspaceRoots.length) {
+        ElMessage.warning('请填写至少一个 Workspace 根目录')
+        return
+    }
+    if (!agentdForm.agents.length) {
+        ElMessage.warning('请至少选择一个已安装的 ACP Agent')
+        return
+    }
+    emit(
+        'deployAgentd',
+        {
+            hostId: selectedHostId.value,
+            port: agentdForm.port,
+            workspaceRoots,
+            agents: [...agentdForm.agents],
+            createDelegationAgents: agentdForm.createDelegationAgents
+        },
+        () => {
+            agentdDialog.value = false
+        }
+    )
 }
 
 function hostLabel(item: SshHostConfig) {
@@ -565,6 +837,7 @@ function connect() {
 
 .connection-card,
 .agents-section,
+.agentd-section,
 .agent-card {
     border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 18%);
     border-radius: 14px;
@@ -643,6 +916,86 @@ function connect() {
 
 .agents-section {
     padding: 20px;
+}
+
+.agentd-section {
+    padding: 20px;
+}
+
+.agentd-summary {
+    display: grid;
+    gap: 10px;
+    margin-top: 16px;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 28%);
+    border-radius: 8px;
+}
+
+.agentd-address,
+.agentd-meta,
+.agentd-actions,
+.agentd-agent-options {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.agentd-address .field-label {
+    margin: 0;
+}
+
+.agentd-address code {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+.agentd-error {
+    color: var(--el-color-danger);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.agentd-progress-block,
+.agentd-dialog-progress {
+    display: grid;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.agentd-dialog-progress {
+    grid-column: 1 / -1;
+    padding-top: 4px;
+}
+
+.agentd-progress-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--k-text-dark);
+    font-size: 13px;
+}
+
+.agentd-actions {
+    margin-top: 16px;
+}
+
+.agentd-dialog-grid {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: 18px;
+}
+
+.workspace-field {
+    grid-column: 1 / -1;
+}
+
+.auto-route-field {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
 
 .agent-grid {
@@ -785,6 +1138,14 @@ function connect() {
 
     .connection-grid {
         grid-template-columns: 1fr;
+    }
+
+    .agentd-dialog-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .workspace-field {
+        grid-column: auto;
     }
 
     .connection-footer :deep(.el-button) {

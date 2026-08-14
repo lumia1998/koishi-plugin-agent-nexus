@@ -82,7 +82,7 @@ export class AcpProcessRuntime {
                 },
                 clientInfo: {
                     name: 'nexus-agentd',
-                    version: '0.1.0'
+                    version: '0.1.1'
                 }
             }
         )

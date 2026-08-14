@@ -25,4 +25,5 @@ export * from './a2a'
 export * from './delegation'
 export * from './gateway'
 export * from './providers'
+export * from './agentd'
 export { AgentNexusService }

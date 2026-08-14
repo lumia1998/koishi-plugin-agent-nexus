@@ -18,6 +18,12 @@ OpenCode / Claude Code / Codex / Pi / OpenClaw
 
 ## 安装与启动
 
+推荐直接在 AgentNexus 的 **Computer** 页点击 **部署 ACP 网关**。AgentNexus 会通过 SSH
+install-only 安装本包和缺失 Adapter，生成 Token/配置/systemd，并自动注册 Gateway 与逻辑
+Agent，不需要手动导出环境变量。
+
+以下命令用于独立部署、故障恢复或高级配置：
+
 ```bash
 npm install -g nexus-agentd
 curl -fsSL \
@@ -242,6 +248,10 @@ workspace 在启动 ACP 子进程前执行：
 - LAN 监听时使用强随机 Token 和主机防火墙限制 Koishi 来源 IP。
 - 不要直接暴露到公网；需要跨网络时在前面部署 HTTPS/mTLS 反向代理。
 - 使用权限受限的专用系统账号运行 agentd。
+
+AgentNexus 自动部署时，Token 保存在 `~/.config/agent-nexus/nexus-agentd.env`，配置保存在
+`~/.config/agent-nexus/nexus-agentd.json`，权限均为 `0600`。系统服务优先使用 root 或免密
+sudo 创建；否则在可用时回退到用户 systemd，并在未启用 linger 时返回明确警告。
 
 ## 验证
 

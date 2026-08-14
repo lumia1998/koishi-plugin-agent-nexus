@@ -75,6 +75,19 @@ export function apply(ctx: Context) {
     )
 
     ctx.console.addListener(
+        'agent-nexus/deployAgentd',
+        async (input: import('../types').AgentdDeploymentInput) =>
+            nexus().deployAgentd(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/getAgentdDeploymentProgress',
+        async (hostId: string) => nexus().getAgentdDeploymentProgress(hostId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
         'agent-nexus/saveA2ARemote',
         async (
             input: Partial<import('../types').A2ARemoteConfig> & {
@@ -141,6 +154,12 @@ export function apply(ctx: Context) {
     ctx.console.addListener(
         'agent-nexus/discoverGatewayRemote',
         async (id: string) => nexus().discoverGatewayRemote(id),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/refreshRemoteStatuses',
+        async () => nexus().refreshRemoteStatuses(),
         commandAuthority
     )
 
@@ -282,6 +301,12 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/maintainAgent'(
             input: import('../types').AgentMaintenanceInput
         ): Promise<import('../types').AgentMaintenanceResult>
+        'agent-nexus/deployAgentd'(
+            input: import('../types').AgentdDeploymentInput
+        ): Promise<import('../types').AgentdDeploymentProgress>
+        'agent-nexus/getAgentdDeploymentProgress'(
+            hostId: string
+        ): Promise<import('../types').AgentdDeploymentProgress | null>
         'agent-nexus/saveA2ARemote'(
             input: Partial<import('../types').A2ARemoteConfig> & {
                 clearAuthToken?: boolean
@@ -327,6 +352,7 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/discoverGatewayRemote'(
             id: string
         ): Promise<import('../types').GatewayRemoteStatus>
+        'agent-nexus/refreshRemoteStatuses'(): Promise<import('../types').NexusStatus>
         'agent-nexus/saveDelegationAgent'(
             input: Partial<import('../types').DelegationAgentConfig>
         ): Promise<{

@@ -6,6 +6,8 @@ export type AgentKind =
     | 'codex'
     | 'pi'
 
+export type AgentdAgentKind = Exclude<AgentKind, 'hermes'>
+
 export type SshAuth =
     | { type: 'password'; password: string }
     | { type: 'key'; privateKey: string; passphrase?: string }
@@ -66,6 +68,10 @@ export interface GatewayRemoteConfig {
     baseUrl: string
     authToken?: string
     enabled: boolean
+    managedHostId?: string
+    managedWorkspaceRoots?: string[]
+    managedServiceMode?: AgentdServiceMode
+    managedAgents?: AgentdAgentKind[]
 }
 
 export interface GatewayConfig {
@@ -84,6 +90,7 @@ export interface DelegationAgentConfig {
     workspace?: string
     description?: string
     skills?: string[]
+    managedHostId?: string
 }
 
 export interface DelegationConfig {
@@ -214,6 +221,48 @@ export interface AgentMaintenanceResult {
     method: string
     agent: DetectedAgent
     status: NexusStatus
+}
+
+export type AgentdServiceMode = 'system' | 'user'
+
+export type AgentdDeploymentPhase =
+    | 'checking'
+    | 'workspace'
+    | 'installing'
+    | 'configuring'
+    | 'starting'
+    | 'verifying'
+    | 'registering'
+    | 'discovering'
+    | 'complete'
+    | 'failed'
+
+export interface AgentdDeploymentProgress {
+    hostId: string
+    state: 'running' | 'success' | 'error'
+    phase: AgentdDeploymentPhase
+    label: string
+    percent: number
+    startedAt: number
+    updatedAt: number
+    error?: string
+    warning?: string
+}
+
+export interface AgentdDeploymentInput {
+    hostId: string
+    port: number
+    workspaceRoots: string[]
+    agents: AgentdAgentKind[]
+    createDelegationAgents?: boolean
+}
+
+export interface AgentdDeploymentResult {
+    gatewayId: string
+    serviceMode: AgentdServiceMode
+    gatewayStatus: GatewayRemoteStatus
+    warning?: string
+    data: NexusConsoleData
 }
 
 export interface HostStatus {
