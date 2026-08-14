@@ -64,6 +64,12 @@ export function createDefaultNexusConfig(cfg?: Config): NexusConfig {
         defaultHostId: undefined,
         a2a: {
             remotes: []
+        },
+        gateway: {
+            remotes: []
+        },
+        delegation: {
+            agents: []
         }
     }
 }

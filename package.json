@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
-  "description": "SSH manager and A2A client for ChatLuna (Hermes / OpenClaw / Claude Code / OpenCode / Codex / Pi)",
-  "version": "0.1.32-alpha.5",
+  "description": "SSH operations plus A2A and Nexus Gateway/ACP delegation for ChatLuna",
+  "version": "0.1.32",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -13,27 +13,36 @@
   "author": "lumia1998",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lumia1998/koishi-plugin-AgentNexus.git"
+    "url": "git+https://github.com/lumia1998/koishi-plugin-agent-nexus.git"
   },
   "bugs": {
-    "url": "https://github.com/lumia1998/koishi-plugin-AgentNexus/issues"
+    "url": "https://github.com/lumia1998/koishi-plugin-agent-nexus/issues"
   },
-  "homepage": "https://github.com/lumia1998/koishi-plugin-AgentNexus#readme",
+  "homepage": "https://github.com/lumia1998/koishi-plugin-agent-nexus#readme",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
   },
+  "workspaces": [
+    "packages/nexus-agentd"
+  ],
   "scripts": {
-    "build": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
+    "build": "npm run build:plugin && npm run build:agentd",
+    "build:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
+    "build:agentd": "npm --prefix packages/nexus-agentd run build",
     "build:client": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build-client.cjs'))\"",
-    "typecheck": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
-    "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
+    "typecheck": "npm run typecheck:plugin && npm run typecheck:agentd",
+    "typecheck:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
+    "typecheck:agentd": "npm --prefix packages/nexus-agentd run typecheck",
+    "test": "npm run test:plugin && npm run test:agentd",
+    "test:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
+    "test:agentd": "npm --prefix packages/nexus-agentd test",
     "prepack": "npm run build"
   },
   "koishi": {
     "description": {
-      "zh": "通过 SSH 管理 Agent，并以 A2A Client 委托外部 Hermes/OpenClaw/Claude Code/OpenCode/Codex/Pi",
-      "en": "SSH agent manager and A2A client with skill sync and terminal UI"
+      "zh": "通过 SSH 管理 Agent，并以 A2A 或 Nexus Gateway + ACP 委托外部 Agent",
+      "en": "SSH operations with A2A and Nexus Gateway/ACP agent delegation"
     },
     "service": {
       "required": [
@@ -59,7 +68,9 @@
     "opencode",
     "codex",
     "pi",
-    "a2a"
+    "a2a",
+    "acp",
+    "gateway"
   ],
   "peerDependencies": {
     "koishi": "^4.18.0",

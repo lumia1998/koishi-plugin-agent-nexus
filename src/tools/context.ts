@@ -1,8 +1,8 @@
-import type { A2ADelegationContext, A2ADelegationRouting } from '../a2a/delegation-store'
+import type { DelegationContext, DelegationRouting } from '../delegation'
 
-export function toolA2ADelegationContext(
+export function toolDelegationContext(
     parentConfig: any
-): A2ADelegationContext | undefined {
+): DelegationContext | undefined {
     const configurable = parentConfig?.configurable
     const session = configurable?.session
     const conversationId = String(
@@ -13,7 +13,7 @@ export function toolA2ADelegationContext(
     const userId = String(configurable?.userId ?? session?.userId ?? '').trim()
     if (!conversationId || !userId) return undefined
 
-    const routing: A2ADelegationRouting = {
+    const routing: DelegationRouting = {
         platform: String(session?.platform ?? 'chatluna'),
         selfId: String(session?.selfId ?? ''),
         userId,
@@ -28,6 +28,8 @@ export function toolA2ADelegationContext(
         routing
     }
 }
+
+export const toolA2ADelegationContext = toolDelegationContext
 
 function optionalString(value: unknown) {
     const text = String(value ?? '').trim()

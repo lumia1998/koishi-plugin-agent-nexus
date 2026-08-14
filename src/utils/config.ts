@@ -1,5 +1,6 @@
 import type {
     A2AConfig,
+    GatewayConfig,
     NexusConfig,
     SshAuth,
     SshHostConfig
@@ -55,7 +56,8 @@ export function redactNexusConfig(config: NexusConfig): NexusConfig {
                     ? { type: 'password', password: '' }
                     : { type: 'key', privateKey: '' },
         })),
-        a2a: redactA2AConfig(config.a2a)
+        a2a: redactA2AConfig(config.a2a),
+        gateway: redactGatewayConfig(config.gateway)
     }
 }
 
@@ -185,4 +187,32 @@ export function resolveHostReference(hosts: SshHostConfig[], reference: string) 
         throw new Error(`设备引用“${reference}”有歧义，请使用设备 ID。`)
     }
     return matches[0]
+}
+
+export function mergeGatewaySecrets(
+    incoming: GatewayConfig,
+    previous?: GatewayConfig
+): GatewayConfig {
+    const previousRemotes = new Map(
+        (previous?.remotes || []).map((remote) => [remote.id, remote])
+    )
+    return {
+        remotes: (incoming.remotes || []).map((remote) => {
+            const old = previousRemotes.get(remote.id)
+            return {
+                ...remote,
+                authToken: remote.authToken || old?.authToken
+            }
+        })
+    }
+}
+
+export function redactGatewayConfig(config?: GatewayConfig): GatewayConfig {
+    const value = config || { remotes: [] }
+    return {
+        remotes: (value.remotes || []).map((remote) => ({
+            ...remote,
+            authToken: ''
+        }))
+    }
 }

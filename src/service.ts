@@ -10,6 +10,10 @@ import type {
     AgentMaintenanceInput,
     AgentMaintenanceResult,
     DetectedAgent,
+    DelegationAgentConfig,
+    GatewayConfig,
+    GatewayRemoteConfig,
+    GatewayRemoteStatus,
     HostStatus,
     NexusConfig,
     NexusConsoleData,
@@ -39,6 +43,7 @@ import {
     assertUniqueHostName,
     hostConnectionChanged,
     mergeA2ASecrets,
+    mergeGatewaySecrets,
     mergeHostSecrets,
     normalizeHostName,
     patchHostConfig,
@@ -50,15 +55,16 @@ import type { Config } from './config'
 import { SftpFileManager } from './files/manager'
 import { A2AClientService, validateRemoteUrl } from './a2a/client'
 import {
-    A2ADelegationManager,
-    type A2ADelegateToolInput
-} from './a2a/delegation-manager'
-import {
-    A2ADelegationStore,
-    type A2ADelegationContext,
-    type A2ADelegationTask
-} from './a2a/delegation-store'
-import { notifyChatLunaA2ADelegation } from './a2a/chatluna-wakeup'
+    DelegationManager,
+    DelegationProviderRegistry,
+    DelegationStore,
+    notifyChatLunaDelegation,
+    type DelegateToolInput,
+    type DelegationContext,
+    type DelegationJob
+} from './delegation'
+import { A2ADelegationProvider, NexusGatewayProvider } from './providers'
+import { NexusGatewayClient, validateGatewayUrl } from './gateway'
 import { buildAgentMaintenancePlan } from './agents/maintenance'
 
 interface ManagedTerminal {
@@ -77,8 +83,11 @@ export class AgentNexusService extends Service {
     private pool: SshSessionPool
     private proxy: NexusTerminalProxy
     private a2aClient: A2AClientService
-    private a2aDelegationStore: A2ADelegationStore
-    private a2aDelegations: A2ADelegationManager
+    private gatewayClient: NexusGatewayClient
+    private gatewayProvider: NexusGatewayProvider
+    private delegationStore: DelegationStore
+    private delegations: DelegationManager
+    private delegationProviders: DelegationProviderRegistry
     private a2aRemoteStatus = new Map<string, A2ARemoteStatus>()
     private terminals = new Map<string, Map<string, ManagedTerminal>>()
     private agentCache = new Map<string, DetectedAgent[]>()
@@ -104,28 +113,34 @@ export class AgentNexusService extends Service {
         this.a2aClient = new A2AClientService(
             pluginConfig.a2aMaxResponseBytes
         )
+        this.gatewayClient = new NexusGatewayClient(
+            pluginConfig.a2aMaxResponseBytes
+        )
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
         this.nexusConfig = createDefaultNexusConfig(pluginConfig)
-        this.a2aDelegationStore = new A2ADelegationStore(
+        const a2aProvider = new A2ADelegationProvider({
+            getConfig: () => this.nexusConfig,
+            getStatus: () => this.getA2AStatus().remotes,
+            discover: async (remoteId) => {
+                await this.discoverA2ARemote(remoteId)
+            },
+            client: this.a2aClient
+        })
+        this.gatewayProvider = new NexusGatewayProvider({
+            getConfig: () => this.nexusConfig,
+            client: this.gatewayClient
+        })
+        this.delegationProviders = new DelegationProviderRegistry()
+            .register(a2aProvider)
+            .register(this.gatewayProvider)
+        this.delegationStore = new DelegationStore(
+            path.join(this.dataPath, 'delegation-jobs.json'),
             path.join(this.dataPath, 'a2a-tasks.json')
         )
-        this.a2aDelegations = new A2ADelegationManager(
-            this.a2aDelegationStore,
-            {
-                listRemotes: () => this.getA2AStatus().remotes,
-                resolveRemoteId: (reference) =>
-                    this.resolveA2ARemoteId(reference),
-                send: (remoteId, input) =>
-                    this.sendA2AMessage({ remoteId, ...input }),
-                get: (remoteId, taskId) =>
-                    this.getA2ATask(remoteId, taskId),
-                cancel: (remoteId, taskId) =>
-                    this.cancelA2ATask(remoteId, taskId),
-                discover: async (remoteId) => {
-                    await this.discoverA2ARemote(remoteId)
-                },
-                notify: (task) => this.notifyA2ADelegation(task)
-            }
+        this.delegations = new DelegationManager(
+            this.delegationStore,
+            this.delegationProviders,
+            (job) => this.notifyDelegation(job)
         )
         this.proxy = new NexusTerminalProxy(ctx, this)
     }
@@ -138,7 +153,7 @@ export class AgentNexusService extends Service {
         })
         this.proxy.start()
         this.syncTools()
-        await this.a2aDelegations.start()
+        await this.delegations.start()
         void this.ensureEnabledConnections(true)
         this.reconnectTimer = setInterval(() => {
             void this.ensureEnabledConnections()
@@ -147,7 +162,7 @@ export class AgentNexusService extends Service {
     }
 
     async stop() {
-        await this.a2aDelegations.stop()
+        await this.delegations.stop()
         for (const d of this.toolDispose) d()
         this.toolDispose = []
         this.proxy.stop()
@@ -285,15 +300,15 @@ export class AgentNexusService extends Service {
     }
 
     handleA2ADelegate(
-        input: A2ADelegateToolInput,
-        context: A2ADelegationContext,
+        input: DelegateToolInput,
+        context: DelegationContext,
         signal?: AbortSignal
     ) {
-        return this.a2aDelegations.handle(input, context, signal)
+        return this.delegations.handle(input, context, signal)
     }
 
-    private async notifyA2ADelegation(task: A2ADelegationTask) {
-        await notifyChatLunaA2ADelegation((this.ctx as any).chatluna, task)
+    private async notifyDelegation(job: DelegationJob) {
+        await notifyChatLunaDelegation((this.ctx as any).chatluna, job)
     }
 
     resolveA2ARemoteId(reference: string) {
@@ -313,6 +328,144 @@ export class AgentNexusService extends Service {
         const remote = this.nexusConfig.a2a.remotes.find((item) => item.id === id)
         if (!remote) throw new Error(`找不到 A2A 远端：${id}`)
         return remote
+    }
+
+    getGatewayStatus() {
+        return { remotes: this.gatewayProvider.getStatus() }
+    }
+
+    getDelegationStatus() {
+        return {
+            agents: this.delegationProviders.listAgents().map((agent) => ({
+                id: agent.id,
+                name: agent.name,
+                enabled: agent.enabled,
+                provider: agent.provider,
+                remoteId: agent.remoteId,
+                agentId: agent.agentId,
+                workspace: agent.workspace,
+                description: agent.description,
+                skills: agent.skills.map((skill) => skill.id),
+                state: agent.state,
+                remoteName: agent.remoteName,
+                protocolLabel:
+                    agent.provider === 'a2a' ? 'A2A' : 'Nexus Gateway + ACP',
+                error: agent.error
+            }))
+        }
+    }
+
+    async saveGatewayRemote(
+        input: Partial<GatewayRemoteConfig> & { clearAuthToken?: boolean }
+    ) {
+        const name = String(input.name || '').trim()
+        const baseUrl = String(input.baseUrl || '').trim()
+        if (!name || !baseUrl) throw new Error('Gateway 名称和地址不能为空。')
+        const remotes = [...this.nexusConfig.gateway.remotes]
+        const id = String(input.id || '').trim() || randomUUID()
+        const index = remotes.findIndex((remote) => remote.id === id)
+        const previous = index >= 0 ? remotes[index] : undefined
+        const next: GatewayRemoteConfig = {
+            id,
+            name,
+            baseUrl: validateGatewayUrl(baseUrl),
+            authToken: input.clearAuthToken
+                ? ''
+                : input.authToken?.trim() || previous?.authToken,
+            enabled: input.enabled ?? previous?.enabled ?? true
+        }
+        if (index >= 0) remotes[index] = next
+        else remotes.push(next)
+        this.nexusConfig = {
+            ...this.nexusConfig,
+            gateway: { ...this.nexusConfig.gateway, remotes }
+        }
+        this.gatewayProvider.clearStatus(id)
+        await this.writeConfigFile()
+        return { remoteId: id, data: this.getConsoleData() }
+    }
+
+    async removeGatewayRemote(id: string) {
+        this.nexusConfig = {
+            ...this.nexusConfig,
+            gateway: {
+                ...this.nexusConfig.gateway,
+                remotes: this.nexusConfig.gateway.remotes.filter(
+                    (remote) => remote.id !== id
+                )
+            }
+        }
+        this.gatewayProvider.clearStatus(id)
+        await this.writeConfigFile()
+        return this.getConsoleData()
+    }
+
+    async discoverGatewayRemote(id: string) {
+        return this.gatewayProvider.discoverRemote(id)
+    }
+
+    async saveDelegationAgent(input: Partial<DelegationAgentConfig>) {
+        const name = String(input.name || '').trim()
+        const provider = input.provider
+        const remoteId = String(input.remoteId || '').trim()
+        if (!name || !remoteId || (provider !== 'a2a' && provider !== 'gateway')) {
+            throw new Error('Agent 名称、连接方式和远端不能为空。')
+        }
+        if (
+            provider === 'a2a' &&
+            !this.nexusConfig.a2a.remotes.some((remote) => remote.id === remoteId)
+        ) {
+            throw new Error(`找不到 A2A 远端：${remoteId}`)
+        }
+        if (
+            provider === 'gateway' &&
+            !this.nexusConfig.gateway.remotes.some((remote) => remote.id === remoteId)
+        ) {
+            throw new Error(`找不到 Nexus Gateway：${remoteId}`)
+        }
+        const agentId = String(input.agentId || '').trim() || undefined
+        const workspace = String(input.workspace || '').trim() || undefined
+        if (provider === 'gateway' && (!agentId || !workspace)) {
+            throw new Error('ACP Agent 必须配置 Gateway Agent ID 和 workspace。')
+        }
+        const agents = [...this.nexusConfig.delegation.agents]
+        const id = String(input.id || '').trim() || randomUUID()
+        const index = agents.findIndex((agent) => agent.id === id)
+        const next: DelegationAgentConfig = {
+            id,
+            name,
+            enabled: input.enabled ?? agents[index]?.enabled ?? true,
+            provider,
+            remoteId,
+            agentId: provider === 'gateway' ? agentId : undefined,
+            workspace: provider === 'gateway' ? workspace : undefined,
+            description: String(input.description || '').trim() || undefined,
+            skills: Array.isArray(input.skills)
+                ? input.skills.map((item) => String(item).trim()).filter(Boolean)
+                : agents[index]?.skills
+        }
+        if (index >= 0) agents[index] = next
+        else agents.push(next)
+        this.nexusConfig = {
+            ...this.nexusConfig,
+            delegation: { ...this.nexusConfig.delegation, agents }
+        }
+        await this.writeConfigFile()
+        return { agentId: id, data: this.getConsoleData() }
+    }
+
+    async removeDelegationAgent(id: string) {
+        this.nexusConfig = {
+            ...this.nexusConfig,
+            delegation: {
+                ...this.nexusConfig.delegation,
+                agents: this.nexusConfig.delegation.agents.filter(
+                    (agent) => agent.id !== id
+                )
+            }
+        }
+        await this.writeConfigFile()
+        return this.getConsoleData()
     }
 
     get commandAuthority() {
@@ -351,7 +504,21 @@ export class AgentNexusService extends Service {
                     remotes: cfg.a2a?.remotes || this.nexusConfig.a2a.remotes
                 },
                 this.nexusConfig.a2a
-            )
+            ),
+            gateway: mergeGatewaySecrets(
+                {
+                    ...createDefaultNexusConfig(this.pluginConfig).gateway,
+                    ...(cfg.gateway || {}),
+                    remotes:
+                        cfg.gateway?.remotes || this.nexusConfig.gateway.remotes
+                },
+                this.nexusConfig.gateway
+            ),
+            delegation: {
+                agents:
+                    cfg.delegation?.agents ||
+                    this.nexusConfig.delegation.agents
+            }
         }
         const nextHostIds = new Set(hosts.map((host) => host.id))
         for (const previous of this.nexusConfig.hosts) {
@@ -372,6 +539,7 @@ export class AgentNexusService extends Service {
         }
         this.nexusConfig = nextConfig
         this.a2aRemoteStatus.clear()
+        this.gatewayProvider.clearStatus()
         await this.writeConfigFile()
         this.syncTools()
         // SSH connect/scan must not block console save responses.
@@ -509,7 +677,9 @@ export class AgentNexusService extends Service {
                 hostId: skillHostId
             },
             activeSessions: this.pool.list().length,
-            a2a: this.getA2AStatus()
+            a2a: this.getA2AStatus(),
+            gateway: this.getGatewayStatus(),
+            delegation: this.getDelegationStatus()
         }
     }
 
@@ -927,7 +1097,7 @@ export class AgentNexusService extends Service {
                 meta: {
                     source: 'extension',
                     group: 'agent-nexus',
-                    tags: ['agent-nexus', 'a2a'],
+                    tags: ['agent-nexus', 'delegation', 'a2a', 'acp'],
                     defaultAvailability: {
                         enabled: true,
                         main: true,
@@ -1040,6 +1210,34 @@ export class AgentNexusService extends Service {
             ) {
                 throw new Error('AgentNexus config a2a must be an object')
             }
+            if (candidate.a2a && !Array.isArray(candidate.a2a.remotes)) {
+                throw new Error('AgentNexus config a2a.remotes must be an array')
+            }
+            if (
+                candidate.gateway !== undefined &&
+                (!candidate.gateway || typeof candidate.gateway !== 'object')
+            ) {
+                throw new Error('AgentNexus config gateway must be an object')
+            }
+            if (
+                candidate.gateway &&
+                !Array.isArray(candidate.gateway.remotes)
+            ) {
+                throw new Error('AgentNexus config gateway.remotes must be an array')
+            }
+            if (
+                candidate.delegation !== undefined &&
+                (!candidate.delegation ||
+                    typeof candidate.delegation !== 'object')
+            ) {
+                throw new Error('AgentNexus config delegation must be an object')
+            }
+            if (
+                candidate.delegation &&
+                !Array.isArray(candidate.delegation.agents)
+            ) {
+                throw new Error('AgentNexus config delegation.agents must be an array')
+            }
             if (
                 candidate.agents !== undefined &&
                 (!candidate.agents ||
@@ -1061,6 +1259,8 @@ export class AgentNexusService extends Service {
 
         const defaults = createDefaultNexusConfig(this.pluginConfig)
         const parsedA2A = (parsed.a2a || {}) as A2AConfig &
+            Record<string, unknown>
+        const parsedGateway = (parsed.gateway || {}) as GatewayConfig &
             Record<string, unknown>
         const missingHostKeyPolicy = (parsed.hosts || []).some(
             (host) => !host.hostKeyPolicy
@@ -1084,12 +1284,20 @@ export class AgentNexusService extends Service {
             defaultHostId,
             a2a: {
                 remotes: parsedA2A.remotes || []
+            },
+            gateway: {
+                remotes: parsedGateway.remotes || []
+            },
+            delegation: {
+                agents: parsed.delegation?.agents || []
             }
         }
         if (
             repaired.changed ||
             defaultHostId !== parsed.defaultHostId ||
             !parsed.a2a ||
+            !parsed.gateway ||
+            !parsed.delegation ||
             parsed.agents?.pi === undefined ||
             missingHostKeyPolicy
         ) {

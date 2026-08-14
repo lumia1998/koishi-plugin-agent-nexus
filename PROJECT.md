@@ -1,50 +1,36 @@
 # AgentNexus 架构与维护边界
 
-> 仓库：`https://github.com/lumia1998/koishi-plugin-AgentNexus`
+> 仓库：`https://github.com/lumia1998/koishi-plugin-agent-nexus`
 >
 > 更新：2026-08-14
 
 ## 1. 产品定位
 
-AgentNexus 是 ChatLuna 的 SSH 运维面与 A2A Client：
+AgentNexus 是 ChatLuna 的 SSH 运维面与协议无关 Agent 委托层：
 
 1. 通过 SSH 管理受信任远端机器。
 2. 探测并安装 Hermes、OpenClaw、Claude Code、OpenCode、Codex、Pi。
 3. 从 Git 仓库同步 Skills，并软链接到已安装 Agent。
 4. 提供 SFTP 文件管理和交互终端。
-5. 通过外部 Agent Card 发现 A2A Agent，并把 ChatLuna 任务交给对应 Server。
+5. 通过 A2A Provider 调用标准远程 A2A Agent。
+6. 通过 Nexus Gateway Provider 调用远端 `nexus-agentd`，由 agentd 使用本机 ACP 驱动 Coding Agent。
 
-AgentNexus 固定作为 **A2A Client**。它不实现、部署或维护 A2A Server，也不通过 SSH
-直接执行 Agent 任务。
+AgentNexus 不实现 A2A Server，也不通过 SSH 执行 Agent 任务。
 
-## 2. 职责边界
+## 2. 核心原则
 
-### SSH 负责
-
-- 主机连接、重连与主机密钥校验
-- Agent 可执行文件存在性探测
-- 未安装 Agent 的安装
-- Skills 同步与软链接
-- SFTP 文件管理
-- 交互终端
-
-### A2A 负责
-
-- 在 A2A 页逐个添加完整 Agent Card URL
-- Agent Card 与 Skills 发现
-- ChatLuna 后台委托、续接、查询、补充输入和取消
-- A2A Task ID 与 Context ID 的内部维护
-- 完成、失败或等待输入后唤醒原 ChatLuna conversation
-
-### 非目标
-
-- 内置 Agent Card、A2A 入站路由或 A2A Server
-- 通过 SSH 部署或维护第三方 A2A Server
-- SSH Agent 直调命令或 ChatLuna SSH Agent 工具
-- 本地托管 Agent Session、交互消息绑定和会话历史摘要
-- Agent CLI 输出解析与自动产物发布
-- Agent 版本检测、最新版查询或更新
-- 向 ChatLuna 暴露协议级 A2A Task ID 工具
+- A2A 完整保留，不改成 ACP-only。
+- SSH 只承担连接、安装、探测、Skills、SFTP、Terminal 和诊断。
+- ChatLuna 第一阶段继续只注册 `nexus_a2a_delegate`。
+- 每个逻辑 Agent 独立选择 A2A 或 Gateway+ACP。
+- AgentNexus 持有稳定 Job ID；协议 ID 只保存在 `providerState`。
+- A2A/Gateway Remote 与 SSH Computer 不隐式绑定。
+- `nexus-agentd` 是独立 ESM package。
+- `nexus-agentd` 面向 Linux/Unix Agent 主机，不维护 Windows command shim。
+- ACP Driver 支持 OpenCode、Claude Code、Codex、Pi 和 OpenClaw；Hermes 保持原生 A2A。
+- HTTP 客户端不能向 agentd 传 command/argv。
+- workspace 必须经过 `realpath` allowlist 校验。
+- agentd 默认 localhost、Bearer Token、权限策略默认 `ask`。
 
 ## 3. 总体架构
 
@@ -52,144 +38,317 @@ AgentNexus 固定作为 **A2A Client**。它不实现、部署或维护 A2A Serv
 ChatLuna
   │ nexus_a2a_delegate
   ▼
-AgentNexus (Koishi)
-  ├─ A2A Client
-  │   ├─ Agent Card discovery
-  │   ├─ JSON-RPC / HTTP+JSON / SSE
-  │   ├─ delegation job store
-  │   └─ ChatLuna result wakeup
-  ├─ SSH operations
-  │   ├─ connection pool / host key verification
-  │   ├─ install-only Agent management
-  │   ├─ Skills sync
-  │   ├─ SFTP file manager
-  │   └─ terminal
-  └─ Console
-      ├─ Computer
-      ├─ A2A
-      ├─ Skills
-      ├─ Files
-      └─ Terminal
+AgentNexus DelegationManager
+  │
+  ├─ A2ADelegationProvider
+  │    └─ A2AClientService
+  │         └─ Agent Card / JSON-RPC / HTTP+JSON / SSE
+  │
+  └─ NexusGatewayProvider
+       └─ NexusGatewayClient
+            └─ HTTP/SSE
+                 ▼
+             nexus-agentd
+                 └─ AcpProcessRuntime
+                      ├─ OpenCodeDriver  ─ opencode acp
+                      ├─ ClaudeDriver    ─ claude-agent-acp
+                      ├─ CodexDriver     ─ codex-acp
+                      ├─ PiDriver        ─ pi-acp
+                      └─ OpenClawDriver  ─ openclaw acp
 
-Remote machine
-  ├─ Hermes A2A Server      :PORT
-  ├─ OpenCode A2A Server    :PORT
-  ├─ Claude Code A2A Server :PORT
-  ├─ Pi A2A Server          :PORT
-  └─ other A2A Servers      :PORT
+AgentNexus SSH Operations
+  ├─ connection pool / host key verification
+  ├─ install-only Agent management
+  ├─ Skills sync
+  ├─ SFTP file manager
+  └─ terminal
 ```
 
-每个远端 Agent 可以使用不同端口、Card 路径、Token 和传输方式，因此必须在 A2A 页分别配置。
-SSH Computer 与 A2A Remote 不建立隐式一一映射。
+## 4. Delegation Core
 
-## 4. ChatLuna 工具
-
-只注册一个工具：
-
-| Tool | 作用 |
-|---|---|
-| `nexus_a2a_delegate` | 选择远端 A2A Agent，创建或续接任务，并把结果回送到原会话 |
-
-支持动作：
+运行时入口：
 
 ```text
-run      创建或续接任务
-message  补充输入或指导
-status   查看任务状态
-list     列出当前 conversation 的任务
-agents   列出 Agent Card 与 Skills
-stop     取消任务
+ChatLuna Tool
+    ↓
+DelegationManager
+    ↓
+DelegationProviderRegistry
+    ├─ A2ADelegationProvider
+    └─ NexusGatewayProvider
 ```
 
-用户明确要求“调用 Hermes/OpenCode 等去做某事”时，ChatLuna 应把要求直接放入 `prompt`，
-不先自行搜索、求解或改写。
-
-## 5. 两台机器示例
+通用动作：
 
 ```text
-10.1.2.30
-  Koishi + ChatLuna + AgentNexus
-      ├─ SSH operations ─────────┐
-      └─ A2A Client ─────────────┤
-                                  ▼
-10.1.2.50
-  ├─ Agent CLI 与 Skills
-  ├─ Hermes A2A Server :PORT
-  ├─ OpenCode A2A Server :PORT
-  └─ Claude Code A2A Server :PORT
+run
+message
+status
+list
+agents
+stop
 ```
 
-配置顺序：
-
-1. 在 Computer 页添加 `10.1.2.50`，连接并扫描。
-2. 安装缺少的 Agent，同步需要的 Skills。
-3. 在远端按各框架说明启动 A2A Server。
-4. 在 A2A 页逐个添加完整 Agent Card URL 并发现。
-5. 由 ChatLuna 调用 `nexus_a2a_delegate`。
-
-## 6. 核心代码
+通用状态：
 
 ```text
-src/service.ts                  核心服务、SSH 运维与工具注册
-src/a2a/client.ts               Agent Card 发现与 A2A 出站协议
-src/a2a/delegation-manager.ts   后台任务、续接、轮询和通知
-src/a2a/delegation-store.ts     ChatLuna A2A job 持久化
-src/a2a/chatluna-wakeup.ts      结果回送到原 ChatLuna conversation
-src/tools/a2a_delegate.ts       唯一 ChatLuna 工具
-src/ssh/                       SSH 连接、执行、SFTP 与主机密钥
-src/adapters/                  Agent 可执行文件探测与 Skills 目录
+running
+input_required
+permission_required
+completed
+failed
+canceled
+```
+
+`DelegationJob` 使用 schema v2。稳定字段包括：
+
+```text
+id                 AgentNexus Job ID
+provider           a2a | gateway
+agentId            逻辑 Agent ID
+remoteId           A2A Remote 或 Gateway ID
+providerAgentId    Gateway 内 Agent Driver ID
+providerState      协议私有状态
+```
+
+A2A `providerState`：
+
+```text
+taskId
+contextId
+remoteState
+```
+
+Gateway `providerState`：
+
+```text
+gatewaySessionId
+acpSessionId
+lastEventId
+agentId
+workspace
+remoteState
+```
+
+新 Job 只在 provider、remote、Gateway agentId 和 workspace 兼容时复用旧 `providerState`。
+已有 Job 的 provider/agent/remote 身份在续接时保持不变，防止配置切换导致协议串线。
+
+## 5. 每 Agent 路由
+
+`delegation.agents` 定义逻辑 Agent：
+
+```ts
+interface DelegationAgentConfig {
+  id: string
+  name: string
+  enabled: boolean
+  provider: 'a2a' | 'gateway'
+  remoteId: string
+  agentId?: string
+  workspace?: string
+  description?: string
+  skills?: string[]
+}
+```
+
+- A2A 路由只需要 `remoteId`。
+- Gateway 路由还必须提供 `agentId` 和 `workspace`。
+- 未被显式逻辑路由引用的旧 A2A Remote 继续作为隐式 Agent 暴露。
+- 删除 Remote 不级联删除逻辑 Agent，后者会显示为不可用，便于修复配置。
+
+## 6. A2A Provider
+
+A2A Provider 包装现有 `A2AClientService`，不重写协议实现。
+
+保留能力：
+
+- Agent Card 与 Skills 发现
+- JSON-RPC 和 HTTP+JSON
+- SSE 响应
+- Task ID 与 Context ID
+- 后台轮询、续接、补充输入和取消
+- ChatLuna conversation wakeup
+
+旧的 A2A 专用 Manager/Store 测试继续保留为回归覆盖；生产运行时使用通用 Delegation Core。
+
+## 7. Nexus Gateway Provider
+
+Gateway API：
+
+```text
+GET  /v1/agents
+POST /v1/sessions
+GET  /v1/sessions/:id
+POST /v1/sessions/:id/message
+POST /v1/sessions/:id/cancel
+GET  /v1/sessions/:id/events
+```
+
+Gateway Client 支持：
+
+- Bearer Token 与 `env:VAR`
+- HTTP 响应大小限制
+- SSE Event ID、`after` 和 `Last-Event-ID`
+- Session 创建、查询、消息和取消
+
+当前 Delegation Manager 使用 `GET session` 轮询完成 wakeup。SSE Client 和事件模型已经保留，
+后续可在确认重连语义后替换或辅助轮询。
+
+## 8. nexus-agentd
+
+独立 package：
+
+```text
+packages/nexus-agentd/
+```
+
+主要模块：
+
+```text
+src/server.ts             Gateway HTTP/SSE
+src/session.ts            Gateway Session 生命周期
+src/acp/runtime.ts        公共 ACP Client Runtime
+src/drivers/stdio.ts      共享 stdio、环境白名单和进程探测
+src/drivers/*.ts          OpenCode、Claude Code、Codex、Pi、OpenClaw Driver
+src/workspace.ts          realpath allowlist
+src/config.ts             本地配置和 secret 解析
+```
+
+一个 Gateway Session 对应一个隔离 ACP 子进程。公共 Runtime 固定使用官方 ACP SDK，Driver
+只声明可执行文件、argv、环境、探测方式和显示元数据，不复制 ACP Session 实现。
+
+HTTP 请求只能指定：
+
+```text
+agentId
+workspace
+message
+```
+
+可执行文件、argv、环境变量、认证假设和权限策略只能存在于 agentd 本机配置。
+
+## 9. 权限与输入
+
+ACP Runtime 将权限请求和 elicitation 映射为：
+
+```text
+permission_required
+input_required
+```
+
+待用户回答的问题和选项进入 Gateway Session `pendingRequest`，再由 Provider 格式化进
+AgentNexus Job 输出。ChatLuna 通过同一工具的 `message` 动作提交选项 ID、名称、序号或输入。
+
+权限策略：
+
+- `ask`：默认，等待 ChatLuna/用户决策。
+- `deny`：选择拒绝选项或取消。
+
+不存在 silent allow-all。
+
+## 10. 持久化与迁移
+
+主配置：
+
+```text
+{koishi.baseDir}/data/agent-nexus/config.json
+```
+
+通用 Job：
+
+```text
+{koishi.baseDir}/data/agent-nexus/delegation-jobs.json
+```
+
+旧 A2A Job：
+
+```text
+{koishi.baseDir}/data/agent-nexus/a2a-tasks.json
+```
+
+新文件不存在时导入旧 schema v1：
+
+- `a2aTaskId -> providerState.taskId`
+- `contextId -> providerState.contextId`
+- `waiting_input -> input_required`
+- `provider = a2a`
+
+旧文件不删除、不覆盖。损坏的新文件或迁移源会停止 Delegation Store 初始化，避免静默丢失。
+
+agentd Session 当前只保存在内存；daemon 重启后不能恢复旧 ACP 进程。
+
+## 11. 安全边界
+
+- SSH 使用 SHA-256 TOFU 或严格主机密钥固定。
+- Console RPC 不返回 SSH secret、A2A Token 或 Gateway Token。
+- agentd 默认监听 `127.0.0.1`，LAN 监听必须显式配置。
+- Gateway 要求 Bearer Token，支持 `env:VAR`。
+- 客户端 command/argv 注入由严格请求字段白名单拒绝。
+- workspace 和允许根都先 `realpath`，阻止 traversal 和 symlink escape。
+- Driver 环境只继承基础白名单和本地显式 `inheritEnv`。
+- 请求体、响应、事件数量和输出长度均有限制。
+- ACP 权限默认询问，取消状态不能被迟到的 prompt 结果覆盖。
+
+## 12. 核心代码
+
+```text
+src/delegation/                 协议无关 Job、Store、Manager、Provider Registry、wakeup
+src/providers/a2a.ts            A2A Provider
+src/providers/gateway.ts        Nexus Gateway Provider
+src/gateway/                    Gateway HTTP/SSE Client
+src/a2a/client.ts               现有 A2A 协议实现
+src/tools/a2a_delegate.ts       唯一 ChatLuna 高层工具
+src/service.ts                  服务装配、SSH 运维和 Console 数据
+src/ssh/                        SSH 连接、执行、SFTP 与主机密钥
+src/adapters/                   Agent 探测和 Skills 目录
 src/agents/maintenance.ts       install-only 安装计划
-src/skills/sync.ts              Skills Git 同步与软链接
-src/files/manager.ts            SFTP 文件管理
 src/webui/index.ts              Console RPC
-client/components/              Computer、A2A、Skills、Files、Terminal
+client/components/a2a-panel.vue Agent/Remote/Gateway 配置
+packages/nexus-agentd/          独立 Gateway + ACP daemon
 ```
 
-## 7. 配置与持久化
+## 13. 非目标
 
-- 主配置：`{koishi.baseDir}/data/agent-nexus/config.json`
-- A2A job：`{koishi.baseDir}/data/agent-nexus/a2a-tasks.json`
-- 配置与任务文件使用原子写入；损坏文件会移到备份路径。
-- 旧配置中的 runtime、默认 Agent 等已移除字段不会再次写回。
+- 内置 A2A Server 或 Agent Card 入站路由
+- 通过 SSH spawn ACP Agent
+- SSH Agent 直调命令
+- 从 ChatLuna 输入任意 shell command
+- 把没有 ACP Server/Adapter 的普通 CLI stdout 当作 ACP
+- 默认开放整个服务器文件系统
+- 静默批准所有 ACP 权限
+- 第一阶段跨公网部署
 
-## 8. 安全边界
+## 14. 后续优先级
 
-- SSH 默认使用 TOFU 固定 SHA-256 主机密钥，也支持严格校验。
-- Console RPC 不回传密码、私钥、passphrase 或 A2A Token。
-- 密钥与 Token 支持 `env:VAR`。
-- SFTP 路径通过 `realpath` 限制在设备工作目录内。
-- SSH 输出、终端消息、A2A 响应和文件操作均设置大小或时间边界。
-- Agent Card 可以公开发现，但任务端点应使用强 Token，并优先通过 HTTPS 暴露。
+1. 在真实 Koishi + ChatLuna 环境验证 Gateway 后台 wakeup 和权限交互。
+2. 增加可选的 Gateway SSE 实时监听与断线重连策略。
+3. 评估 agentd Session 恢复或明确的 daemon 重启恢复流程。
+4. 在真实安装环境分别完成 Claude Code、Codex、Pi、OpenClaw 的协议互操作测试。
+5. Hermes 继续使用原生 A2A，不为协议统一而增加多余 ACP Bridge。
+6. 稳定后再评估把工具名迁移为 `nexus_delegate`。
 
-## 9. 当前维护原则
-
-- 保持 A2A Client 与 SSH 运维面解耦。
-- 所有模型可调用的远端 Agent 能力统一进入 `nexus_a2a_delegate`。
-- SSH 只做机器运维，不新增 Agent 任务执行入口。
-- Agent 安装器只负责“未安装到已安装”，不承担包管理器更新策略。
-- 不为单一框架增加私有任务协议；框架差异由其 A2A Server 处理。
-- 只有能降低真实复杂度的功能才进入核心插件。
-
-## 10. 后续优先级
-
-1. 在真实 Koishi + ChatLuna 环境验证完整 A2A 委托、后台回送和等待输入链路。
-2. 增加不同 Agent Card 路径、认证方式和传输方式的兼容性样本。
-3. 增加 SSH/SFTP/PTY/Skills 的集成测试。
-4. 根据真实使用情况继续减少无状态、重复或仅供调试的 Console RPC。
-5. 只有出现跨进程部署需求时，再评估 SQLite/Redis job store。
-
-## 11. 构建验证
+## 15. 构建验证
 
 ```bash
 npm test
 npm run typecheck
 npm run build
 npm pack --dry-run --json
+npm pack --dry-run --json --workspace nexus-agentd
 ```
 
-构建产物仅包含：
+根插件发布包：
 
 ```text
-lib/index.js
+CHANGELOG.md
+lib/
 dist/
+```
+
+agentd 发布包：
+
+```text
+dist/
+nexus-agentd.example.json
+README.md
 ```

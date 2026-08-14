@@ -2,7 +2,15 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
-## 未发布
+## [0.1.32] - 2026-08-14
+
+### 新功能
+
+- 新增协议无关 Delegation Core 和通用 schema v2 Job；AgentNexus Job ID 保持稳定，A2A Task/Context 与 Gateway/ACP Session ID 只保存在 `providerState`。
+- 新增 Nexus Gateway Provider、HTTP/SSE Client 和独立 ESM package `nexus-agentd`，完成 `AgentNexus -> Gateway -> ACP` 链路。
+- Console 的 **A2A / ACP** 页新增逻辑 Agent 与 Nexus Gateway 配置；每个 Agent 可独立选择 A2A 或 Gateway+ACP、远端、Gateway Agent ID 和 workspace。
+- `nexus-agentd` 新增 Bearer Token、Agent discovery、Session/message/cancel/events API、SSE 事件重放、权限请求和 elicitation 交互。
+- ACP Driver 扩展为 OpenCode、Claude Code、Codex、Pi 和 OpenClaw；Hermes 明确保留原生 A2A 路由。
 
 ### 改进
 
@@ -11,6 +19,22 @@
 - 移除 `nexus.hermes`、`nexus.claudecode` 等 SSH 直调命令，以及其托管 Session Runtime、交互绑定、历史摘要和自动产物发布链路。
 - A2A 委托移除仅供旧 Bridge 使用的 Agent 类型 hint，按远端 Agent Card/Skill 选择并直接转交用户任务。
 - Code Agent 管理改为安装-only：移除版本检测、联网最新版查询和所有更新命令；已安装 Agent 只报告存在状态。
+- 现有 A2A Client、Agent Card、Task/Context、SSE、后台轮询与 ChatLuna wakeup 由 A2A Provider 原样复用；未配置显式逻辑路由的旧 A2A Remote 继续可用。
+- 根仓库改为 npm workspace，统一执行插件和 agentd 的测试、类型检查与构建；agentd 与 ACP SDK 共用 Zod 3.25，避免重复安装 Zod 4。
+
+### 兼容与安全
+
+- 首次升级会把 `a2a-tasks.json` 导入 `delegation-jobs.json`，原旧文件保持不变；损坏迁移源不会静默生成空 Store。
+- A2A Remote、Gateway Remote 与 SSH Computer 保持独立，不根据主机或端口建立隐式绑定。
+- agentd 默认只监听 localhost；客户端请求严格限制为 `agentId`、`workspace` 和消息，不能传 command/argv。
+- workspace 和允许根执行 `realpath` 校验，拒绝 traversal、外部路径和符号链接逃逸。
+- ACP 权限策略默认 `ask`，也可配置 `deny`，不存在静默自动批准；Gateway Token 在 Console 返回时脱敏并支持 `env:VAR`。
+
+### 修复
+
+- 逻辑 Agent 从 A2A 切换到 ACP 或修改 Gateway Agent/workspace 后，新 Job 不再继承不兼容的协议状态；已有 Job 继续保持创建时的 provider 身份。
+- Gateway 权限和输入请求会把问题及选项带回 ChatLuna，不再只显示空的等待状态。
+- 修复 agentd 取消与迟到 prompt 结果的竞态，避免 canceled Session 被覆盖为 completed；异步 prompt 启动失败也会稳定进入 failed。
 
 ## [0.1.32-alpha.5] - 2026-08-13
 
@@ -67,7 +91,8 @@
 
 - 这是 `alpha` 预发布版本；自动会话绑定与 Bridge 恢复已通过自动化测试，但仍需在真实 Koishi + ChatLuna + 远端 Bridge 环境完成端到端联调。
 
-[0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
-[0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2
-[0.1.32-alpha.4]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.3...v0.1.32-alpha.4
-[0.1.32-alpha.5]: https://github.com/lumia1998/koishi-plugin-AgentNexus/compare/v0.1.32-alpha.4...v0.1.32-alpha.5
+[0.1.32]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.5...v0.1.32
+[0.1.32-alpha.1]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.0...v0.1.32-alpha.1
+[0.1.32-alpha.2]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.1...v0.1.32-alpha.2
+[0.1.32-alpha.4]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.3...v0.1.32-alpha.4
+[0.1.32-alpha.5]: https://github.com/lumia1998/koishi-plugin-agent-nexus/compare/v0.1.32-alpha.4...v0.1.32-alpha.5

@@ -3,6 +3,183 @@
         <section class="section remote-section">
             <div class="section-head">
                 <div class="heading-group">
+                    <div class="section-title">委托 Agent</div>
+                    <span class="count">{{ config.delegation.agents.length }}</span>
+                </div>
+                <el-button size="small" :icon="Plus" @click="openAddAgent">
+                    添加 Agent
+                </el-button>
+            </div>
+
+            <el-alert
+                type="info"
+                :closable="false"
+                show-icon
+                title="每个 Agent 可单独选择 A2A 或 Nexus Gateway + ACP。未建立显式映射的 A2A Agent Card 仍可直接调用。"
+            />
+
+            <div v-if="!config.delegation.agents.length" class="empty-state compact-empty">
+                <Connection class="empty-icon" />
+                <span>尚未配置显式 Agent 路由；现有 A2A Cards 会保持兼容并直接可用</span>
+            </div>
+
+            <div v-else class="remote-list">
+                <article
+                    v-for="agent in config.delegation.agents"
+                    :key="agent.id"
+                    class="remote-row"
+                >
+                    <div class="remote-primary">
+                        <span
+                            class="state-dot"
+                            :class="delegationState(agent).state"
+                            aria-hidden="true"
+                        />
+                        <div class="remote-copy">
+                            <div class="remote-title-row">
+                                <strong>{{ agent.name }}</strong>
+                                <el-tag size="small" effect="plain">
+                                    {{ agent.provider === 'a2a' ? 'A2A' : 'ACP' }}
+                                </el-tag>
+                                <el-tag
+                                    size="small"
+                                    effect="plain"
+                                    :type="stateTagType(delegationState(agent).state)"
+                                >
+                                    {{ stateLabel(delegationState(agent).state) }}
+                                </el-tag>
+                                <el-tag v-if="!agent.enabled" size="small" effect="plain">
+                                    已禁用
+                                </el-tag>
+                            </div>
+                            <div class="remote-url">
+                                {{ delegationTarget(agent) }}
+                            </div>
+                            <div v-if="agent.workspace" class="card-summary">
+                                <span>workspace: {{ agent.workspace }}</span>
+                            </div>
+                            <div v-if="delegationState(agent).error" class="remote-error">
+                                {{ delegationState(agent).error }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="remote-actions">
+                        <el-tooltip content="编辑 Agent" placement="top">
+                            <el-button
+                                circle
+                                size="small"
+                                :icon="Edit"
+                                @click="openEditAgent(agent)"
+                            />
+                        </el-tooltip>
+                        <el-tooltip content="删除 Agent" placement="top">
+                            <el-button
+                                circle
+                                size="small"
+                                type="danger"
+                                plain
+                                :icon="Delete"
+                                @click="removeAgent(agent)"
+                            />
+                        </el-tooltip>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="section remote-section">
+            <div class="section-head">
+                <div class="heading-group">
+                    <div class="section-title">Nexus Gateways</div>
+                    <span class="count">{{ config.gateway.remotes.length }}</span>
+                </div>
+                <el-button size="small" :icon="Plus" @click="openAddGateway">
+                    添加 Gateway
+                </el-button>
+            </div>
+
+            <div v-if="!config.gateway.remotes.length" class="empty-state compact-empty">
+                <Connection class="empty-icon" />
+                <span>尚未添加运行 nexus-agentd 的远端节点</span>
+            </div>
+
+            <div v-else class="remote-list">
+                <article
+                    v-for="gateway in config.gateway.remotes"
+                    :key="gateway.id"
+                    class="remote-row"
+                >
+                    <div class="remote-primary">
+                        <span
+                            class="state-dot"
+                            :class="gatewayState(gateway).state"
+                            aria-hidden="true"
+                        />
+                        <div class="remote-copy">
+                            <div class="remote-title-row">
+                                <strong>{{ gateway.name }}</strong>
+                                <el-tag
+                                    size="small"
+                                    effect="plain"
+                                    :type="stateTagType(gatewayState(gateway).state)"
+                                >
+                                    {{ stateLabel(gatewayState(gateway).state) }}
+                                </el-tag>
+                                <el-tag v-if="!gateway.enabled" size="small" effect="plain">
+                                    已禁用
+                                </el-tag>
+                            </div>
+                            <div class="remote-url">{{ gateway.baseUrl }}</div>
+                            <div v-if="gatewayState(gateway).agents.length" class="skill-list">
+                                <span
+                                    v-for="agent in gatewayState(gateway).agents"
+                                    :key="agent.id"
+                                    class="skill-chip"
+                                >
+                                    {{ agent.name }} · {{ agent.ready ? 'ready' : 'error' }}
+                                </span>
+                            </div>
+                            <div v-if="gatewayState(gateway).error" class="remote-error">
+                                {{ gatewayState(gateway).error }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="remote-actions">
+                        <el-tooltip content="发现 Gateway Agents" placement="top">
+                            <el-button
+                                circle
+                                size="small"
+                                :icon="Refresh"
+                                :loading="isGatewayDiscovering(gateway.id)"
+                                @click="discoverGateway(gateway)"
+                            />
+                        </el-tooltip>
+                        <el-tooltip content="编辑 Gateway" placement="top">
+                            <el-button
+                                circle
+                                size="small"
+                                :icon="Edit"
+                                @click="openEditGateway(gateway)"
+                            />
+                        </el-tooltip>
+                        <el-tooltip content="删除 Gateway" placement="top">
+                            <el-button
+                                circle
+                                size="small"
+                                type="danger"
+                                plain
+                                :icon="Delete"
+                                @click="removeGateway(gateway)"
+                            />
+                        </el-tooltip>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="section remote-section">
+            <div class="section-head">
+                <div class="heading-group">
                     <div class="section-title">外部 Agent Cards</div>
                     <span class="count">{{ config.a2a.remotes.length }}</span>
                 </div>
@@ -118,6 +295,107 @@
                 </article>
             </div>
         </section>
+
+        <el-dialog
+            v-model="agentDialog"
+            :title="agentForm.id ? '编辑委托 Agent' : '添加委托 Agent'"
+            width="min(640px, 92vw)"
+            destroy-on-close
+        >
+            <div class="dialog-grid">
+                <label class="setting">
+                    <span class="field-label">名称</span>
+                    <el-input v-model="agentForm.name" placeholder="OpenCode" />
+                </label>
+                <label class="setting">
+                    <span class="field-label">连接方式</span>
+                    <el-select v-model="agentForm.provider" class="full-width" @change="agentProviderChanged">
+                        <el-option label="A2A" value="a2a" />
+                        <el-option label="Nexus Gateway + ACP" value="gateway" />
+                    </el-select>
+                </label>
+                <label class="setting wide-setting">
+                    <span class="field-label">
+                        {{ agentForm.provider === 'a2a' ? 'A2A Agent Card' : 'Nexus Gateway' }}
+                    </span>
+                    <el-select v-model="agentForm.remoteId" class="full-width">
+                        <el-option
+                            v-for="remote in agentRemoteOptions"
+                            :key="remote.id"
+                            :label="remote.name"
+                            :value="remote.id"
+                        />
+                    </el-select>
+                </label>
+                <label v-if="agentForm.provider === 'gateway'" class="setting">
+                    <span class="field-label">Gateway Agent ID</span>
+                    <el-input v-model="agentForm.agentId" placeholder="opencode" />
+                </label>
+                <label v-if="agentForm.provider === 'gateway'" class="setting wide-setting">
+                    <span class="field-label">Workspace</span>
+                    <el-input v-model="agentForm.workspace" placeholder="/data/repos/project" />
+                </label>
+                <label class="setting wide-setting">
+                    <span class="field-label">说明</span>
+                    <el-input v-model="agentForm.description" placeholder="可选" />
+                </label>
+                <label class="setting wide-setting">
+                    <span class="field-label">Skills</span>
+                    <el-input v-model="agentForm.skills" placeholder="逗号分隔，用于 ChatLuna 自动选择" />
+                </label>
+                <label class="setting toggle-setting">
+                    <span class="field-label">启用</span>
+                    <el-switch v-model="agentForm.enabled" />
+                </label>
+            </div>
+            <template #footer>
+                <el-button @click="agentDialog = false">取消</el-button>
+                <el-button type="primary" :loading="savingAgent" @click="saveAgent">
+                    保存
+                </el-button>
+            </template>
+        </el-dialog>
+
+        <el-dialog
+            v-model="gatewayDialog"
+            :title="gatewayForm.id ? '编辑 Nexus Gateway' : '添加 Nexus Gateway'"
+            width="min(620px, 92vw)"
+            destroy-on-close
+        >
+            <div class="dialog-grid">
+                <label class="setting">
+                    <span class="field-label">名称</span>
+                    <el-input v-model="gatewayForm.name" placeholder="dev-server" />
+                </label>
+                <label class="setting wide-setting">
+                    <span class="field-label">Gateway URL</span>
+                    <el-input v-model="gatewayForm.baseUrl" placeholder="http://10.1.2.50:PORT" />
+                </label>
+                <div class="setting wide-setting">
+                    <span class="field-label">Bearer Token</span>
+                    <el-input
+                        v-model="gatewayForm.authToken"
+                        type="password"
+                        show-password
+                        :disabled="gatewayForm.clearAuthToken"
+                        placeholder="留空保持现有 Token，支持 env:VAR"
+                    />
+                    <el-checkbox v-model="gatewayForm.clearAuthToken">
+                        清除已保存 Token
+                    </el-checkbox>
+                </div>
+                <label class="setting toggle-setting">
+                    <span class="field-label">启用</span>
+                    <el-switch v-model="gatewayForm.enabled" />
+                </label>
+            </div>
+            <template #footer>
+                <el-button @click="gatewayDialog = false">取消</el-button>
+                <el-button type="primary" :loading="savingGateway" @click="saveGateway">
+                    保存
+                </el-button>
+            </template>
+        </el-dialog>
 
         <el-dialog
             v-model="remoteDialog"
@@ -277,7 +555,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -293,6 +571,9 @@ import type {
     A2ARemoteConfig,
     A2ARemoteState,
     A2ATaskView,
+    DelegationAgentConfig,
+    GatewayRemoteConfig,
+    GatewayRemoteState,
     NexusConfig,
     NexusConsoleData,
     NexusStatus
@@ -311,6 +592,11 @@ const DEFAULT_AGENT_CARD_PATH = '/.well-known/agent-card.json'
 
 const savingRemote = ref(false)
 const discovering = ref(new Set<string>())
+const savingAgent = ref(false)
+const agentDialog = ref(false)
+const savingGateway = ref(false)
+const gatewayDialog = ref(false)
+const discoveringGateways = ref(new Set<string>())
 const remoteDialog = ref(false)
 const taskDialog = ref(false)
 const sendingTask = ref(false)
@@ -328,12 +614,233 @@ const remoteForm = reactive({
     preferredTransport: '' as '' | 'JSONRPC' | 'HTTP+JSON'
 })
 
+const agentForm = reactive({
+    id: '',
+    name: '',
+    provider: 'a2a' as 'a2a' | 'gateway',
+    remoteId: '',
+    agentId: '',
+    workspace: '',
+    description: '',
+    skills: '',
+    enabled: true
+})
+
+const gatewayForm = reactive({
+    id: '',
+    name: '',
+    baseUrl: '',
+    authToken: '',
+    clearAuthToken: false,
+    enabled: true
+})
+
 const taskForm = reactive({
     text: '',
     taskId: '',
     contextId: '',
     returnImmediately: false
 })
+
+const agentRemoteOptions = computed(() =>
+    agentForm.provider === 'a2a'
+        ? props.config.a2a.remotes
+        : props.config.gateway.remotes
+)
+
+function openAddAgent() {
+    Object.assign(agentForm, {
+        id: '',
+        name: '',
+        provider: 'a2a',
+        remoteId: props.config.a2a.remotes[0]?.id || '',
+        agentId: '',
+        workspace: '',
+        description: '',
+        skills: '',
+        enabled: true
+    })
+    agentDialog.value = true
+}
+
+function openEditAgent(agent: DelegationAgentConfig) {
+    Object.assign(agentForm, {
+        id: agent.id,
+        name: agent.name,
+        provider: agent.provider,
+        remoteId: agent.remoteId,
+        agentId: agent.agentId || '',
+        workspace: agent.workspace || '',
+        description: agent.description || '',
+        skills: (agent.skills || []).join(', '),
+        enabled: agent.enabled
+    })
+    agentDialog.value = true
+}
+
+function agentProviderChanged() {
+    const options = agentRemoteOptions.value
+    if (!options.some((remote) => remote.id === agentForm.remoteId)) {
+        agentForm.remoteId = options[0]?.id || ''
+    }
+    if (agentForm.provider === 'a2a') {
+        agentForm.agentId = ''
+        agentForm.workspace = ''
+    } else if (!agentForm.agentId) {
+        agentForm.agentId = 'opencode'
+    }
+}
+
+async function saveAgent() {
+    if (!agentForm.name.trim() || !agentForm.remoteId) {
+        ElMessage.warning('请填写 Agent 名称并选择远端')
+        return
+    }
+    if (
+        agentForm.provider === 'gateway' &&
+        (!agentForm.agentId.trim() || !agentForm.workspace.trim())
+    ) {
+        ElMessage.warning('ACP Agent 需要填写 Gateway Agent ID 和 Workspace')
+        return
+    }
+    savingAgent.value = true
+    try {
+        const result = await send('agent-nexus/saveDelegationAgent', {
+            ...(agentForm.id ? { id: agentForm.id } : {}),
+            name: agentForm.name.trim(),
+            provider: agentForm.provider,
+            remoteId: agentForm.remoteId,
+            agentId:
+                agentForm.provider === 'gateway'
+                    ? agentForm.agentId.trim()
+                    : undefined,
+            workspace:
+                agentForm.provider === 'gateway'
+                    ? agentForm.workspace.trim()
+                    : undefined,
+            description: agentForm.description.trim() || undefined,
+            skills: agentForm.skills
+                .split(/[,，\n]/)
+                .map((item) => item.trim())
+                .filter(Boolean),
+            enabled: agentForm.enabled
+        })
+        emit('updated', result.data)
+        agentDialog.value = false
+        ElMessage.success('委托 Agent 已保存')
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        savingAgent.value = false
+    }
+}
+
+async function removeAgent(agent: DelegationAgentConfig) {
+    try {
+        await ElMessageBox.confirm(`确定删除 Agent“${agent.name}”吗？`, '删除 Agent', {
+            confirmButtonText: '删除',
+            cancelButtonText: '取消',
+            type: 'warning'
+        })
+        const data = await send('agent-nexus/removeDelegationAgent', agent.id)
+        emit('updated', data)
+        ElMessage.success('委托 Agent 已删除')
+    } catch (error: any) {
+        if (error === 'cancel' || error === 'close') return
+        ElMessage.error(error?.message || String(error))
+    }
+}
+
+function openAddGateway() {
+    Object.assign(gatewayForm, {
+        id: '',
+        name: '',
+        baseUrl: '',
+        authToken: '',
+        clearAuthToken: false,
+        enabled: true
+    })
+    gatewayDialog.value = true
+}
+
+function openEditGateway(gateway: GatewayRemoteConfig) {
+    Object.assign(gatewayForm, {
+        id: gateway.id,
+        name: gateway.name,
+        baseUrl: gateway.baseUrl,
+        authToken: '',
+        clearAuthToken: false,
+        enabled: gateway.enabled
+    })
+    gatewayDialog.value = true
+}
+
+async function saveGateway() {
+    if (!gatewayForm.name.trim() || !gatewayForm.baseUrl.trim()) {
+        ElMessage.warning('请填写 Gateway 名称和 URL')
+        return
+    }
+    savingGateway.value = true
+    try {
+        const result = await send('agent-nexus/saveGatewayRemote', {
+            ...(gatewayForm.id ? { id: gatewayForm.id } : {}),
+            name: gatewayForm.name.trim(),
+            baseUrl: gatewayForm.baseUrl.trim(),
+            authToken: gatewayForm.clearAuthToken
+                ? undefined
+                : gatewayForm.authToken || undefined,
+            clearAuthToken: gatewayForm.clearAuthToken,
+            enabled: gatewayForm.enabled
+        })
+        emit('updated', result.data)
+        gatewayDialog.value = false
+        ElMessage.success('Nexus Gateway 已保存')
+        await discoverGatewayById(result.remoteId)
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        savingGateway.value = false
+    }
+}
+
+async function removeGateway(gateway: GatewayRemoteConfig) {
+    try {
+        await ElMessageBox.confirm(
+            `确定删除 Gateway“${gateway.name}”吗？引用它的 Agent 路由会显示为不可用。`,
+            '删除 Gateway',
+            {
+                confirmButtonText: '删除',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+        const data = await send('agent-nexus/removeGatewayRemote', gateway.id)
+        emit('updated', data)
+        ElMessage.success('Nexus Gateway 已删除')
+    } catch (error: any) {
+        if (error === 'cancel' || error === 'close') return
+        ElMessage.error(error?.message || String(error))
+    }
+}
+
+async function discoverGateway(gateway: GatewayRemoteConfig) {
+    await discoverGatewayById(gateway.id)
+}
+
+async function discoverGatewayById(id: string) {
+    discoveringGateways.value.add(id)
+    try {
+        const remote = await send('agent-nexus/discoverGatewayRemote', id)
+        const data = await send('agent-nexus/getConsoleData')
+        emit('updated', data)
+        if (remote.state === 'ready') ElMessage.success('Gateway Agents 已更新')
+        else ElMessage.error(remote.error || 'Gateway 发现失败')
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        discoveringGateways.value.delete(id)
+    }
+}
 
 function openAddRemote() {
     Object.assign(remoteForm, {
@@ -499,6 +1006,45 @@ async function cancelTask() {
     } finally {
         if (taskAction.value === 'cancel') taskAction.value = ''
     }
+}
+
+function delegationState(agent: DelegationAgentConfig) {
+    return (
+        props.status.delegation.agents.find((item) => item.id === agent.id) || {
+            state: 'unknown' as const,
+            error: undefined
+        }
+    )
+}
+
+function delegationTarget(agent: DelegationAgentConfig) {
+    if (agent.provider === 'a2a') {
+        const remote = props.config.a2a.remotes.find(
+            (item) => item.id === agent.remoteId
+        )
+        return remote ? `A2A · ${remote.name}` : `A2A · ${agent.remoteId}`
+    }
+    const remote = props.config.gateway.remotes.find(
+        (item) => item.id === agent.remoteId
+    )
+    return `ACP · ${remote?.name || agent.remoteId} · ${agent.agentId || '未指定 Agent'}`
+}
+
+function gatewayState(gateway: GatewayRemoteConfig) {
+    return (
+        props.status.gateway.remotes.find((item) => item.id === gateway.id) || {
+            id: gateway.id,
+            name: gateway.name,
+            baseUrl: gateway.baseUrl,
+            enabled: gateway.enabled,
+            state: 'unknown' as GatewayRemoteState,
+            agents: []
+        }
+    )
+}
+
+function isGatewayDiscovering(id: string) {
+    return discoveringGateways.value.has(id)
 }
 
 function isDiscovering(id: string) {

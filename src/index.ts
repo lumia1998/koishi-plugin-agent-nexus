@@ -22,4 +22,7 @@ export function apply(ctx: Context, config: Config) {
 
 export * from './types'
 export * from './a2a'
+export * from './delegation'
+export * from './gateway'
+export * from './providers'
 export { AgentNexusService }

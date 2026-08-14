@@ -1,15 +1,15 @@
 import z from './chatluna-dependencies'
-import type { A2ADelegateToolInput } from '../a2a/delegation-manager'
+import type { DelegateToolInput } from '../delegation'
 import { NexusToolBase } from './base'
-import { toolA2ADelegationContext } from './context'
+import { toolDelegationContext } from './context'
 
 export class NexusA2ADelegateTool extends NexusToolBase {
     name = 'nexus_a2a_delegate'
 
-    description = `Delegate work to a configured remote A2A agent through AgentNexus.
+    description = `Delegate work to a configured remote agent through AgentNexus. Each AgentNexus agent is configured to use either A2A or Nexus Gateway + ACP; do not choose or simulate the transport yourself.
 When the user asks to call a named remote agent, pass the requested task directly in prompt without researching, solving, or rewriting it first.
 Use action=run for a new task; long tasks run in the background by default and their result is delivered automatically to the same ChatLuna conversation.
-AgentNexus keeps A2A task/context identifiers private and automatically resumes a waiting task or the previous remote context.
+AgentNexus keeps protocol task/session identifiers private and automatically resumes a waiting task or the previous remote context.
 Actions: run, status, list, agents, message, stop. Use message to answer an input-required task or guide a running task.`
 
     schema = z.object({
@@ -20,11 +20,11 @@ Actions: run, status, list, agents, message, stop. Use message to answer an inpu
         remote: z
             .string()
             .optional()
-            .describe('Configured A2A agent name or id. Optional when unambiguous.'),
+            .describe('Configured AgentNexus agent name or id. Its A2A/ACP connection is selected by configuration.'),
         id: z
             .string()
             .optional()
-            .describe('AgentNexus A2A job id for status, continuation, guidance, or stop.'),
+            .describe('AgentNexus job id for status, continuation, guidance, or stop.'),
         prompt: z
             .string()
             .optional()
@@ -37,7 +37,7 @@ Actions: run, status, list, agents, message, stop. Use message to answer an inpu
         newTask: z
             .boolean()
             .optional()
-            .describe('Start without reusing the current A2A task or context.'),
+            .describe('Start without reusing the current remote task/session context.'),
         skill: z
             .string()
             .optional()
@@ -45,12 +45,12 @@ Actions: run, status, list, agents, message, stop. Use message to answer an inpu
     })
 
     async _call(
-        input: A2ADelegateToolInput,
+        input: DelegateToolInput,
         _runManager?: unknown,
         parentConfig?: any
     ) {
         try {
-            const context = toolA2ADelegationContext(parentConfig)
+            const context = toolDelegationContext(parentConfig)
             if (!context) {
                 throw new Error(
                     'nexus_a2a_delegate requires a ChatLuna conversation context.'

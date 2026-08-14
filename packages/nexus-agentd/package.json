@@ -1,0 +1,52 @@
+{
+  "name": "nexus-agentd",
+  "version": "0.1.0",
+  "description": "Local Nexus Gateway daemon that exposes allowlisted Coding Agents through HTTP/SSE and ACP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "nexus-agentd": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "nexus-agentd.example.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "author": "lumia1998",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lumia1998/koishi-plugin-agent-nexus.git",
+    "directory": "packages/nexus-agentd"
+  },
+  "bugs": {
+    "url": "https://github.com/lumia1998/koishi-plugin-agent-nexus/issues"
+  },
+  "homepage": "https://github.com/lumia1998/koishi-plugin-agent-nexus/tree/main/packages/nexus-agentd#readme",
+  "keywords": [
+    "agent-client-protocol",
+    "acp",
+    "agent",
+    "gateway",
+    "coding-agent"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.3.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

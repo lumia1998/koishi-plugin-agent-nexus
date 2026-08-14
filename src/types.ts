@@ -60,6 +60,36 @@ export interface A2AConfig {
     remotes: A2ARemoteConfig[]
 }
 
+export interface GatewayRemoteConfig {
+    id: string
+    name: string
+    baseUrl: string
+    authToken?: string
+    enabled: boolean
+}
+
+export interface GatewayConfig {
+    remotes: GatewayRemoteConfig[]
+}
+
+export type DelegationConnectionType = 'a2a' | 'gateway'
+
+export interface DelegationAgentConfig {
+    id: string
+    name: string
+    enabled: boolean
+    provider: DelegationConnectionType
+    remoteId: string
+    agentId?: string
+    workspace?: string
+    description?: string
+    skills?: string[]
+}
+
+export interface DelegationConfig {
+    agents: DelegationAgentConfig[]
+}
+
 export interface A2ACardSkillSummary {
     id: string
     name: string
@@ -116,6 +146,44 @@ export interface A2AStatus {
     remotes: A2ARemoteStatus[]
 }
 
+export interface GatewayAgentSummary {
+    id: string
+    name: string
+    description?: string
+    protocol: 'acp'
+    ready: boolean
+    version?: string
+    error?: string
+}
+
+export type GatewayRemoteState = 'unknown' | 'checking' | 'ready' | 'error'
+
+export interface GatewayRemoteStatus {
+    id: string
+    name: string
+    baseUrl: string
+    enabled: boolean
+    state: GatewayRemoteState
+    agents: GatewayAgentSummary[]
+    lastCheckedAt?: number
+    error?: string
+}
+
+export interface GatewayStatus {
+    remotes: GatewayRemoteStatus[]
+}
+
+export interface DelegationAgentStatus extends DelegationAgentConfig {
+    state: A2ARemoteState | GatewayRemoteState
+    remoteName?: string
+    protocolLabel: string
+    error?: string
+}
+
+export interface DelegationStatus {
+    agents: DelegationAgentStatus[]
+}
+
 export interface NexusConfig {
     hosts: SshHostConfig[]
     agents: AgentEnableConfig
@@ -123,6 +191,8 @@ export interface NexusConfig {
     skillRoot: string
     defaultHostId?: string
     a2a: A2AConfig
+    gateway: GatewayConfig
+    delegation: DelegationConfig
 }
 
 export interface DetectedAgent {
@@ -178,6 +248,8 @@ export interface NexusStatus {
     }
     activeSessions: number
     a2a: A2AStatus
+    gateway: GatewayStatus
+    delegation: DelegationStatus
 }
 
 export interface SkillInfo {

@@ -9,7 +9,7 @@
                     </el-tag>
                 </div>
                 <div class="subtitle">
-                    SSH 运维 · A2A Client · Agent 安装 · Skills · 文件与终端
+                    SSH 运维 · A2A / ACP 委托 · Agent 安装 · Skills · 文件与终端
                 </div>
             </div>
             <div class="actions">
@@ -17,7 +17,7 @@
             </div>
         </div>
 
-            <div class="stats">
+        <div class="stats">
             <div class="stat-card">
                 <div class="stat-label">主机</div>
                 <div class="stat-value">{{ overview.hostLabel }}</div>
@@ -122,7 +122,7 @@ type ComputerConnectInput = {
 const tabs = ['computer', 'a2a', 'skills', 'files', 'terminal'] as const
 const tabLabel = {
     computer: 'Computer',
-    a2a: 'A2A',
+    a2a: 'A2A / ACP',
     skills: 'Skills',
     files: '文件',
     terminal: '终端'
@@ -147,6 +147,12 @@ const config = ref<NexusConfig>({
     skillRoot: '~/.agent-nexus/skills',
     a2a: {
         remotes: []
+    },
+    gateway: {
+        remotes: []
+    },
+    delegation: {
+        agents: []
     }
 })
 const status = ref<NexusStatus>({
@@ -156,6 +162,12 @@ const status = ref<NexusStatus>({
     activeSessions: 0,
     a2a: {
         remotes: []
+    },
+    gateway: {
+        remotes: []
+    },
+    delegation: {
+        agents: []
     }
 })
 
@@ -395,7 +407,8 @@ onMounted(async () => {
     width: min(100%, 1440px);
     min-height: 100%;
     margin: 0 auto;
-    padding: 24px clamp(20px, 4vw, 56px) 40px;
+    padding: 24px clamp(20px, 4vw, 56px) 40px
+        calc(var(--activity-width, 0px) + clamp(20px, 4vw, 56px));
     box-sizing: border-box;
 }
 
@@ -420,7 +433,7 @@ onMounted(async () => {
 .title {
     font-size: 24px;
     font-weight: 700;
-    letter-spacing: -0.03em;
+    letter-spacing: 0;
     color: var(--k-text-dark);
 }
 
@@ -441,7 +454,7 @@ onMounted(async () => {
     min-width: 0;
     padding: 14px 16px;
     border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
-    border-radius: 14px;
+    border-radius: 8px;
     background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 18%);
 }
 
@@ -464,7 +477,7 @@ onMounted(async () => {
     gap: 8px;
     padding: 6px;
     border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
-    border-radius: 14px;
+    border-radius: 8px;
     background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 24%);
     overflow-x: auto;
 }
@@ -472,7 +485,7 @@ onMounted(async () => {
 .tab {
     flex: 0 0 auto;
     border: 0;
-    border-radius: 10px;
+    border-radius: 6px;
     padding: 9px 16px;
     background: transparent;
     color: var(--k-text-light);
@@ -513,7 +526,7 @@ onMounted(async () => {
 @media (max-width: 720px) {
     .nexus-page {
         gap: 14px;
-        padding: 16px 14px 28px;
+        padding: 16px 14px 28px calc(var(--activity-width, 0px) + 14px);
     }
 
     .hero {

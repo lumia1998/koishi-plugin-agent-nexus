@@ -3,6 +3,8 @@ import { resolve } from 'path'
 import type { AgentNexusService } from '../service'
 import type {
     NexusConfig,
+    DelegationAgentConfig,
+    GatewayRemoteConfig,
     SkillSourceConfig,
     SshHostConfig
 } from '../types'
@@ -119,6 +121,39 @@ export function apply(ctx: Context) {
         'agent-nexus/cancelA2ATask',
         async (remoteId: string, taskId: string) =>
             nexus().cancelA2ATask(remoteId, taskId),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/saveGatewayRemote',
+        async (
+            input: Partial<GatewayRemoteConfig> & { clearAuthToken?: boolean }
+        ) => nexus().saveGatewayRemote(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/removeGatewayRemote',
+        async (id: string) => nexus().removeGatewayRemote(id),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/discoverGatewayRemote',
+        async (id: string) => nexus().discoverGatewayRemote(id),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/saveDelegationAgent',
+        async (input: Partial<DelegationAgentConfig>) =>
+            nexus().saveDelegationAgent(input),
+        commandAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/removeDelegationAgent',
+        async (id: string) => nexus().removeDelegationAgent(id),
         commandAuthority
     )
 
@@ -278,6 +313,29 @@ declare module '@koishijs/plugin-console' {
             remoteId: string,
             taskId: string
         ): Promise<import('../types').A2ATaskView>
+        'agent-nexus/saveGatewayRemote'(
+            input: Partial<import('../types').GatewayRemoteConfig> & {
+                clearAuthToken?: boolean
+            }
+        ): Promise<{
+            remoteId: string
+            data: import('../types').NexusConsoleData
+        }>
+        'agent-nexus/removeGatewayRemote'(
+            id: string
+        ): Promise<import('../types').NexusConsoleData>
+        'agent-nexus/discoverGatewayRemote'(
+            id: string
+        ): Promise<import('../types').GatewayRemoteStatus>
+        'agent-nexus/saveDelegationAgent'(
+            input: Partial<import('../types').DelegationAgentConfig>
+        ): Promise<{
+            agentId: string
+            data: import('../types').NexusConsoleData
+        }>
+        'agent-nexus/removeDelegationAgent'(
+            id: string
+        ): Promise<import('../types').NexusConsoleData>
         'agent-nexus/syncSkill'(input: {
             repoUrl: string
             name?: string

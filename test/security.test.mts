@@ -19,9 +19,11 @@ import { resolveSecret } from '../src/utils/shell.ts'
 import {
     assertUniqueHostName,
     mergeA2ASecrets,
+    mergeGatewaySecrets,
     mergeHostSecrets,
     patchHostConfig,
     redactA2AConfig,
+    redactGatewayConfig,
     redactNexusConfig,
     repairHostIds,
     resolveHostReference
@@ -106,6 +108,34 @@ test('keeps A2A configuration client-only while preserving remote secrets', () =
     assert.deepEqual(Object.keys(merged), ['remotes'])
     assert.equal(merged.remotes[0].authToken, 'TOKEN')
     assert.equal(redactA2AConfig(merged).remotes[0].authToken, '')
+})
+
+test('keeps Gateway tokens server-side while preserving blank edits', () => {
+    const previous = {
+        remotes: [
+            {
+                id: 'gateway-1',
+                name: 'dev-server',
+                baseUrl: 'http://10.1.2.40:8787',
+                authToken: 'TOKEN',
+                enabled: true
+            }
+        ]
+    }
+    const merged = mergeGatewaySecrets(
+        {
+            remotes: [
+                {
+                    ...previous.remotes[0],
+                    authToken: ''
+                }
+            ]
+        },
+        previous
+    )
+
+    assert.equal(merged.remotes[0].authToken, 'TOKEN')
+    assert.equal(redactGatewayConfig(merged).remotes[0].authToken, '')
 })
 
 test('rejects unsafe skill path segments', () => {
