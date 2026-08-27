@@ -3,7 +3,6 @@ import { writeTextFileAtomic } from '../utils/atomic-file'
 import type {
     DelegationContext,
     DelegationJob,
-    DelegationProviderType,
     DelegationRouting,
     DelegationState
 } from './types'
@@ -11,11 +10,6 @@ import type {
 interface DelegationFile {
     schemaVersion: 2
     jobs: DelegationJob[]
-}
-
-interface LegacyDelegationFile {
-    schemaVersion: 1
-    tasks: unknown[]
 }
 
 const VALID_STATES = new Set<DelegationState>([
@@ -34,19 +28,13 @@ export class DelegationStore {
 
     constructor(
         private readonly filePath: string,
-        private readonly legacyFilePath?: string,
         private readonly maxJobs = 256
     ) {}
 
     async init() {
         if (this.initialized) return
         const current = await readOptional(this.filePath)
-        if (current !== undefined) {
-            this.loadCurrent(current)
-        } else if (this.legacyFilePath) {
-            const legacy = await readOptional(this.legacyFilePath)
-            if (legacy !== undefined) this.loadLegacy(legacy)
-        }
+        if (current !== undefined) this.load(current)
         this.prune(Date.now())
         this.initialized = true
         await this.persist()
@@ -92,34 +80,17 @@ export class DelegationStore {
         await this.writeQueue
     }
 
-    private loadCurrent(raw: string) {
+    private load(raw: string) {
         const parsed = parseJson(raw, this.filePath)
-        if (isRecord(parsed) && parsed.schemaVersion === 2 && Array.isArray(parsed.jobs)) {
-            for (const value of parsed.jobs) {
-                const job = normalizeJob(value)
-                if (job) this.jobs.set(job.id, job)
-            }
-            return
+        if (
+            !isRecord(parsed) ||
+            parsed.schemaVersion !== 2 ||
+            !Array.isArray(parsed.jobs)
+        ) {
+            throw new Error(`Invalid Delegation job file: ${this.filePath}`)
         }
-        if (isLegacyFile(parsed)) {
-            for (const value of parsed.tasks) {
-                const job = migrateLegacyDelegationJob(value)
-                if (job) this.jobs.set(job.id, job)
-            }
-            return
-        }
-        throw new Error(`Invalid Delegation job file: ${this.filePath}`)
-    }
-
-    private loadLegacy(raw: string) {
-        const parsed = parseJson(raw, this.legacyFilePath || 'legacy task file')
-        if (!isLegacyFile(parsed)) {
-            throw new Error(
-                `Invalid legacy A2A task file: ${this.legacyFilePath || 'unknown'}`
-            )
-        }
-        for (const value of parsed.tasks) {
-            const job = migrateLegacyDelegationJob(value)
+        for (const value of parsed.jobs) {
+            const job = normalizeJob(value)
             if (job) this.jobs.set(job.id, job)
         }
     }
@@ -158,65 +129,25 @@ export class DelegationStore {
     }
 }
 
-export function migrateLegacyDelegationJob(value: unknown): DelegationJob | undefined {
-    if (!isRecord(value)) return undefined
-    const id = stringValue(value.id)
-    const remoteId = stringValue(value.remoteId)
-    const remoteName = stringValue(value.remoteName)
-    const parentConversationId = stringValue(value.parentConversationId)
-    const legacyState = stringValue(value.state)
-    if (!id || !remoteId || !remoteName || !parentConversationId) return undefined
-    const state = legacyStateValue(legacyState)
-    if (!state || !isRecord(value.routing)) return undefined
-    const now = Date.now()
-    return normalizeJob({
-        ...structuredClone(value),
-        schemaVersion: 2,
-        provider: 'a2a',
-        agentId: remoteId,
-        agentName: remoteName,
-        remoteId,
-        remoteName,
-        state,
-        providerState: {
-            ...(stringValue(value.a2aTaskId)
-                ? { taskId: stringValue(value.a2aTaskId) }
-                : {}),
-            ...(stringValue(value.contextId)
-                ? { contextId: stringValue(value.contextId) }
-                : {}),
-            ...(stringValue(value.remoteState)
-                ? { remoteState: stringValue(value.remoteState) }
-                : {})
-        },
-        createdAt: finiteNumber(value.createdAt, now),
-        updatedAt: finiteNumber(value.updatedAt, now),
-        startedAt: finiteNumber(value.startedAt, now),
-        expiresAt: finiteNumber(value.expiresAt, now + 24 * 60 * 60 * 1000)
-    })
-}
-
 function normalizeJob(value: unknown): DelegationJob | undefined {
     if (!isRecord(value)) return undefined
-    const provider = providerValue(value.provider)
     const state = stateValue(value.state)
     const id = stringValue(value.id)
     const remoteId = stringValue(value.remoteId)
     const remoteName = stringValue(value.remoteName)
     const agentId = stringValue(value.agentId) || remoteId
     const agentName = stringValue(value.agentName) || remoteName
-    const parentConversationId = stringValue(value.parentConversationId)
+    const parentConversationId = optionalString(value.parentConversationId)
     if (
         value.schemaVersion !== 2 ||
-        !provider ||
+        value.provider !== 'gateway' ||
         !state ||
         !id ||
         !remoteId ||
         !remoteName ||
         !agentId ||
         !agentName ||
-        !parentConversationId ||
-        !isRecord(value.routing)
+        (value.routing !== undefined && !isRecord(value.routing))
     ) {
         return undefined
     }
@@ -224,15 +155,18 @@ function normalizeJob(value: unknown): DelegationJob | undefined {
     return {
         schemaVersion: 2,
         id,
-        provider,
+        provider: 'gateway',
         agentId,
         agentName,
+        toolName: optionalString(value.toolName),
         remoteId,
         remoteName,
         providerAgentId: optionalString(value.providerAgentId),
         parentConversationId,
         source: value.source === 'character' ? 'character' : 'chatluna',
-        routing: structuredClone(value.routing) as unknown as DelegationRouting,
+        routing: isRecord(value.routing)
+            ? (structuredClone(value.routing) as unknown as DelegationRouting)
+            : undefined,
         state,
         background: value.background !== false,
         prompt: stringValue(value.prompt),
@@ -276,31 +210,14 @@ async function readOptional(filePath: string) {
     }
 }
 
-function isLegacyFile(value: unknown): value is LegacyDelegationFile {
-    return Boolean(
-        isRecord(value) &&
-            value.schemaVersion === 1 &&
-            Array.isArray(value.tasks)
-    )
-}
-
 function isRecord(value: unknown): value is Record<string, any> {
     return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
-
-function providerValue(value: unknown): DelegationProviderType | undefined {
-    return value === 'a2a' || value === 'gateway' ? value : undefined
 }
 
 function stateValue(value: unknown): DelegationState | undefined {
     return typeof value === 'string' && VALID_STATES.has(value as DelegationState)
         ? (value as DelegationState)
         : undefined
-}
-
-function legacyStateValue(value: string): DelegationState | undefined {
-    if (value === 'waiting_input') return 'input_required'
-    return stateValue(value)
 }
 
 function isActive(state: DelegationState) {
@@ -316,8 +233,7 @@ function stringValue(value: unknown) {
 }
 
 function optionalString(value: unknown) {
-    const text = stringValue(value)
-    return text || undefined
+    return stringValue(value) || undefined
 }
 
 function finiteNumber(value: unknown, fallback: number) {

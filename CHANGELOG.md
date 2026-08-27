@@ -2,6 +2,27 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## 未发布
+
+- `nexus_<agent>` 工具不再强制要求 ChatLuna 会话上下文；默认原样传递用户任务并前台等待
+  Agent 结果，显式 `background=true` 才切换为后台任务。
+- 修复 ChatLuna Agent 模式嵌套上下文字段识别；有上下文的后台任务仍会回推，无上下文时可凭
+  Job ID 查询、续接或取消。
+- 同一 Job 的续接消息按顺序执行，避免并发覆盖远端 Session 状态。
+
+- 发布 0.2 单 Gateway 架构：Koishi 只连接独立的 Nexus Gateway，由 Gateway 统一承载 ACP 与
+  A2A Agent。
+- 删除直接 A2A Client、Agent Card/协议调试、多 Gateway、ACP Bridge 回退、内置
+  `nexus-agentd` workspace 及 `@a2a-js/sdk` 依赖。
+- 插件设置收敛为 `gatewayUrl`、`gatewayKey`、`commandAuthority` 与 `maxResponseBytes`；API Key
+  不再写入插件数据文件或 Console 响应。
+- 修正 Gateway wire types：Agent 支持 `protocol: acp | a2a`、`driver`、`checkedAt`、
+  `responseMs`，Session 支持 `protocolSessionId`，SSE 支持 `artifact` 事件。
+- Console 重做为全中文单 Gateway 视图，只展示连接状态、Agent inventory、ChatLuna 工具和
+  可选的 Agent 覆盖项。
+- 保留 Gateway Session 续聊、状态查询、取消、后台唤醒和二进制产物转存。
+- 旧配置仅迁移 Gateway Agent 覆盖项；直接 A2A 路由与旧 A2A Job 不再加载。
+
 ## [0.1.33] - 2026-08-14
 
 ### 新功能

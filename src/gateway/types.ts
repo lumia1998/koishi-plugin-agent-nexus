@@ -1,3 +1,5 @@
+import type { GatewayProtocol } from '../types'
+
 export type GatewaySessionState =
     | 'created'
     | 'running'
@@ -11,10 +13,15 @@ export interface GatewayAgentView {
     id: string
     name: string
     description?: string
-    protocol: 'acp'
+    protocol: GatewayProtocol
+    driver?: string
     ready: boolean
+    enabled?: boolean
+    workspace?: string
     version?: string
     error?: string
+    checkedAt?: number
+    responseMs?: number
 }
 
 export interface GatewayAgentsResponse {
@@ -29,14 +36,18 @@ export interface GatewayArtifactView {
     url?: string
     filename?: string
     mediaType?: string
+    data?: unknown
+    bytesBase64?: string
     metadata?: Record<string, unknown>
 }
 
 export interface GatewaySessionView {
     id: string
+    protocol: GatewayProtocol
+    protocolSessionId?: string
     acpSessionId?: string
     agentId: string
-    workspace: string
+    workspace?: string
     state: GatewaySessionState
     output?: string
     error?: string
@@ -68,6 +79,7 @@ export interface GatewayEvent {
         | 'tool_update'
         | 'terminal_output'
         | 'file_activity'
+        | 'artifact'
         | 'permission_required'
         | 'input_required'
         | 'completed'

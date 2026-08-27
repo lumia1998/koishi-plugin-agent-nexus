@@ -1,4 +1,4 @@
-export type DelegationProviderType = 'a2a' | 'gateway'
+export type DelegationProviderType = 'gateway'
 
 export type DelegationState =
     | 'running'
@@ -40,6 +40,7 @@ export interface RemoteAgentInfo {
     remoteId: string
     remoteName: string
     agentId?: string
+    protocol?: 'acp' | 'a2a'
     workspace?: string
     aliases?: string[]
     enabled: boolean
@@ -85,12 +86,14 @@ export interface DelegationJob {
     provider: DelegationProviderType
     agentId: string
     agentName: string
+    /** ChatLuna tool that is dedicated to this logical Agent. */
+    toolName?: string
     remoteId: string
     remoteName: string
     providerAgentId?: string
-    parentConversationId: string
+    parentConversationId?: string
     source: 'chatluna' | 'character'
-    routing: DelegationRouting
+    routing?: DelegationRouting
     state: DelegationState
     background: boolean
     prompt: string

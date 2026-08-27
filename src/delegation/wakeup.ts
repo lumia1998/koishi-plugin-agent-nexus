@@ -1,34 +1,33 @@
 import type { ChatInvocationInput } from 'koishi-plugin-chatluna'
 import type { DelegationJob } from './types'
+import { delegationToolNameForJob } from './tool-name'
 
 export async function notifyChatLunaDelegation(
     chatluna: { invoke(input: ChatInvocationInput): Promise<any> } | undefined,
-    job: DelegationJob
+    job: DelegationJob,
+    toolName = delegationToolNameForJob(job)
 ) {
     if (!chatluna?.invoke) {
         throw new Error('ChatLuna invocation service is unavailable.')
     }
+    if (!job.routing || !job.parentConversationId) {
+        throw new Error('This background job has no ChatLuna delivery context.')
+    }
     const invocation: ChatInvocationInput = {
         routing: job.routing,
-        message: formatDelegationWakeup(job),
-        messageName: job.provider === 'a2a' ? 'a2a_task' : 'delegation_job',
+        message: formatDelegationWakeup(job, toolName),
+        messageName: 'delegation_job',
         conversation: {
             type: 'existing',
             id: job.parentConversationId
         },
         delivery: 'channel',
         source: {
-            kind:
-                job.provider === 'a2a'
-                    ? 'agent-nexus-a2a'
-                    : 'agent-nexus-delegation',
+            kind: 'agent-nexus-delegation',
             id: job.id,
             detail: {
-                provider: job.provider,
                 agentId: job.agentId,
                 agentName: job.agentName,
-                remoteId: job.remoteId,
-                remoteName: job.remoteName,
                 state: job.state
             }
         },
@@ -42,14 +41,17 @@ export async function notifyChatLunaDelegation(
     }
 }
 
-export function formatDelegationWakeup(job: DelegationJob) {
+export function formatDelegationWakeup(
+    job: DelegationJob,
+    toolName = delegationToolNameForJob(job)
+) {
     const details = [
         job.output?.trim(),
         job.error?.trim() ? `Error: ${job.error.trim()}` : undefined,
         ...job.artifacts.map((artifact) =>
             artifact.url
                 ? `${artifact.name || artifact.filename || 'file'}: ${artifact.url}`
-                : artifact.text
+                : artifactContent(artifact)
         )
     ]
         .filter((value): value is string => Boolean(value))
@@ -57,17 +59,43 @@ export function formatDelegationWakeup(job: DelegationJob) {
     const interactive =
         job.state === 'input_required' || job.state === 'permission_required'
     const instruction = interactive
-        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Use nexus_a2a_delegate action=message id=${job.id} with the user's answer.`
+        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Use ${toolName} action=message id=${job.id} with the user's answer.`
         : job.state === 'failed'
-          ? `Report the remote agent failure to the user. Retry with nexus_a2a_delegate action=run id=${job.id} only when appropriate.`
-          : `Use this remote agent result to answer the user. Continue the same context with nexus_a2a_delegate action=run id=${job.id} if needed.`
+          ? `Report the remote agent failure to the user. Retry with ${toolName} action=run id=${job.id} only when appropriate.`
+          : `Use this remote agent result to answer the user. Continue the same context with ${toolName} action=run id=${job.id} if needed.`
     return [
-        `<delegation_job_result job_id="${escapeXml(job.id)}" agent="${escapeXml(job.agentName)}" provider="${job.provider}" state="${job.state}">`,
+        `<delegation_job_result job_id="${escapeXml(job.id)}" agent="${escapeXml(job.agentName)}" state="${job.state}">`,
         escapeXml(details || '(empty result)'),
         '</delegation_job_result>',
         '',
         `Automatic notice: a background AgentNexus job started by this conversation has updated. ${instruction}`
     ].join('\n')
+}
+
+function artifactContent(artifact: DelegationJob['artifacts'][number]) {
+    if (artifact.text) return artifact.text
+    if (artifact.data !== undefined) {
+        try {
+            return JSON.stringify(artifact.data)
+        } catch {}
+    }
+    if (!artifact.bytesBase64) return undefined
+    const bytes = decodedBase64Size(artifact.bytesBase64)
+    const details = [artifact.filename, artifact.mediaType, `${bytes} bytes`]
+        .filter(Boolean)
+        .join(', ')
+    return `[binary artifact${details ? `: ${details}` : ''}]`
+}
+
+function decodedBase64Size(value: string) {
+    const normalized = value.replace(/\s/g, '')
+    if (!normalized) return 0
+    const padding = normalized.endsWith('==')
+        ? 2
+        : normalized.endsWith('=')
+          ? 1
+          : 0
+    return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding)
 }
 
 function escapeXml(value: string) {
