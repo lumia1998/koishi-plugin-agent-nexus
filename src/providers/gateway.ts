@@ -143,10 +143,24 @@ export class NexusGatewayProvider implements DelegationProvider {
             })
             sessionId = session.id
         }
+        const attachmentIds = request.attachments?.length
+            ? await Promise.all(
+                  request.attachments.map(async (attachment) =>
+                      (
+                          await this.options.client.uploadAttachment(
+                              remote,
+                              sessionId!,
+                              attachment
+                          )
+                      ).id
+                  )
+              )
+            : []
         session = await this.options.client.sendMessage(
             remote,
             sessionId,
-            request.prompt
+            request.prompt,
+            attachmentIds
         )
         return fromGatewaySession(session, job.providerState)
     }

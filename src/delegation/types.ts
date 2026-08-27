@@ -63,6 +63,12 @@ export interface DelegationArtifact {
     metadata?: Record<string, unknown>
 }
 
+export interface DelegationInputAttachment {
+    name: string
+    mediaType?: string
+    bytes: Uint8Array
+}
+
 export interface DelegationProviderResult {
     state: DelegationState
     remoteState?: string
@@ -78,6 +84,7 @@ export interface DelegationRunRequest {
     newTask: boolean
     sameTask: boolean
     skill?: string
+    attachments?: DelegationInputAttachment[]
 }
 
 export interface DelegationJob {
@@ -129,6 +136,7 @@ export interface DelegateToolInput {
     background?: boolean
     newTask?: boolean
     skill?: string
+    attachments?: DelegationInputAttachment[]
 }
 
 export interface DelegationProvider {

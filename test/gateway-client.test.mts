@@ -80,6 +80,50 @@ test('authenticates inventory and the complete session lifecycle', async () => {
     }
 })
 
+test('uploads current-message attachments as bounded binary Session input', async () => {
+    let uploaded: { contentType: string; fileName: string; body: Buffer } | undefined
+    const server = http.createServer(async (request, response) => {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        if (request.url === '/v1/sessions/session-1/attachments') {
+            uploaded = {
+                contentType: String(request.headers['content-type'] || ''),
+                fileName: String(request.headers['x-nexus-file-name'] || ''),
+                body: Buffer.concat(chunks)
+            }
+            response.setHeader('Content-Type', 'application/json')
+            response.end(JSON.stringify({
+                id: 'attachment-1',
+                name: '需求说明.txt',
+                mediaType: 'text/plain',
+                size: chunks.reduce((total, chunk) => total + chunk.length, 0)
+            }))
+            return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify({ error: 'missing' }))
+    })
+    await listen(server)
+    const client = new NexusGatewayClient()
+    try {
+        const result = await client.uploadAttachment(
+            gatewayRemote(server),
+            'session-1',
+            {
+                name: '需求说明.txt',
+                mediaType: 'text/plain',
+                bytes: new Uint8Array([0, 255, 1, 2])
+            }
+        )
+        assert.equal(result.id, 'attachment-1')
+        assert.equal(uploaded?.contentType, 'text/plain')
+        assert.equal(uploaded?.fileName, encodeURIComponent('需求说明.txt'))
+        assert.deepEqual(uploaded?.body, Buffer.from([0, 255, 1, 2]))
+    } finally {
+        await close(server)
+    }
+})
+
 test('parses replayable SSE events including artifacts', async () => {
     let requestUrl = ''
     let lastEventId = ''
@@ -178,6 +222,8 @@ test('publishes ACP and A2A inventory as tools and applies per-Agent overrides',
 })
 
 test('maps protocol session ids, permission input, and binary artifacts', async () => {
+    let uploaded: any
+    let sentAttachmentIds: string[] | undefined
     const config = {
         delegation: {
             agents: [
@@ -194,7 +240,12 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
         async createSession() {
             return session('created')
         },
-        async sendMessage() {
+        async uploadAttachment(_remote: unknown, _sessionId: string, input: unknown) {
+            uploaded = input
+            return { id: 'attachment-1', name: '需求.png', mediaType: 'image/png', size: 3 }
+        },
+        async sendMessage(_remote: unknown, _sessionId: string, _prompt: string, attachmentIds?: string[]) {
+            sentAttachmentIds = attachmentIds
             return {
                 ...session('permission_required'),
                 output: '准备修改。',
@@ -224,7 +275,12 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
         prompt: '修改项目',
         background: true,
         newTask: false,
-        sameTask: false
+        sameTask: false,
+        attachments: [{
+            name: '需求.png',
+            mediaType: 'image/png',
+            bytes: new Uint8Array([1, 2, 3])
+        }]
     })
     assert.equal(result.state, 'permission_required')
     assert.match(result.text || '', /允许一次/)
@@ -232,6 +288,9 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
     assert.equal(result.providerState.protocolSessionId, 'acp-1')
     assert.equal(result.providerState.acpSessionId, 'acp-1')
     assert.equal(result.artifacts[0].bytesBase64, 'aGVsbG8=')
+    assert.equal(uploaded.name, '需求.png')
+    assert.deepEqual([...uploaded.bytes], [1, 2, 3])
+    assert.deepEqual(sentAttachmentIds, ['attachment-1'])
 })
 
 test('keeps the previous inventory after a transient discovery failure', async () => {

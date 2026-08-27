@@ -2,6 +2,8 @@ import { createHash } from 'crypto'
 import { Context, Service } from 'koishi'
 import path from 'path'
 import { Readable } from 'stream'
+import { fileURLToPath } from 'url'
+import { readFile as readBinaryFile } from 'fs/promises'
 import type {
     DelegationAgentConfig,
     GatewayRemoteConfig,
@@ -124,6 +126,37 @@ export class AgentNexusService extends Service {
         signal?: AbortSignal
     ) {
         return this.delegations.handle(input, context, signal)
+    }
+
+    async collectInputAttachments(parentConfig: any) {
+        const session = parentConfig?.configurable?.session
+        const elements = [
+            ...(Array.isArray(session?.elements) ? session.elements : []),
+            ...(Array.isArray(session?.event?.message?.elements)
+                ? session.event.message.elements
+                : [])
+        ]
+        const seen = new Set<string>()
+        const sources = elements
+            .map(inputElement)
+            .filter((item): item is InputAttachmentSource => Boolean(item))
+            .filter((item) => {
+                if (seen.has(item.source)) return false
+                seen.add(item.source)
+                return true
+            })
+        if (!sources.length) return []
+        const attachments: InputAttachment[] = []
+        let total = 0
+        for (const source of sources) {
+            const attachment = await loadInputAttachment(source)
+            total += attachment.bytes.length
+            if (total > MAX_DELEGATION_INPUT_BYTES) {
+                throw new Error('本次任务的图片/文件总大小超过 32 MB。')
+            }
+            attachments.push(attachment)
+        }
+        return attachments
     }
 
     getGatewayStatus() {
@@ -397,6 +430,20 @@ export class AgentNexusService extends Service {
 }
 
 const MAX_DELEGATION_ARTIFACT_BYTES = 32 * 1024 * 1024
+const MAX_DELEGATION_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
+const MAX_DELEGATION_INPUT_BYTES = 32 * 1024 * 1024
+
+interface InputAttachmentSource {
+    source: string
+    name: string
+    mediaType?: string
+}
+
+interface InputAttachment {
+    name: string
+    mediaType?: string
+    bytes: Uint8Array
+}
 
 function decodeArtifactBase64(value: string) {
     const normalized = value.replace(/\s/g, '')
@@ -446,6 +493,144 @@ function extensionForMediaType(mediaType?: string) {
         'application/zip': '.zip'
     }
     return mediaType ? extensions[mediaType.toLowerCase()] || '' : ''
+}
+
+function inputElement(value: any): InputAttachmentSource | undefined {
+    if (!value || typeof value !== 'object') return undefined
+    const type = String(value.type || '').toLowerCase()
+    if (!['img', 'image', 'file', 'attachment', 'audio', 'video'].includes(type)) {
+        return undefined
+    }
+    const attrs = value.attrs && typeof value.attrs === 'object' ? value.attrs : value
+    const source = String(attrs.src || attrs.url || attrs.href || '').trim()
+    if (!source) return undefined
+    const name = safeInputFilename(
+        String(attrs.filename || attrs.name || attrs.alt || '').trim()
+    ) || filenameFromSource(source) || 'attachment'
+    return {
+        source,
+        name,
+        mediaType: normalizeMediaType(
+            String(attrs.mediaType || attrs.mimeType || attrs.mime || '').trim()
+        ) || mediaTypeFromSource(source, type)
+    }
+}
+
+async function loadInputAttachment(source: InputAttachmentSource): Promise<InputAttachment> {
+    const parsed = parseDataUri(source.source)
+    if (parsed) {
+        assertInputAttachmentSize(parsed.bytes.length)
+        return {
+            name: source.name,
+            mediaType: concreteMediaType(source.mediaType) || parsed.mediaType || 'application/octet-stream',
+            bytes: parsed.bytes
+        }
+    }
+    let bytes: Uint8Array
+    if (source.source.startsWith('file://')) {
+        bytes = await readBinaryFile(fileURLToPath(source.source))
+    } else if (/^[a-z][a-z\d+.-]*:\/\//i.test(source.source)) {
+        const response = await fetch(source.source, {
+            signal: AbortSignal.timeout(30_000)
+        })
+        if (!response.ok || !response.body) {
+            throw new Error(`无法读取用户附件（HTTP ${response.status}）。`)
+        }
+        bytes = await readLimitedResponse(response, MAX_DELEGATION_INPUT_ATTACHMENT_BYTES)
+        source.mediaType = concreteMediaType(source.mediaType)
+            || normalizeMediaType(response.headers.get('content-type') || '')
+    } else {
+        throw new Error(`无法读取用户附件地址：${source.source}`)
+    }
+    assertInputAttachmentSize(bytes.length)
+    return {
+        name: source.name,
+        mediaType: source.mediaType || 'application/octet-stream',
+        bytes
+    }
+}
+
+async function readLimitedResponse(response: Response, maxBytes: number) {
+    const declared = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new Error('用户附件超过 16 MB。')
+    }
+    const reader = response.body!.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    try {
+        while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            total += value.byteLength
+            if (total > maxBytes) throw new Error('用户附件超过 16 MB。')
+            chunks.push(value)
+        }
+    } finally {
+        reader.releaseLock()
+    }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return bytes
+}
+
+function parseDataUri(value: string) {
+    const match = /^data:([^;,]+)?(;base64)?,(.*)$/is.exec(value)
+    if (!match) return undefined
+    const mediaType = normalizeMediaType(match[1] || '')
+    if (match[2]) {
+        const encoded = match[3].replace(/\s/g, '')
+        if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+            throw new Error('用户附件的 Base64 数据无效。')
+        }
+        return { mediaType, bytes: Buffer.from(encoded, 'base64') }
+    }
+    return { mediaType, bytes: Buffer.from(decodeURIComponent(match[3]), 'utf8') }
+}
+
+function assertInputAttachmentSize(size: number) {
+    if (size > MAX_DELEGATION_INPUT_ATTACHMENT_BYTES) {
+        throw new Error('单个用户附件超过 16 MB。')
+    }
+}
+
+function normalizeMediaType(value: string) {
+    const result = value.split(';', 1)[0].trim().toLowerCase()
+    return result || undefined
+}
+
+function concreteMediaType(value?: string) {
+    return value && !value.includes('*') ? value : undefined
+}
+
+function mediaTypeFromSource(source: string, type: string) {
+    if (type === 'img' || type === 'image') return 'image/*'
+    if (type === 'audio') return 'audio/*'
+    if (type === 'video') return 'video/*'
+    const extension = path.extname(source.split(/[?#]/, 1)[0]).toLowerCase()
+    const types: Record<string, string> = {
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
+        '.txt': 'text/plain', '.json': 'application/json', '.zip': 'application/zip'
+    }
+    return types[extension]
+}
+
+function filenameFromSource(source: string) {
+    try {
+        const value = new URL(source)
+        return safeInputFilename(path.basename(value.pathname))
+    } catch {
+        return safeInputFilename(path.basename(source.split(/[?#]/, 1)[0]))
+    }
+}
+
+function safeInputFilename(value: string) {
+    return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim().slice(0, 180)
 }
 
 declare module 'koishi' {

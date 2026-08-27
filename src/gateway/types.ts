@@ -28,6 +28,13 @@ export interface GatewayAgentsResponse {
     agents: GatewayAgentView[]
 }
 
+export interface GatewayAttachmentView {
+    id: string
+    name: string
+    mediaType?: string
+    size: number
+}
+
 export interface GatewayArtifactView {
     id?: string
     name?: string

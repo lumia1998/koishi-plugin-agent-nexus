@@ -12,6 +12,8 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 - 按 Agent 自动注册 `nexus_<agent>` ChatLuna 工具。
 - 创建、续接、查询和取消 Gateway Session。
 - 默认把用户任务原样交给目标 Agent，并等待 Agent 返回结果。
+- 用户当前消息中的图片、文件、音频和视频会在工具真正执行时读取并上传到 Gateway，再按 ACP/A2A
+  协议传递给目标 Agent；不会把整段 ChatLuna 历史上下文作为调用前提。
 - 会话上下文不是调用前提；显式使用后台模式时，如有 ChatLuna 会话上下文则在完成后唤醒原会话，
   没有上下文时可通过返回的任务 ID 查询。
 - 转存 Gateway 返回的二进制产物为 ChatLuna 临时文件。
@@ -46,6 +48,18 @@ npm install koishi-plugin-agent-nexus
 | `maxResponseBytes` | `33554432` | 单个 Gateway HTTP/SSE 响应读取上限 |
 
 `gatewayKey` 是数据面 API Key，不是 Gateway 控制台登录密码。
+
+### 图片与文件闭环
+
+ChatLuna 需要把任务交给 `nexus_<agent>` 工具时，插件会从当前 Koishi 消息元素收集附件，并先调用
+Gateway 的 Session 附件接口。Gateway 会在对应 Session 中临时保存附件：单个文件最多 16 MiB、单次
+任务最多 32 MiB、最多 16 个文件。之后：
+
+1. ACP Agent 优先收到其声明支持的图片/音频能力；不支持时由 Gateway 生成受限的临时资源链接。
+2. A2A Agent 收到带文件名和媒体类型的二进制 Part。
+3. Agent 返回的图片、音频、视频和文件由插件转成 ChatLuna 可发送的临时文件元素。
+
+附件只跟随当前任务发送，不会拼接成历史对话；Session 空闲释放时 Gateway 同时清理临时附件。
 
 ## 局域网配置
 

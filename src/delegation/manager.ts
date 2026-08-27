@@ -253,7 +253,10 @@ export class DelegationManager {
                 background,
                 newTask: resetContext,
                 sameTask: sameTask && !resetContext,
-                skill: job.skill
+                skill: job.skill,
+                ...(input.attachments?.length
+                    ? { attachments: input.attachments }
+                    : {})
             }
             let result = request.sameTask
                 ? await provider.message(agent, job, request)

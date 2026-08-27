@@ -37,34 +37,34 @@ export class NexusAgentDelegateTool extends NexusToolBase {
         this.name = name
         this.description =
             description ||
-            `Delegate a task to ${agentName} through AgentNexus. Pass the user's task unchanged in prompt. The tool waits for ${agentName}'s reply by default. Set background=true only when the task should continue asynchronously; use the returned job id with action=status, action=message, or action=stop.`
+            `通过 AgentNexus 将任务交给 ${agentName}。prompt 必须原样传递用户要求；当前消息中的图片和文件会一并转发。默认等待 ${agentName} 回复，只有需要异步执行时才设置 background=true；返回的任务 ID 可用于 action=status、action=message 或 action=stop。`
         this.schema = z.object({
             action: z
                 .enum(['run', 'status', 'message', 'stop'])
                 .optional()
                 .default('run')
-                .describe('run a task, continue it, inspect it, or stop it'),
+                .describe('执行任务、继续任务、查看状态或停止任务'),
             id: z
                 .string()
                 .optional()
-                .describe('AgentNexus job id for status, continuation, or stop.'),
+                .describe('用于查看状态、继续或停止任务的 AgentNexus 任务 ID。'),
             prompt: z
                 .string()
                 .optional()
-                .describe('Task instruction or follow-up message for this Agent.'),
+                .describe('发送给该智能体的任务要求或后续消息。'),
             background: z
                 .boolean()
                 .optional()
                 .default(false)
-                .describe('Return immediately and continue asynchronously instead of waiting for the Agent reply.'),
+                .describe('立即返回并在后台继续执行，不等待智能体回复。'),
             newTask: z
                 .boolean()
                 .optional()
-                .describe('Start without reusing this Agent\'s previous remote context.'),
+                .describe('不复用该智能体之前的远程任务上下文，创建新任务。'),
             skill: z
                 .string()
                 .optional()
-                .describe('Optional configured skill hint for this Agent.')
+                .describe('可选的智能体技能提示。')
         })
     }
 
@@ -77,10 +77,16 @@ export class NexusAgentDelegateTool extends NexusToolBase {
     ) {
         try {
             const context = toolDelegationContext(parentConfig)
+            const collectAttachments = (this.nexus as any).collectInputAttachments
+            const canCarryInput = !input.action || input.action === 'run' || input.action === 'message'
+            const attachments = canCarryInput && typeof collectAttachments === 'function'
+                ? await collectAttachments.call(this.nexus, parentConfig)
+                : []
             return await this.nexus.handleDelegate(
                 {
                     ...input,
-                    remote: this.agentId
+                    remote: this.agentId,
+                    ...(attachments.length ? { attachments } : {})
                 },
                 context,
                 parentConfig?.signal

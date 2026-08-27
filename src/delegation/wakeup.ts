@@ -15,7 +15,7 @@ export async function notifyChatLunaDelegation(
     }
     const invocation: ChatInvocationInput = {
         routing: job.routing,
-        message: formatDelegationWakeup(job, toolName),
+        message: wakeupMessage(job, toolName),
         messageName: 'delegation_job',
         conversation: {
             type: 'existing',
@@ -39,6 +39,33 @@ export async function notifyChatLunaDelegation(
             result?.error?.message || 'ChatLuna rejected the delegation wakeup.'
         )
     }
+}
+
+function wakeupMessage(
+    job: DelegationJob,
+    toolName: string
+): ChatInvocationInput['message'] {
+    const media = job.artifacts
+        .filter((artifact) => artifact.url)
+        .map((artifact) => {
+            const url = artifact.url!
+            const mediaType = artifact.mediaType || ''
+            if (mediaType.startsWith('image/')) {
+                return { type: 'image_url', image_url: { url } }
+            }
+            if (mediaType.startsWith('audio/')) {
+                return { type: 'audio_url', audio_url: { url, mimeType: mediaType } }
+            }
+            if (mediaType.startsWith('video/')) {
+                return { type: 'video_url', video_url: { url, mimeType: mediaType } }
+            }
+            return { type: 'file_url', file_url: { url, mimeType: mediaType } }
+        })
+    if (!media.length) return formatDelegationWakeup(job, toolName)
+    return [
+        { type: 'text', text: formatDelegationWakeup(job, toolName) },
+        ...media
+    ] as ChatInvocationInput['message']
 }
 
 export function formatDelegationWakeup(
