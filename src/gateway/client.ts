@@ -2,6 +2,7 @@ import type { GatewayRemoteConfig } from '../types'
 import { resolveSecret } from '../utils/shell'
 import type {
     GatewayAgentsResponse,
+    GatewayAttachmentView,
     GatewayEvent,
     GatewaySessionView
 } from './types'
@@ -22,8 +23,14 @@ export interface GatewayClient {
     sendMessage(
         remote: GatewayRemoteConfig,
         sessionId: string,
-        message: string
+        message: string,
+        attachments?: string[]
     ): Promise<GatewaySessionView>
+    uploadAttachment(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        input: { name: string; mediaType?: string; bytes: Uint8Array }
+    ): Promise<GatewayAttachmentView>
     cancelSession(
         remote: GatewayRemoteConfig,
         sessionId: string
@@ -62,15 +69,39 @@ export class NexusGatewayClient {
     async sendMessage(
         remote: GatewayRemoteConfig,
         sessionId: string,
-        message: string
+        message: string,
+        attachments: string[] = []
     ) {
         return this.request<GatewaySessionView>(
             remote,
             `/v1/sessions/${encodeURIComponent(sessionId)}/message`,
             {
                 method: 'POST',
-                body: JSON.stringify({ message })
+                body: JSON.stringify({
+                    message,
+                    ...(attachments.length ? { attachments } : {})
+                })
             }
+        )
+    }
+
+    async uploadAttachment(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        input: { name: string; mediaType?: string; bytes: Uint8Array }
+    ) {
+        return this.request<GatewayAttachmentView>(
+            remote,
+            `/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': input.mediaType || 'application/octet-stream',
+                    'X-Nexus-File-Name': encodeURIComponent(input.name)
+                },
+                body: Buffer.from(input.bytes)
+            },
+            SESSION_START_TIMEOUT_MS
         )
     }
 

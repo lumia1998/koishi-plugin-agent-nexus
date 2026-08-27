@@ -99,6 +99,46 @@ test('an Agent-specific tool works without conversation context', async () => {
     })
 })
 
+test('forwards current Koishi message attachments only for task turns', async () => {
+    let invocation: any
+    const nexus = {
+        async collectInputAttachments(parentConfig: any) {
+            assert.equal(parentConfig.configurable.session.elements[0].type, 'img')
+            return [{
+                name: '需求.png',
+                mediaType: 'image/png',
+                bytes: new Uint8Array([1, 2, 3])
+            }]
+        },
+        async handleDelegate(input: unknown) {
+            invocation = input
+            return 'delegated'
+        }
+    }
+    const tool = new NexusAgentDelegateTool(
+        nexus as any,
+        'hermes-route',
+        'Hermes',
+        'nexus_hermes'
+    )
+
+    await tool._call(
+        { action: 'run', prompt: '分析这张图片' },
+        undefined,
+        { configurable: { session: { elements: [{ type: 'img' }] } } }
+    )
+    assert.equal(invocation.attachments[0].name, '需求.png')
+    assert.deepEqual([...invocation.attachments[0].bytes], [1, 2, 3])
+
+    invocation = undefined
+    await tool._call(
+        { action: 'status', id: 'job-1' },
+        undefined,
+        { configurable: { session: { elements: [{ type: 'img' }] } } }
+    )
+    assert.equal(invocation.attachments, undefined)
+})
+
 test('reads ChatLuna Agent context from the nested configurable field', async () => {
     let invocation: any
     const nexus = {
