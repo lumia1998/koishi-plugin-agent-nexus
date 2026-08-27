@@ -7,7 +7,7 @@ icons.register('activity:agent-nexus', AgentNexusIcon)
 export default (ctx: Context) => {
     ctx.page({
         id: 'agent-nexus',
-        name: 'AgentNexus',
+        name: 'Agent 中枢',
         path: '/agent-nexus',
         icon: 'activity:agent-nexus',
         order: 80,

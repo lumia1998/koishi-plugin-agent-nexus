@@ -7,10 +7,16 @@ export function toolDelegationContext(
     const session = configurable?.session
     const conversationId = String(
         configurable?.conversationId ??
+            configurable?.agentContext?.conversationId ??
             configurable?.agentContext?.parentConversationId ??
             ''
     ).trim()
-    const userId = String(configurable?.userId ?? session?.userId ?? '').trim()
+    const userId = String(
+        configurable?.userId ??
+            configurable?.agentContext?.userId ??
+            session?.userId ??
+            ''
+    ).trim()
     if (!conversationId || !userId) return undefined
 
     const routing: DelegationRouting = {
@@ -29,7 +35,6 @@ export function toolDelegationContext(
     }
 }
 
-export const toolA2ADelegationContext = toolDelegationContext
 
 function optionalString(value: unknown) {
     const text = String(value ?? '').trim()

@@ -1,14 +1,7 @@
 import { Context } from 'koishi'
 import { resolve } from 'path'
 import type { AgentNexusService } from '../service'
-import type {
-    NexusConfig,
-    DelegationAgentConfig,
-    GatewayRemoteConfig,
-    SkillSourceConfig,
-    SshHostConfig
-} from '../types'
-import { randomUUID } from 'crypto'
+import type { DelegationAgentConfig } from '../types'
 
 export const name = 'agent-nexus-webui'
 export const inject = ['console', 'agent_nexus']
@@ -22,337 +15,31 @@ export function apply(ctx: Context) {
     const nexus = () => ctx.agent_nexus as AgentNexusService
     const commandAuthority = { authority: nexus().commandAuthority }
 
-    ctx.console.addListener('agent-nexus/getConfig', async () => nexus().getConfig())
-    ctx.console.addListener('agent-nexus/getStatus', async () => nexus().getStatus())
     ctx.console.addListener('agent-nexus/getConsoleData', async () =>
         nexus().getConsoleData()
     )
-
     ctx.console.addListener(
-        'agent-nexus/saveConfig',
-        async (cfg: NexusConfig) => {
-            await nexus().saveConfig(cfg)
-            return { success: true }
-        },
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/saveHost',
-        async (input: Partial<SshHostConfig> & { setAsDefault?: boolean }) => {
-            const result = await nexus().saveHost(input)
-            return { success: true, hostId: result.hostId, data: result.data }
-        },
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/removeHost',
-        async (hostId: string) => {
-            await nexus().removeHost(hostId)
-            return { success: true }
-        },
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/testHost',
-        async (hostId: string) => await nexus().testHost(hostId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/scanAgents',
-        async (hostId?: string) => await nexus().scanAgents(hostId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/maintainAgent',
-        async (input: import('../types').AgentMaintenanceInput) =>
-            nexus().maintainAgent(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/deployAgentd',
-        async (input: import('../types').AgentdDeploymentInput) =>
-            nexus().deployAgentd(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/getAgentdDeploymentProgress',
-        async (hostId: string) => nexus().getAgentdDeploymentProgress(hostId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/saveA2ARemote',
-        async (
-            input: Partial<import('../types').A2ARemoteConfig> & {
-                clearAuthToken?: boolean
-                clearPreferredTransport?: boolean
-            }
-        ) => nexus().saveA2ARemote(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/removeA2ARemote',
-        async (id: string) => nexus().removeA2ARemote(id),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/discoverA2ARemote',
-        async (id: string) => nexus().discoverA2ARemote(id),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/sendA2AMessage',
-        async (input: {
-            remoteId: string
-            text: string
-            taskId?: string
-            contextId?: string
-            returnImmediately?: boolean
-            metadata?: Record<string, unknown>
-        }) => nexus().sendA2AMessage(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/getA2ATask',
-        async (remoteId: string, taskId: string) =>
-            nexus().getA2ATask(remoteId, taskId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/cancelA2ATask',
-        async (remoteId: string, taskId: string) =>
-            nexus().cancelA2ATask(remoteId, taskId),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/saveGatewayRemote',
-        async (
-            input: Partial<GatewayRemoteConfig> & { clearAuthToken?: boolean }
-        ) => nexus().saveGatewayRemote(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/removeGatewayRemote',
-        async (id: string) => nexus().removeGatewayRemote(id),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/discoverGatewayRemote',
-        async (id: string) => nexus().discoverGatewayRemote(id),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/refreshRemoteStatuses',
+        'agent-nexus/refreshGateway',
         async () => nexus().refreshRemoteStatuses(),
         commandAuthority
     )
-
     ctx.console.addListener(
         'agent-nexus/saveDelegationAgent',
         async (input: Partial<DelegationAgentConfig>) =>
             nexus().saveDelegationAgent(input),
         commandAuthority
     )
-
     ctx.console.addListener(
         'agent-nexus/removeDelegationAgent',
-        async (id: string) => nexus().removeDelegationAgent(id),
+        async (agentId: string) => nexus().removeDelegationAgent(agentId),
         commandAuthority
     )
-
-    ctx.console.addListener(
-        'agent-nexus/syncSkill',
-        async (input: {
-            repoUrl: string
-            name?: string
-            branch?: string
-            subdir?: string
-            hostId?: string
-        }) => {
-            const source: SkillSourceConfig = {
-                id: randomUUID(),
-                name: input.name || '',
-                repoUrl: input.repoUrl,
-                branch: input.branch,
-                subdir: input.subdir,
-                enabled: true
-            }
-            const info = await nexus().syncSkill(source, input.hostId)
-            return { success: true, skill: info }
-        },
-        commandAuthority
-    )
-
-    ctx.console.addListener('agent-nexus/listSkills', async (hostId?: string) => {
-        return await nexus().refreshSkills(hostId)
-    })
-
-    ctx.console.addListener(
-        'agent-nexus/listFiles',
-        async (input: { hostId?: string; path?: string } = {}) =>
-            nexus().listRemoteFiles(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/previewFile',
-        async (input: { hostId?: string; path: string }) =>
-            nexus().previewRemoteFile(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/uploadFile',
-        async (input: {
-            hostId?: string
-            path: string
-            contentBase64: string
-        }) => nexus().uploadRemoteFile(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/saveTextFile',
-        async (input: { hostId?: string; path: string; content: string }) =>
-            nexus().saveRemoteText(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/createDirectory',
-        async (input: { hostId?: string; parent: string; name: string }) =>
-            nexus().createRemoteDirectory(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/renameFile',
-        async (input: { hostId?: string; path: string; newName: string }) =>
-            nexus().renameRemoteFile(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/deleteFile',
-        async (input: { hostId?: string; path: string }) =>
-            nexus().deleteRemoteFile(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/downloadFile',
-        async (input: { hostId?: string; path: string }) =>
-            nexus().downloadRemoteFile(input),
-        commandAuthority
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/openTerminal',
-        async function (
-            this: { id: string },
-            input: { hostId?: string; cols?: number; rows?: number; cwd?: string } = {}
-        ) {
-            return await nexus().createTerminal(this.id || 'console', input)
-        }
-    )
-
-    ctx.console.addListener(
-        'agent-nexus/closeTerminal',
-        async (sessionId: string, terminalId: string) => {
-            await nexus().closeTerminal(sessionId, terminalId)
-            return { success: true }
-        }
-    )
-
 }
 
 declare module '@koishijs/plugin-console' {
     interface Events {
-        'agent-nexus/getConfig'(): Promise<import('../types').NexusConfig>
-        'agent-nexus/getStatus'(): Promise<import('../types').NexusStatus>
         'agent-nexus/getConsoleData'(): Promise<import('../types').NexusConsoleData>
-        'agent-nexus/saveConfig'(cfg: import('../types').NexusConfig): Promise<{ success: boolean }>
-        'agent-nexus/saveHost'(
-            input: Partial<import('../types').SshHostConfig> & { setAsDefault?: boolean }
-        ): Promise<{
-            success: boolean
-            hostId: string
-            data: import('../types').NexusConsoleData
-        }>
-        'agent-nexus/removeHost'(hostId: string): Promise<{ success: boolean }>
-        'agent-nexus/testHost'(hostId: string): Promise<{ ok: boolean; output?: string }>
-        'agent-nexus/scanAgents'(hostId?: string): Promise<import('../types').NexusStatus>
-        'agent-nexus/maintainAgent'(
-            input: import('../types').AgentMaintenanceInput
-        ): Promise<import('../types').AgentMaintenanceResult>
-        'agent-nexus/deployAgentd'(
-            input: import('../types').AgentdDeploymentInput
-        ): Promise<import('../types').AgentdDeploymentProgress>
-        'agent-nexus/getAgentdDeploymentProgress'(
-            hostId: string
-        ): Promise<import('../types').AgentdDeploymentProgress | null>
-        'agent-nexus/saveA2ARemote'(
-            input: Partial<import('../types').A2ARemoteConfig> & {
-                clearAuthToken?: boolean
-                clearPreferredTransport?: boolean
-            }
-        ): Promise<{
-            remoteId: string
-            data: import('../types').NexusConsoleData
-        }>
-        'agent-nexus/removeA2ARemote'(
-            id: string
-        ): Promise<import('../types').NexusConsoleData>
-        'agent-nexus/discoverA2ARemote'(
-            id: string
-        ): Promise<import('../types').A2ARemoteStatus>
-        'agent-nexus/sendA2AMessage'(input: {
-            remoteId: string
-            text: string
-            taskId?: string
-            contextId?: string
-            returnImmediately?: boolean
-            metadata?: Record<string, unknown>
-        }): Promise<import('../types').A2ATaskView>
-        'agent-nexus/getA2ATask'(
-            remoteId: string,
-            taskId: string
-        ): Promise<import('../types').A2ATaskView>
-        'agent-nexus/cancelA2ATask'(
-            remoteId: string,
-            taskId: string
-        ): Promise<import('../types').A2ATaskView>
-        'agent-nexus/saveGatewayRemote'(
-            input: Partial<import('../types').GatewayRemoteConfig> & {
-                clearAuthToken?: boolean
-            }
-        ): Promise<{
-            remoteId: string
-            data: import('../types').NexusConsoleData
-        }>
-        'agent-nexus/removeGatewayRemote'(
-            id: string
-        ): Promise<import('../types').NexusConsoleData>
-        'agent-nexus/discoverGatewayRemote'(
-            id: string
-        ): Promise<import('../types').GatewayRemoteStatus>
-        'agent-nexus/refreshRemoteStatuses'(): Promise<import('../types').NexusStatus>
+        'agent-nexus/refreshGateway'(): Promise<import('../types').NexusStatus>
         'agent-nexus/saveDelegationAgent'(
             input: Partial<import('../types').DelegationAgentConfig>
         ): Promise<{
@@ -360,61 +47,7 @@ declare module '@koishijs/plugin-console' {
             data: import('../types').NexusConsoleData
         }>
         'agent-nexus/removeDelegationAgent'(
-            id: string
+            agentId: string
         ): Promise<import('../types').NexusConsoleData>
-        'agent-nexus/syncSkill'(input: {
-            repoUrl: string
-            name?: string
-            branch?: string
-            subdir?: string
-            hostId?: string
-        }): Promise<{ success: boolean; skill?: import('../types').SkillInfo }>
-        'agent-nexus/listSkills'(hostId?: string): Promise<import('../types').SkillInfo[]>
-        'agent-nexus/listFiles'(input?: {
-            hostId?: string
-            path?: string
-        }): Promise<import('../types').RemoteFileListing>
-        'agent-nexus/previewFile'(input: {
-            hostId?: string
-            path: string
-        }): Promise<import('../types').RemoteFilePreview>
-        'agent-nexus/uploadFile'(input: {
-            hostId?: string
-            path: string
-            contentBase64: string
-        }): Promise<{ success: boolean; path: string }>
-        'agent-nexus/saveTextFile'(input: {
-            hostId?: string
-            path: string
-            content: string
-        }): Promise<{ success: boolean; path: string }>
-        'agent-nexus/createDirectory'(input: {
-            hostId?: string
-            parent: string
-            name: string
-        }): Promise<{ success: boolean; path: string }>
-        'agent-nexus/renameFile'(input: {
-            hostId?: string
-            path: string
-            newName: string
-        }): Promise<{ success: boolean; path: string }>
-        'agent-nexus/deleteFile'(input: {
-            hostId?: string
-            path: string
-        }): Promise<{ success: boolean }>
-        'agent-nexus/downloadFile'(input: {
-            hostId?: string
-            path: string
-        }): Promise<import('../types').RemoteFileDownload>
-        'agent-nexus/openTerminal'(input?: {
-            hostId?: string
-            cols?: number
-            rows?: number
-            cwd?: string
-        }): Promise<import('../types').TerminalInfo>
-        'agent-nexus/closeTerminal'(
-            sessionId: string,
-            terminalId: string
-        ): Promise<{ success: boolean }>
     }
 }

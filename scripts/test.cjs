@@ -15,7 +15,7 @@ try {
         platform: 'node',
         target: 'node20',
         format: 'cjs',
-        external: ['ssh2', '@a2a-js/sdk', '@a2a-js/sdk/*'],
+        external: ['koishi'],
         outfile
     })
     const result = spawnSync(process.execPath, ['--test', outfile], {

@@ -2,67 +2,85 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
-import { NexusGatewayClient } from '../src/gateway/client.ts'
+import {
+    NexusGatewayClient,
+    SESSION_START_TIMEOUT_MS
+} from '../src/gateway/client.ts'
 import { NexusGatewayProvider } from '../src/providers/gateway.ts'
+import { PRIMARY_GATEWAY_ID } from '../src/types.ts'
 import type { DelegationJob } from '../src/delegation/index.ts'
 
-test('gateway client authenticates, discovers agents, and sends session messages', async () => {
-    const requests: Array<{ path: string; auth?: string; body: string }> = []
+test('allows Gateway session startup to take up to 180 seconds', () => {
+    assert.equal(SESSION_START_TIMEOUT_MS, 180_000)
+})
+
+test('authenticates inventory and the complete session lifecycle', async () => {
+    const requests: Array<{ method: string; path: string; auth?: string; body: string }> = []
     const server = http.createServer(async (request, response) => {
         let body = ''
         for await (const chunk of request) body += String(chunk)
         requests.push({
+            method: request.method || 'GET',
             path: request.url || '',
             auth: request.headers.authorization,
             body
         })
         response.setHeader('Content-Type', 'application/json')
         if (request.url === '/v1/agents') {
-            response.end(JSON.stringify({
-                agents: [{ id: 'opencode', name: 'OpenCode', protocol: 'acp', ready: true }]
-            }))
+            response.end(
+                JSON.stringify({
+                    agents: [
+                        {
+                            id: 'hermes',
+                            name: 'Hermes',
+                            protocol: 'acp',
+                            driver: 'hermes',
+                            ready: true
+                        }
+                    ]
+                })
+            )
         } else if (request.url === '/v1/sessions') {
             response.end(JSON.stringify(session('created')))
         } else if (request.url === '/v1/sessions/session-1/message') {
             response.end(JSON.stringify(session('running')))
+        } else if (request.url === '/v1/sessions/session-1/cancel') {
+            response.end(JSON.stringify(session('canceled')))
+        } else if (request.url === '/v1/sessions/session-1') {
+            response.end(JSON.stringify(session('completed')))
         } else {
             response.statusCode = 404
             response.end(JSON.stringify({ error: 'missing' }))
         }
     })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
-    const remote = {
-        id: 'gateway-1',
-        name: 'gateway',
-        baseUrl: `http://127.0.0.1:${port}`,
-        authToken: 'TOKEN',
-        enabled: true
-    }
+    await listen(server)
+    const remote = gatewayRemote(server)
     const client = new NexusGatewayClient()
     try {
         const agents = await client.listAgents(remote)
-        assert.equal(agents.agents[0].id, 'opencode')
+        assert.deepEqual(
+            agents.agents.map((agent) => [agent.id, agent.protocol, agent.driver]),
+            [['hermes', 'acp', 'hermes']]
+        )
         const created = await client.createSession(remote, {
-            agentId: 'opencode',
+            agentId: 'hermes',
             workspace: '/workspace'
         })
-        const running = await client.sendMessage(remote, created.id, 'Do the work')
-        assert.equal(running.state, 'running')
+        assert.equal((await client.sendMessage(remote, created.id, 'work')).state, 'running')
+        assert.equal((await client.getSession(remote, created.id)).state, 'completed')
+        assert.equal((await client.cancelSession(remote, created.id)).state, 'canceled')
         assert.ok(requests.every((request) => request.auth === 'Bearer TOKEN'))
         assert.deepEqual(JSON.parse(requests[1].body), {
-            agentId: 'opencode',
+            agentId: 'hermes',
             workspace: '/workspace'
         })
-        assert.deepEqual(JSON.parse(requests[2].body), { message: 'Do the work' })
+        assert.deepEqual(JSON.parse(requests[2].body), { message: 'work' })
     } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve()))
-        )
+        await close(server)
     }
 })
 
-test('gateway SSE supports replay cursors and parses streamed events', async () => {
+test('parses replayable SSE events including artifacts', async () => {
     let requestUrl = ''
     let lastEventId = ''
     const server = http.createServer((request, response) => {
@@ -70,25 +88,18 @@ test('gateway SSE supports replay cursors and parses streamed events', async () 
         lastEventId = String(request.headers['last-event-id'] || '')
         response.writeHead(200, { 'Content-Type': 'text/event-stream' })
         response.write(
-            'id: 11\r\nevent: assistant_chunk\r\ndata: {"id":"11","sessionId":"session-1","type":"assistant_chunk","timestamp":1,"data":{"text":"hello"}}\r\n\r\n'
+            'id: 11\r\ndata: {"id":"11","sessionId":"session-1","type":"artifact","timestamp":1,"data":{"name":"result.png"}}\r\n\r\n'
         )
         response.end(
-            'id: 12\nevent: completed\ndata: {"id":"12","sessionId":"session-1","type":"completed","timestamp":2}\n\n'
+            'id: 12\ndata: {"id":"12","sessionId":"session-1","type":"completed","timestamp":2}\n\n'
         )
     })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as AddressInfo).port
+    await listen(server)
     const client = new NexusGatewayClient()
     try {
         const events = []
         for await (const event of client.events(
-            {
-                id: 'gateway-1',
-                name: 'gateway',
-                baseUrl: `http://127.0.0.1:${port}`,
-                authToken: 'TOKEN',
-                enabled: true
-            },
+            gatewayRemote(server),
             'session-1',
             '10'
         )) {
@@ -96,120 +107,206 @@ test('gateway SSE supports replay cursors and parses streamed events', async () 
         }
         assert.equal(requestUrl, '/v1/sessions/session-1/events?after=10')
         assert.equal(lastEventId, '10')
-        assert.deepEqual(events.map((event) => event.id), ['11', '12'])
-        assert.deepEqual(events.map((event) => event.type), [
-            'assistant_chunk',
-            'completed'
-        ])
+        assert.deepEqual(events.map((event) => event.type), ['artifact', 'completed'])
     } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve()))
-        )
+        await close(server)
     }
 })
 
-test('gateway provider exposes permission requests and keeps ACP route metadata', async () => {
+test('publishes ACP and A2A inventory as tools and applies per-Agent overrides', async () => {
     const config = {
-        gateway: {
-            remotes: [
-                {
-                    id: 'gateway-1',
-                    name: 'dev-server',
-                    baseUrl: 'http://127.0.0.1:8787',
-                    enabled: true
-                }
-            ]
-        },
         delegation: {
             agents: [
                 {
-                    id: 'logical-opencode',
-                    name: 'OpenCode',
+                    agentId: 'hermes',
+                    name: 'Hermes 中文助手',
                     enabled: true,
-                    provider: 'gateway',
-                    remoteId: 'gateway-1',
-                    agentId: 'opencode',
+                    workspace: '/custom'
+                },
+                {
+                    agentId: 'disabled',
+                    name: '停用项',
+                    enabled: false
+                }
+            ]
+        }
+    }
+    const remote = fixedRemote()
+    const client = {
+        async listAgents() {
+            return {
+                agents: [
+                    {
+                        id: 'hermes',
+                        name: 'Hermes',
+                        protocol: 'acp',
+                        driver: 'hermes',
+                        ready: true,
+                        enabled: true,
+                        workspace: '/default',
+                        responseMs: 18
+                    },
+                    {
+                        id: 'research',
+                        name: 'Research A2A',
+                        protocol: 'a2a',
+                        ready: true,
+                        enabled: true
+                    }
+                ]
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => config,
+        remote,
+        client
+    })
+
+    await provider.discoverRemote()
+    const agents = provider.listAgents()
+    assert.deepEqual(agents.map((agent) => agent.id), [
+        'disabled',
+        'hermes',
+        'research'
+    ])
+    assert.equal(agents.find((agent) => agent.id === 'hermes')?.name, 'Hermes 中文助手')
+    assert.equal(agents.find((agent) => agent.id === 'hermes')?.workspace, '/custom')
+    assert.equal(agents.find((agent) => agent.id === 'hermes')?.protocol, 'acp')
+    assert.equal(agents.find((agent) => agent.id === 'research')?.protocol, 'a2a')
+    assert.equal(agents.find((agent) => agent.id === 'disabled')?.enabled, false)
+})
+
+test('maps protocol session ids, permission input, and binary artifacts', async () => {
+    const config = {
+        delegation: {
+            agents: [
+                {
+                    agentId: 'hermes',
+                    name: 'Hermes',
+                    enabled: true,
                     workspace: '/repos/project'
                 }
             ]
         }
-    } as any
+    }
     const client = {
         async createSession() {
-            return gatewaySession('created')
+            return session('created')
         },
         async sendMessage() {
             return {
-                ...gatewaySession('permission_required'),
-                output: 'Preparing edit.',
+                ...session('permission_required'),
+                output: '准备修改。',
+                artifacts: [
+                    {
+                        id: 'image-1',
+                        filename: 'result.png',
+                        mediaType: 'image/png',
+                        bytesBase64: 'aGVsbG8='
+                    }
+                ],
                 pendingRequest: {
                     id: 'permission-1',
                     kind: 'permission',
-                    prompt: 'Allow writing package.json?',
-                    options: [
-                        { id: 'allow', name: 'Allow once', kind: 'allow_once' },
-                        { id: 'deny', name: 'Reject', kind: 'reject_once' }
-                    ]
+                    prompt: '允许修改 package.json 吗？',
+                    options: [{ id: 'allow', name: '允许一次' }]
                 }
             }
         }
     } as any
-    const provider = new NexusGatewayProvider({ getConfig: () => config, client })
-    const agent = provider.listAgents()[0]
-    const result = await provider.run(agent, delegationJob(), {
-        prompt: 'Edit package.json',
+    const provider = new NexusGatewayProvider({
+        getConfig: () => config,
+        remote: fixedRemote(),
+        client
+    })
+    const result = await provider.run(provider.listAgents()[0], delegationJob(), {
+        prompt: '修改项目',
         background: true,
         newTask: false,
         sameTask: false
     })
     assert.equal(result.state, 'permission_required')
-    assert.match(result.text || '', /Allow writing package\.json/)
-    assert.match(result.text || '', /1\. Allow once \(allow\)/)
-    assert.equal(result.providerState.gatewaySessionId, 'session-1')
+    assert.match(result.text || '', /允许一次/)
+    assert.equal(result.providerState.protocol, 'acp')
+    assert.equal(result.providerState.protocolSessionId, 'acp-1')
     assert.equal(result.providerState.acpSessionId, 'acp-1')
-    assert.equal(result.providerState.agentId, 'opencode')
-    assert.equal(result.providerState.workspace, '/repos/project')
+    assert.equal(result.artifacts[0].bytesBase64, 'aGVsbG8=')
 })
 
-function session(state: 'created' | 'running') {
+test('keeps the previous inventory after a transient discovery failure', async () => {
+    let fail = false
+    const client = {
+        async listAgents() {
+            if (fail) throw new Error('temporary network failure')
+            return {
+                agents: [
+                    {
+                        id: 'hermes',
+                        name: 'Hermes',
+                        protocol: 'acp',
+                        ready: true,
+                        enabled: true
+                    }
+                ]
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => ({ delegation: { agents: [] } }),
+        remote: fixedRemote(),
+        client
+    })
+    await provider.discoverRemote()
+    fail = true
+    const status = await provider.discoverRemote()
+    assert.equal(status.state, 'error')
+    assert.equal(status.agents.length, 1)
+    assert.match(status.error || '', /temporary network failure/)
+})
+
+function fixedRemote() {
     return {
-        id: 'session-1',
-        acpSessionId: 'acp-1',
-        agentId: 'opencode',
-        workspace: '/workspace',
-        state,
-        artifacts: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now()
+        id: PRIMARY_GATEWAY_ID,
+        name: 'Nexus Gateway',
+        baseUrl: 'http://127.0.0.1:8787',
+        authToken: 'TOKEN',
+        enabled: true
     }
 }
 
-function gatewaySession(
-    state: 'created' | 'permission_required'
-) {
+function gatewayRemote(server: http.Server) {
+    return {
+        ...fixedRemote(),
+        baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    }
+}
+
+function session(state: string) {
     return {
         id: 'session-1',
+        protocol: 'acp',
+        protocolSessionId: 'acp-1',
         acpSessionId: 'acp-1',
-        agentId: 'opencode',
-        workspace: '/repos/project',
+        agentId: 'hermes',
+        workspace: '/workspace',
         state,
         artifacts: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now()
+        createdAt: 1,
+        updatedAt: 1
     }
 }
 
 function delegationJob(): DelegationJob {
-    const now = Date.now()
     return {
         schemaVersion: 2,
         id: 'job-1',
         provider: 'gateway',
-        agentId: 'logical-opencode',
-        agentName: 'OpenCode',
-        remoteId: 'gateway-1',
-        remoteName: 'dev-server',
-        providerAgentId: 'opencode',
+        agentId: 'hermes',
+        agentName: 'Hermes',
+        remoteId: PRIMARY_GATEWAY_ID,
+        remoteName: 'Nexus Gateway',
+        providerAgentId: 'hermes',
         parentConversationId: 'conversation-1',
         source: 'chatluna',
         routing: {
@@ -220,12 +317,22 @@ function delegationJob(): DelegationJob {
         },
         state: 'running',
         background: true,
-        prompt: 'Edit package.json',
+        prompt: 'work',
         providerState: {},
         artifacts: [],
-        createdAt: now,
-        updatedAt: now,
-        startedAt: now,
-        expiresAt: now + 60_000
+        createdAt: 1,
+        updatedAt: 1,
+        startedAt: 1,
+        expiresAt: Date.now() + 60_000
     }
+}
+
+function listen(server: http.Server) {
+    return new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+}
+
+function close(server: http.Server) {
+    return new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+    )
 }

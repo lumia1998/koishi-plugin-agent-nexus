@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
-  "description": "SSH operations plus A2A and Nexus Gateway/ACP delegation for ChatLuna",
-  "version": "0.1.33",
+  "description": "Nexus Gateway agent delegation for ChatLuna",
+  "version": "0.2.1",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -23,26 +23,17 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "workspaces": [
-    "packages/nexus-agentd"
-  ],
   "scripts": {
-    "build": "npm run build:plugin && npm run build:agentd",
-    "build:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
-    "build:agentd": "npm --prefix packages/nexus-agentd run build",
+    "build": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
     "build:client": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build-client.cjs'))\"",
-    "typecheck": "npm run typecheck:plugin && npm run typecheck:agentd",
-    "typecheck:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
-    "typecheck:agentd": "npm --prefix packages/nexus-agentd run typecheck",
-    "test": "npm run test:plugin && npm run test:agentd",
-    "test:plugin": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
-    "test:agentd": "npm --prefix packages/nexus-agentd test",
+    "typecheck": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
+    "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
     "prepack": "npm run build"
   },
   "koishi": {
     "description": {
-      "zh": "通过 SSH 管理 Agent，并以 A2A 或 Nexus Gateway + ACP 委托外部 Agent",
-      "en": "SSH operations with A2A and Nexus Gateway/ACP agent delegation"
+      "zh": "通过独立 Gateway 自动发现 Agent，并为 ChatLuna 注册统一调用工具",
+      "en": "Discover agents through an independent Gateway and expose unified ChatLuna tools"
     },
     "service": {
       "required": [
@@ -50,8 +41,7 @@
         "chatluna_storage"
       ],
       "optional": [
-        "console",
-        "server"
+        "console"
       ]
     }
   },
@@ -60,14 +50,7 @@
     "koishi",
     "plugin",
     "chatluna",
-    "ssh",
     "agent",
-    "hermes",
-    "openclaw",
-    "claude",
-    "opencode",
-    "codex",
-    "pi",
     "a2a",
     "acp",
     "gateway"
@@ -77,20 +60,12 @@
     "koishi-plugin-chatluna": "*",
     "koishi-plugin-chatluna-storage-service": "^1.0.6"
   },
-  "dependencies": {
-    "@a2a-js/sdk": "^1.0.1",
-    "ssh2": "^1.16.0"
-  },
   "devDependencies": {
     "@element-plus/icons-vue": "^2.3.1",
     "@koishijs/client": "^5.29.0",
     "@koishijs/plugin-console": "^5.29.0",
     "@langchain/core": "^0.3.40",
     "@types/node": "^20.14.0",
-    "@types/ssh2": "^1.15.0",
-    "@vue/shared": "^3.5.39",
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
     "element-plus": "^2.14.3",
     "esbuild": "^0.25.0",
     "koishi": "^4.17.0",
@@ -99,7 +74,6 @@
     "zod": "^3.23.0"
   },
   "allowScripts": {
-    "ssh2": true,
     "esbuild": true,
     "vue-demi": true,
     "@parcel/watcher": true

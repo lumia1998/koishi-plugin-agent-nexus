@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto'
 import { DelegationProviderRegistry } from './provider'
 import { DelegationStore } from './store'
+import {
+    buildDelegationToolNames,
+    delegationToolNameForAgent,
+    delegationToolNameForJob
+} from './tool-name'
 import type {
     DelegateToolInput,
     DelegationArtifact,
@@ -16,6 +21,10 @@ export interface DelegationManagerOptions {
     activeTtlMs?: number
     retentionMs?: number
     now?: () => number
+    prepareArtifacts?: (
+        artifacts: DelegationArtifact[],
+        job: DelegationJob
+    ) => Promise<DelegationArtifact[]>
 }
 
 interface ActiveMonitor {
@@ -34,7 +43,9 @@ export class DelegationManager {
     private readonly activeTtlMs: number
     private readonly retentionMs: number
     private readonly now: () => number
+    private readonly prepareArtifacts?: DelegationManagerOptions['prepareArtifacts']
     private monitors = new Map<string, ActiveMonitor>()
+    private jobLocks = new Map<string, Promise<void>>()
     private stopped = true
 
     constructor(
@@ -47,6 +58,7 @@ export class DelegationManager {
         this.activeTtlMs = Math.max(60_000, options.activeTtlMs ?? DEFAULT_ACTIVE_TTL)
         this.retentionMs = Math.max(60_000, options.retentionMs ?? DEFAULT_RETENTION)
         this.now = options.now ?? Date.now
+        this.prepareArtifacts = options.prepareArtifacts
     }
 
     async start() {
@@ -69,26 +81,26 @@ export class DelegationManager {
 
     async handle(
         input: DelegateToolInput,
-        context: DelegationContext,
+        context?: DelegationContext,
         signal?: AbortSignal
     ) {
         const action = input.action ?? 'run'
         if (action === 'agents') return this.formatAgents()
         if (action === 'list') return this.formatList(context)
-        if (action === 'status') return this.status(input.id, context)
-        if (action === 'stop') return this.stopJob(input.id, context)
+        if (action === 'status') return this.status(input.id, context, input.remote)
+        if (action === 'stop') return this.stopJob(input.id, context, input.remote)
         if (action === 'message') return this.messageJob(input, context, signal)
         return this.runJob(input, context, signal)
     }
 
     private async runJob(
         input: DelegateToolInput,
-        context: DelegationContext,
+        context?: DelegationContext,
         signal?: AbortSignal
     ) {
         const prompt = requiredPrompt(input.prompt)
         if (input.id) {
-            const job = await this.ownedJob(input.id, context)
+            const job = await this.ownedJobForAgent(input.id, context, input.remote)
             return this.sendTurn(
                 job,
                 prompt,
@@ -99,17 +111,19 @@ export class DelegationManager {
         }
 
         const agent = await this.resolveAgent(input, context)
-        const jobs = (await this.store.list(context.parentConversationId)).filter(
-            (job) => job.agentId === agent.id
-        )
+        const jobs = context
+            ? (await this.store.list(context.parentConversationId)).filter(
+                  (job) => job.agentId === agent.id
+              )
+            : []
         if (!input.newTask) {
             const waiting = jobs.find((job) => isInteractive(job.state))
             if (waiting) return this.sendTurn(waiting, prompt, input, signal, true)
             const running = jobs.find((job) => job.state === 'running')
-            if (running) return formatRunning(running)
+            if (running) return formatRunning(running, this.toolNameForJob(running))
         }
 
-        const previous = input.newTask
+        const previous = input.newTask || jobs[0]?.state === 'canceled'
             ? undefined
             : jobs.find((job) => canReuseProviderState(job, agent))
         const now = this.now()
@@ -119,14 +133,15 @@ export class DelegationManager {
             provider: agent.provider,
             agentId: agent.id,
             agentName: agent.name,
+            toolName: this.toolNameForAgent(agent),
             remoteId: agent.remoteId,
             remoteName: agent.remoteName,
             providerAgentId: agent.agentId,
-            parentConversationId: context.parentConversationId,
-            source: context.source,
-            routing: structuredClone(context.routing),
+            parentConversationId: context?.parentConversationId,
+            source: context?.source ?? 'chatluna',
+            routing: context ? structuredClone(context.routing) : undefined,
             state: 'running',
-            background: input.background !== false,
+            background: input.background === true,
             prompt: clip(prompt, MAX_STORED_PROMPT_CHARS),
             skill: clean(input.skill),
             providerState: previous
@@ -144,19 +159,23 @@ export class DelegationManager {
 
     private async messageJob(
         input: DelegateToolInput,
-        context: DelegationContext,
+        context?: DelegationContext,
         signal?: AbortSignal
     ) {
         const prompt = requiredPrompt(input.prompt)
         const job = input.id
-            ? await this.ownedJob(input.id, context)
+            ? await this.ownedJobForAgent(input.id, context, input.remote)
             : await this.latestJob(context, [
                   'input_required',
                   'permission_required',
                   'running'
-              ])
+              ], this.agentIdForReference(input.remote))
         if (!job) {
-            throw new Error('No active AgentNexus job is bound to this conversation.')
+            throw new Error(
+                context
+                    ? 'No active AgentNexus job is bound to this conversation.'
+                    : 'AgentNexus job id is required without a conversation context.'
+            )
         }
         return this.sendTurn(job, prompt, input, signal, true)
     }
@@ -165,21 +184,46 @@ export class DelegationManager {
         original: DelegationJob,
         prompt: string,
         input: DelegateToolInput,
-        _signal: AbortSignal | undefined,
+        signal: AbortSignal | undefined,
         sameTask: boolean
     ) {
+        const outcome = await this.withJobLock(original.id, async () => {
+            const current = await this.store.get(original.id)
+            if (!current) {
+                throw new Error(`AgentNexus job no longer exists: ${original.id}`)
+            }
+            return this.sendTurnLocked(current, prompt, input, sameTask)
+        })
+        if (outcome.kind === 'output') return outcome.value
+        let job = await this.waitForForeground(outcome.id, signal)
+        job.notifiedRunId = job.activeRunId
+        await this.store.save(job)
+        return formatJob(job, this.toolNameForJob(job))
+    }
+
+    private async sendTurnLocked(
+        original: DelegationJob,
+        prompt: string,
+        input: DelegateToolInput,
+        sameTask: boolean
+    ): Promise<
+        | { kind: 'output'; value: string }
+        | { kind: 'foreground'; id: string }
+    > {
         if (
             original.state === 'running' &&
-            original.activeRunId &&
-            input.action !== 'message'
+            original.activeRunId
         ) {
-            return formatRunning(original)
+            return {
+                kind: 'output',
+                value: formatRunning(original, this.toolNameForJob(original))
+            }
         }
         const agent = this.agentForJob(original)
         const provider = this.providers.providerFor(agent)
         this.stopMonitor(original.id)
         const now = this.now()
-        const background = input.background !== false
+        const background = input.background === true
         const resetContext = Boolean(input.newTask)
         let job: DelegationJob = {
             ...original,
@@ -211,20 +255,33 @@ export class DelegationManager {
                 sameTask: sameTask && !resetContext,
                 skill: job.skill
             }
-            const result = request.sameTask
+            let result = request.sameTask
                 ? await provider.message(agent, job, request)
                 : await provider.run(agent, job, request)
+            result = await this.prepareResultArtifacts(job, result)
             job = applyResult(job, result, this.now(), this.retentionMs)
             if (job.state === 'running') {
                 await this.store.save(job)
-                this.startMonitor(job.id)
-                return formatRunning(job)
+                if (background) {
+                    this.startMonitor(job.id)
+                    return {
+                        kind: 'output',
+                        value: formatRunning(job, this.toolNameForJob(job))
+                    }
+                }
+                return { kind: 'foreground', id: job.id }
             }
             job.notifiedRunId = job.activeRunId
             await this.store.save(job)
-            return formatJob(job)
+            return {
+                kind: 'output',
+                value: formatJob(job, this.toolNameForJob(job))
+            }
         } catch (error) {
-            if (original.state === 'running' || isInteractive(original.state)) {
+            if (
+                original.activeRunId &&
+                (original.state === 'running' || isInteractive(original.state))
+            ) {
                 const restored: DelegationJob = {
                     ...original,
                     pollError: clip(errorMessage(error), 32 * 1024),
@@ -247,19 +304,36 @@ export class DelegationManager {
         }
     }
 
-    private async status(id: string | undefined, context: DelegationContext) {
-        let job = id ? await this.ownedJob(id, context) : await this.latestJob(context)
-        if (!job) return 'No AgentNexus jobs are bound to this conversation.'
+    private async status(
+        id: string | undefined,
+        context?: DelegationContext,
+        remote?: string
+    ) {
+        let job = id
+            ? await this.ownedJobForAgent(id, context, remote)
+            : await this.latestJob(context, undefined, this.agentIdForReference(remote))
+        if (!job) {
+            return context
+                ? 'No AgentNexus jobs are bound to this conversation.'
+                : 'AgentNexus job id is required without a conversation context.'
+        }
         if (isActive(job.state)) {
             try {
                 const runId = job.activeRunId
                 const agent = this.agentForJob(job)
-                const result = await this.providers
+                let result = await this.providers
                     .providerFor(agent)
                     .status(agent, job)
+                result = await this.prepareResultArtifacts(job, result)
                 const current = await this.store.get(job.id)
-                if (!current || current.activeRunId !== runId) {
-                    return current ? formatJob(current) : 'AgentNexus job no longer exists.'
+                if (
+                    !current ||
+                    !isActive(current.state) ||
+                    current.activeRunId !== runId
+                ) {
+                    return current
+                        ? formatJob(current, this.toolNameForJob(current))
+                        : 'AgentNexus job no longer exists.'
                 }
                 job = applyResult(current, result, this.now(), this.retentionMs)
                 if (job.state !== 'running') {
@@ -273,52 +347,67 @@ export class DelegationManager {
                 await this.store.save(job)
             }
         }
-        return formatJob(job)
+        return formatJob(job, this.toolNameForJob(job))
     }
 
-    private async stopJob(id: string | undefined, context: DelegationContext) {
+    private async stopJob(
+        id: string | undefined,
+        context?: DelegationContext,
+        remote?: string
+    ) {
         let job = id
-            ? await this.ownedJob(id, context)
+            ? await this.ownedJobForAgent(id, context, remote)
             : await this.latestJob(context, [
                   'running',
                   'input_required',
                   'permission_required'
-              ])
-        if (!job) return 'No active AgentNexus job is bound to this conversation.'
-        this.stopMonitor(job.id)
-        if (isActive(job.state)) {
-            try {
-                const agent = this.agentForJob(job)
-                const result = await this.providers
-                    .providerFor(agent)
-                    .cancel(agent, job)
-                job = applyResult(job, result, this.now(), this.retentionMs)
-            } catch (error) {
-                job.error = clip(errorMessage(error), 32 * 1024)
-            }
+              ], this.agentIdForReference(remote))
+        if (!job) {
+            return context
+                ? 'No active AgentNexus job is bound to this conversation.'
+                : 'AgentNexus job id is required without a conversation context.'
         }
-        const now = this.now()
-        job.state = 'canceled'
-        job.remoteState ||= 'CANCELED'
-        job.endedAt = now
-        job.updatedAt = now
-        job.expiresAt = now + this.retentionMs
-        job.notifiedRunId = job.activeRunId
-        await this.store.save(job)
-        return formatJob(job)
+        const jobId = job.id
+        return this.withJobLock(jobId, async () => {
+            job = await this.ownedJobForAgent(jobId, context, remote)
+            this.stopMonitor(job.id)
+            if (isActive(job.state)) {
+                try {
+                    const agent = this.agentForJob(job)
+                    const result = await this.providers
+                        .providerFor(agent)
+                        .cancel(agent, job)
+                    job = applyResult(job, result, this.now(), this.retentionMs)
+                } catch (error) {
+                    job.error = clip(errorMessage(error), 32 * 1024)
+                }
+            }
+            const now = this.now()
+            job.state = 'canceled'
+            job.remoteState ||= 'CANCELED'
+            job.endedAt = now
+            job.updatedAt = now
+            job.expiresAt = now + this.retentionMs
+            job.notifiedRunId = job.activeRunId
+            await this.store.save(job)
+            return formatJob(job, this.toolNameForJob(job))
+        })
     }
 
-    private async formatList(context: DelegationContext) {
+    private async formatList(context?: DelegationContext) {
+        if (!context) {
+            return 'A conversation context is required to list jobs. Use a job id with action=status instead.'
+        }
         const jobs = await this.store.list(context.parentConversationId)
         if (!jobs.length) return 'No AgentNexus jobs are bound to this conversation.'
         return [
             'AgentNexus jobs:',
             ...jobs.slice(0, 20).map(
                 (job) =>
-                    `- ${job.id} [${job.state}] ${job.agentName} via ${providerLabel(job.provider)} (${job.background ? 'background' : 'foreground'})`
+                    `- ${job.id} [${job.state}] ${job.agentName} (${job.background ? 'background' : 'foreground'})\n  Tool: ${this.toolNameForJob(job)}`
             ),
             '',
-            'Use nexus_a2a_delegate action=status id=... or action=stop id=...'
+            'Use the Tool shown for the target Agent with action=status or action=stop.'
         ].join('\n')
     }
 
@@ -326,11 +415,13 @@ export class DelegationManager {
         await this.discoverUnknownAgents()
         const agents = this.providers.listAgents().filter((agent) => agent.enabled)
         if (!agents.length) return 'No enabled delegation agents are configured.'
+        const names = buildDelegationToolNames(agents)
         return agents
             .map((agent) => {
                 const skills = agent.skills || []
                 return [
-                    `${agent.name} (${agent.id}) [${agent.state}] via ${providerLabel(agent.provider)}`,
+                    `${agent.name} (${agent.id}) [${agent.state}]`,
+                    `  tool: ${names.get(agent.id) || delegationToolNameForAgent(agent)}`,
                     agent.description ? `  ${agent.description}` : undefined,
                     agent.provider === 'gateway' && agent.workspace
                         ? `  workspace: ${agent.workspace}`
@@ -345,7 +436,7 @@ export class DelegationManager {
             .join('\n\n')
     }
 
-    private async resolveAgent(input: DelegateToolInput, context: DelegationContext) {
+    private async resolveAgent(input: DelegateToolInput, context?: DelegationContext) {
         if (input.skill) await this.discoverUnknownAgents()
         const agents = this.providers.listAgents().filter((agent) => agent.enabled)
         if (input.remote) {
@@ -354,9 +445,11 @@ export class DelegationManager {
             return agent
         }
 
-        const previous = (await this.store.list(context.parentConversationId)).find(
-            (job) => agents.some((agent) => agent.id === job.agentId)
-        )
+        const previous = context
+            ? (await this.store.list(context.parentConversationId)).find((job) =>
+                  agents.some((agent) => agent.id === job.agentId)
+              )
+            : undefined
         if (previous) {
             const agent = agents.find((item) => item.id === previous.agentId)
             if (agent && (!input.skill || agentMatchesSkill(agent, input.skill))) {
@@ -385,12 +478,36 @@ export class DelegationManager {
     }
 
     private async latestJob(
-        context: DelegationContext,
-        states?: DelegationState[]
+        context: DelegationContext | undefined,
+        states?: DelegationState[],
+        agentId?: string
     ) {
+        if (!context) return undefined
         return (await this.store.list(context.parentConversationId)).find(
-            (job) => !states || states.includes(job.state)
+            (job) =>
+                (!states || states.includes(job.state)) &&
+                (!agentId || job.agentId === agentId)
         )
+    }
+
+    private toolNameForAgent(agent: RemoteAgentInfo) {
+        return (
+            buildDelegationToolNames(
+                this.providers.listAgents().filter((item) => item.enabled)
+            ).get(agent.id) ||
+            delegationToolNameForAgent(agent)
+        )
+    }
+
+    private toolNameForJob(job: DelegationJob) {
+        if (job.toolName) return job.toolName
+        const agent = this.providers.findAgent(job.agentId)
+        return agent ? this.toolNameForAgent(agent) : delegationToolNameForJob(job)
+    }
+
+    private agentIdForReference(reference: string | undefined) {
+        if (!reference) return undefined
+        return this.providers.resolveAgent(reference).id
     }
 
     private async discoverUnknownAgents() {
@@ -408,10 +525,26 @@ export class DelegationManager {
         )
     }
 
-    private async ownedJob(id: string, context: DelegationContext) {
+    private async ownedJob(id: string, context?: DelegationContext) {
         const job = await this.store.get(id)
-        if (!job || job.parentConversationId !== context.parentConversationId) {
+        if (
+            !job ||
+            (context && job.parentConversationId !== context.parentConversationId)
+        ) {
             throw new Error(`AgentNexus job is not available in this conversation: ${id}`)
+        }
+        return job
+    }
+
+    private async ownedJobForAgent(
+        id: string,
+        context: DelegationContext | undefined,
+        reference?: string
+    ) {
+        const job = await this.ownedJob(id, context)
+        const agentId = this.agentIdForReference(reference)
+        if (agentId && job.agentId !== agentId) {
+            throw new Error(`AgentNexus job ${id} belongs to another Agent.`)
         }
         return job
     }
@@ -439,6 +572,99 @@ export class DelegationManager {
         )
     }
 
+    private async waitForForeground(id: string, signal?: AbortSignal) {
+        await delay(this.pollIntervalMs, signal)
+        while (!this.stopped) {
+            const job = await this.store.get(id)
+            if (!job) throw new Error(`AgentNexus job no longer exists: ${id}`)
+            if (job.state !== 'running') return job
+            if (signal?.aborted) {
+                const background = Boolean(
+                    job.parentConversationId && job.routing
+                )
+                await this.store.save({
+                    ...job,
+                    background,
+                    updatedAt: this.now()
+                })
+                this.startMonitor(id)
+                throw new Error(
+                    background
+                        ? `Waiting for AgentNexus job ${id} was canceled; the remote task continues in the background and its result will be delivered to this conversation.`
+                        : `Waiting for AgentNexus job ${id} was canceled; the remote task is still running and can be checked with action=status.`
+                )
+            }
+            if (job.expiresAt <= this.now()) {
+                const endedAt = this.now()
+                const expired: DelegationJob = {
+                    ...job,
+                    state: 'failed',
+                    error: 'Delegation foreground wait expired.',
+                    endedAt,
+                    updatedAt: endedAt,
+                    expiresAt: endedAt + this.retentionMs
+                }
+                await this.store.save(expired)
+                return expired
+            }
+            try {
+                const runId = job.activeRunId
+                const agent = this.agentForJob(job)
+                let result = await this.providers
+                    .providerFor(agent)
+                    .status(agent, job)
+                result = await this.prepareResultArtifacts(job, result)
+                const current = await this.store.get(id)
+                if (!current) {
+                    throw new Error(`AgentNexus job no longer exists: ${id}`)
+                }
+                if (
+                    current.state !== 'running' ||
+                    current.activeRunId !== runId
+                ) {
+                    return current
+                }
+                const updated = applyResult(
+                    current,
+                    result,
+                    this.now(),
+                    this.retentionMs
+                )
+                updated.pollError = undefined
+                await this.store.save(updated)
+                if (updated.state !== 'running') return updated
+            } catch (error) {
+                const current = await this.store.get(id)
+                if (!current || current.state !== 'running') {
+                    if (current) return current
+                    throw error
+                }
+                current.pollError = clip(errorMessage(error), 32 * 1024)
+                current.updatedAt = this.now()
+                await this.store.save(current)
+            }
+            await delay(this.pollIntervalMs, signal)
+        }
+        throw new Error(`AgentNexus stopped while waiting for job ${id}.`)
+    }
+
+    private async withJobLock<T>(id: string, operation: () => Promise<T>) {
+        const previous = this.jobLocks.get(id) || Promise.resolve()
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => {
+            release = resolve
+        })
+        const tail = previous.then(() => gate)
+        this.jobLocks.set(id, tail)
+        await previous
+        try {
+            return await operation()
+        } finally {
+            release()
+            if (this.jobLocks.get(id) === tail) this.jobLocks.delete(id)
+        }
+    }
+
     private startMonitor(id: string) {
         if (this.stopped || this.monitors.has(id)) return
         const controller = new AbortController()
@@ -451,13 +677,17 @@ export class DelegationManager {
     }
 
     private stopMonitor(id: string) {
-        this.monitors.get(id)?.controller.abort()
+        const monitor = this.monitors.get(id)
+        if (!monitor) return
+        this.monitors.delete(id)
+        monitor.controller.abort()
     }
 
     private async monitor(id: string, signal: AbortSignal) {
         await delay(this.pollIntervalMs, signal)
         while (!this.stopped && !signal.aborted) {
             const job = await this.store.get(id)
+            if (signal.aborted) return
             if (!job || job.state !== 'running') return
             if (job.expiresAt <= this.now()) {
                 job.state = 'failed'
@@ -472,9 +702,12 @@ export class DelegationManager {
             try {
                 const runId = job.activeRunId
                 const agent = this.agentForJob(job)
-                const result = await this.providers
+                let result = await this.providers
                     .providerFor(agent)
                     .status(agent, job)
+                if (signal.aborted) return
+                result = await this.prepareResultArtifacts(job, result)
+                if (signal.aborted) return
                 const current = await this.store.get(id)
                 if (
                     !current ||
@@ -496,6 +729,7 @@ export class DelegationManager {
                     return
                 }
             } catch (error) {
+                if (signal.aborted) return
                 const current = await this.store.get(id)
                 if (
                     !current ||
@@ -537,6 +771,17 @@ export class DelegationManager {
         job.updatedAt = this.now()
         await this.store.save(job)
     }
+
+    private async prepareResultArtifacts(
+        job: DelegationJob,
+        result: DelegationProviderResult
+    ) {
+        if (!this.prepareArtifacts || !result.artifacts?.length) return result
+        return {
+            ...result,
+            artifacts: await this.prepareArtifacts(result.artifacts, job)
+        }
+    }
 }
 
 function applyResult(
@@ -567,6 +812,8 @@ function applyResult(
 function shouldNotify(job: DelegationJob) {
     return Boolean(
         job.background &&
+            job.parentConversationId &&
+            job.routing &&
             job.activeRunId &&
             job.activeRunId !== job.notifiedRunId &&
             job.state !== 'running' &&
@@ -585,6 +832,7 @@ function agentMatchesSkill(agent: RemoteAgentInfo, value: string) {
 }
 
 function canReuseProviderState(job: DelegationJob, agent: RemoteAgentInfo) {
+    if (job.state === 'canceled') return false
     if (job.provider !== agent.provider || job.remoteId !== agent.remoteId) {
         return false
     }
@@ -598,29 +846,37 @@ function canReuseProviderState(job: DelegationJob, agent: RemoteAgentInfo) {
     return true
 }
 
-function formatRunning(job: DelegationJob) {
+function formatRunning(
+    job: DelegationJob,
+    toolName = delegationToolNameForJob(job)
+) {
     const lines = [
         `AgentNexus job: ${job.id}`,
         `Agent: ${job.agentName}`,
-        `Connection: ${providerLabel(job.provider)}`,
+        `Tool: ${toolName}`,
         `State: running (${job.background ? 'background' : 'foreground'})`
     ]
     if (job.background) {
         lines.push(
-            'The result will be delivered back to this ChatLuna conversation automatically. Do not poll; continue other work or finish the reply.'
+            job.parentConversationId && job.routing
+                ? 'The result will be delivered back to this ChatLuna conversation automatically. Do not poll; continue other work or finish the reply.'
+                : `No conversation delivery context is available. Check this task later with ${toolName} action=status id=${job.id}.`
         )
     }
     lines.push(
-        `Use nexus_a2a_delegate action=message id=${job.id} to send guidance, or action=stop id=${job.id} to cancel.`
+        `Use ${toolName} action=message id=${job.id} to send guidance, or action=stop id=${job.id} to cancel.`
     )
     return lines.join('\n')
 }
 
-export function formatJob(job: DelegationJob) {
+export function formatJob(
+    job: DelegationJob,
+    toolName = delegationToolNameForJob(job)
+) {
     const lines = [
         `AgentNexus job: ${job.id}`,
         `Agent: ${job.agentName}`,
-        `Connection: ${providerLabel(job.provider)}`,
+        `Tool: ${toolName}`,
         `State: ${job.state}`
     ]
     if (job.output?.trim()) lines.push('', job.output.trim())
@@ -632,26 +888,22 @@ export function formatJob(job: DelegationJob) {
             lines.push(
                 artifact.url
                     ? `- ${artifact.name || artifact.filename || 'file'}: ${artifact.url}`
-                    : `- ${artifact.name || 'artifact'}: ${artifact.text || '(no preview)'}`
+                    : `- ${artifact.name || 'artifact'}: ${artifactPreview(artifact)}`
             )
         }
     }
     if (job.state === 'input_required' || job.state === 'permission_required') {
         lines.push(
             '',
-            `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Call nexus_a2a_delegate action=message id=${job.id} prompt="...".`
+            `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Call ${toolName} action=message id=${job.id} prompt="...".`
         )
     } else if (job.state === 'completed') {
         lines.push(
             '',
-            `Continue the same remote context with nexus_a2a_delegate action=run id=${job.id} prompt="...".`
+            `Continue the same context with ${toolName} action=run id=${job.id} prompt="...".`
         )
     }
     return lines.join('\n')
-}
-
-function providerLabel(provider: DelegationJob['provider']) {
-    return provider === 'a2a' ? 'A2A' : 'Nexus Gateway + ACP'
 }
 
 function requiredPrompt(value: unknown) {
@@ -682,16 +934,82 @@ function clip(value: string | undefined, maxChars: number) {
 }
 
 function storedArtifacts(artifacts: DelegationArtifact[]) {
-    return artifacts.slice(0, MAX_STORED_ARTIFACTS).map((artifact) => ({
-        artifactId: artifact.artifactId,
-        name: clip(artifact.name, 1000),
-        description: clip(artifact.description, 4000),
-        text: clip(artifact.text, MAX_STORED_OUTPUT_CHARS),
-        url: clip(artifact.url, 8192),
-        filename: clip(artifact.filename, 1000),
-        mediaType: clip(artifact.mediaType, 256),
-        metadata: storedMetadata(artifact.metadata)
-    }))
+    return artifacts.slice(0, MAX_STORED_ARTIFACTS).map((artifact) => {
+        const data = storedData(artifact.data)
+        const bytesBase64 =
+            artifact.bytesBase64 &&
+            artifact.bytesBase64.length <= MAX_STORED_OUTPUT_CHARS
+                ? artifact.bytesBase64
+                : undefined
+        const omissions = [
+            artifact.data !== undefined && data === undefined
+                ? '[structured artifact omitted: payload is invalid or exceeds the storage limit]'
+                : undefined,
+            artifact.bytesBase64 && !bytesBase64
+                ? `[binary artifact omitted: ${artifact.bytesBase64.length} base64 characters exceed the storage limit]`
+                : undefined
+        ].filter((value): value is string => Boolean(value))
+        return {
+            artifactId: artifact.artifactId,
+            name: clip(artifact.name, 1000),
+            description: clip(artifact.description, 4000),
+            text: clip(
+                [artifact.text, ...omissions].filter(Boolean).join('\n') || undefined,
+                MAX_STORED_OUTPUT_CHARS
+            ),
+            url: clip(artifact.url, 8192),
+            filename: clip(artifact.filename, 1000),
+            mediaType: clip(artifact.mediaType, 256),
+            data,
+            bytesBase64,
+            metadata: storedMetadata(artifact.metadata)
+        }
+    })
+}
+
+function storedData(value: unknown) {
+    if (value === undefined) return undefined
+    try {
+        const serialized = JSON.stringify(value)
+        return serialized !== undefined &&
+            serialized.length <= MAX_STORED_OUTPUT_CHARS
+            ? (JSON.parse(serialized) as unknown)
+            : undefined
+    } catch {
+        return undefined
+    }
+}
+
+function artifactPreview(artifact: DelegationArtifact) {
+    if (artifact.text) return artifact.text
+    if (artifact.data !== undefined) {
+        try {
+            return JSON.stringify(artifact.data)
+        } catch {}
+    }
+    if (artifact.bytesBase64) {
+        return binaryArtifactSummary(artifact)
+    }
+    return '(no preview)'
+}
+
+function binaryArtifactSummary(artifact: DelegationArtifact) {
+    const bytes = decodedBase64Size(artifact.bytesBase64 || '')
+    const details = [artifact.filename, artifact.mediaType, `${bytes} bytes`]
+        .filter(Boolean)
+        .join(', ')
+    return `[binary artifact${details ? `: ${details}` : ''}]`
+}
+
+function decodedBase64Size(value: string) {
+    const normalized = value.replace(/\s/g, '')
+    if (!normalized) return 0
+    const padding = normalized.endsWith('==')
+        ? 2
+        : normalized.endsWith('=')
+          ? 1
+          : 0
+    return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding)
 }
 
 function storedMetadata(value: Record<string, unknown> | undefined) {

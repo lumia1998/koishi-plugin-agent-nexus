@@ -7,6 +7,28 @@ import type {
 } from './types'
 
 const DEFAULT_TIMEOUT_MS = 30_000
+export const SESSION_START_TIMEOUT_MS = 180_000
+
+export interface GatewayClient {
+    listAgents(remote: GatewayRemoteConfig): Promise<GatewayAgentsResponse>
+    createSession(
+        remote: GatewayRemoteConfig,
+        input: { agentId: string; workspace?: string }
+    ): Promise<GatewaySessionView>
+    getSession(
+        remote: GatewayRemoteConfig,
+        sessionId: string
+    ): Promise<GatewaySessionView>
+    sendMessage(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        message: string
+    ): Promise<GatewaySessionView>
+    cancelSession(
+        remote: GatewayRemoteConfig,
+        sessionId: string
+    ): Promise<GatewaySessionView>
+}
 
 export class NexusGatewayClient {
     constructor(private readonly maxResponseBytes = 32 * 1024 * 1024) {}
@@ -17,12 +39,17 @@ export class NexusGatewayClient {
 
     async createSession(
         remote: GatewayRemoteConfig,
-        input: { agentId: string; workspace: string }
+        input: { agentId: string; workspace?: string }
     ) {
-        return this.request<GatewaySessionView>(remote, '/v1/sessions', {
-            method: 'POST',
-            body: JSON.stringify(input)
-        })
+        return this.request<GatewaySessionView>(
+            remote,
+            '/v1/sessions',
+            {
+                method: 'POST',
+                body: JSON.stringify(input)
+            },
+            SESSION_START_TIMEOUT_MS
+        )
     }
 
     async getSession(remote: GatewayRemoteConfig, sessionId: string) {
@@ -108,18 +135,19 @@ export class NexusGatewayClient {
     private async request<T>(
         remote: GatewayRemoteConfig,
         path: string,
-        init: RequestInit = {}
+        init: RequestInit = {},
+        timeoutMs = DEFAULT_TIMEOUT_MS
     ): Promise<T> {
         const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+        const timer = setTimeout(() => controller.abort(), timeoutMs)
         try {
-            const response = await fetch(gatewayUrl(remote, path), {
-                ...init,
-                headers: this.headers(remote, init.headers),
-                signal: init.signal || controller.signal
-            })
-            if (!response.ok) throw await gatewayHttpError(response)
-            return (await readJsonLimited(response, this.maxResponseBytes)) as T
+            return await requestGatewayJson<T>(
+                remote,
+                path,
+                init,
+                this.maxResponseBytes,
+                controller.signal
+            )
         } finally {
             clearTimeout(timer)
         }
@@ -153,9 +181,34 @@ export function validateGatewayUrl(value: string) {
     return url.toString().replace(/\/+$/, '')
 }
 
-function gatewayUrl(remote: GatewayRemoteConfig, path: string) {
+export function gatewayUrl(remote: GatewayRemoteConfig, path: string) {
     const base = validateGatewayUrl(remote.baseUrl)
     return new URL(path.replace(/^\/+/, ''), `${base}/`).toString()
+}
+
+export async function requestGatewayJson<T>(
+    remote: GatewayRemoteConfig,
+    path: string,
+    init: RequestInit,
+    maxResponseBytes: number,
+    fallbackSignal?: AbortSignal
+): Promise<T> {
+    const response = await fetch(gatewayUrl(remote, path), {
+        ...init,
+        headers: gatewayHeaders(remote, init.headers),
+        signal: init.signal || fallbackSignal
+    })
+    if (!response.ok) throw await gatewayHttpError(response)
+    return (await readJsonLimited(response, maxResponseBytes)) as T
+}
+
+export function gatewayHeaders(remote: GatewayRemoteConfig, input?: any) {
+    const headers = new Headers(input)
+    headers.set('Accept', headers.get('Accept') || 'application/json')
+    headers.set('Content-Type', headers.get('Content-Type') || 'application/json')
+    const token = remote.authToken?.trim() ? resolveSecret(remote.authToken) : ''
+    if (token) headers.set('Authorization', `Bearer ${token}`)
+    return headers
 }
 
 async function readJsonLimited(response: Response, maxBytes: number) {
@@ -190,15 +243,25 @@ async function readJsonLimited(response: Response, maxBytes: number) {
     return text ? JSON.parse(text) : undefined
 }
 
+export class GatewayHttpError extends Error {
+    constructor(
+        readonly status: number,
+        readonly detail: string
+    ) {
+        super(
+            `Nexus Gateway request failed (${status})${detail ? `: ${detail}` : ''}`
+        )
+        this.name = 'GatewayHttpError'
+    }
+}
+
 async function gatewayHttpError(response: Response) {
     let detail = ''
     try {
         const value = (await readJsonLimited(response, 64 * 1024)) as any
-        detail = String(value?.error || value?.message || '')
+        detail = String(value?.error || value?.message || value?.detail || '')
     } catch {}
-    return new Error(
-        `Nexus Gateway request failed (${response.status})${detail ? `: ${detail}` : ''}`
-    )
+    return new GatewayHttpError(response.status, detail)
 }
 
 function eventBoundary(buffer: string) {

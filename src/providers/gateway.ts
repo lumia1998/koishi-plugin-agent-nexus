@@ -1,10 +1,11 @@
 import type {
     DelegationAgentConfig,
+    GatewayAgentSummary,
     GatewayRemoteConfig,
     GatewayRemoteStatus,
     NexusConfig
 } from '../types'
-import { NexusGatewayClient } from '../gateway/client'
+import type { GatewayClient } from '../gateway/client'
 import type { GatewaySessionView } from '../gateway/types'
 import type {
     DelegationJob,
@@ -16,86 +17,112 @@ import type {
 
 export interface NexusGatewayProviderOptions {
     getConfig(): NexusConfig
-    client: NexusGatewayClient
+    remote: GatewayRemoteConfig
+    client: GatewayClient
 }
 
 export class NexusGatewayProvider implements DelegationProvider {
     readonly type = 'gateway' as const
-    private statuses = new Map<string, GatewayRemoteStatus>()
+    private inventoryStatus?: GatewayRemoteStatus
+    private discoveryVersion = 0
+    private discovery?: {
+        version: number
+        promise: Promise<GatewayRemoteStatus>
+    }
 
     constructor(private readonly options: NexusGatewayProviderOptions) {}
 
-    getStatus() {
-        return this.options.getConfig().gateway.remotes.map(
-            (remote) =>
-                this.statuses.get(remote.id) || {
-                    id: remote.id,
-                    name: remote.name,
-                    baseUrl: remote.baseUrl,
-                    enabled: remote.enabled,
-                    state: 'unknown' as const,
-                    agents: []
-                }
+    getStatus(): GatewayRemoteStatus {
+        const remote = this.options.remote
+        return (
+            this.inventoryStatus || {
+                id: remote.id,
+                name: remote.name,
+                baseUrl: remote.baseUrl,
+                enabled: remote.enabled,
+                state: 'unknown',
+                agents: []
+            }
         )
     }
 
-    clearStatus(remoteId?: string) {
-        if (remoteId) this.statuses.delete(remoteId)
-        else this.statuses.clear()
+    clearStatus() {
+        this.discoveryVersion += 1
+        this.discovery = undefined
+        this.inventoryStatus = undefined
     }
 
-    async discoverRemote(remoteId: string) {
-        const remote = this.requireRemote(remoteId, false)
+    async discoverRemote() {
+        const version = this.discoveryVersion
+        if (this.discovery?.version === version) return this.discovery.promise
+        const promise = this.performDiscovery(version)
+        this.discovery = { version, promise }
+        try {
+            return await promise
+        } finally {
+            if (this.discovery?.promise === promise) this.discovery = undefined
+        }
+    }
+
+    private async performDiscovery(version: number) {
+        const remote = this.options.remote
         const checking: GatewayRemoteStatus = {
             id: remote.id,
             name: remote.name,
             baseUrl: remote.baseUrl,
             enabled: remote.enabled,
             state: 'checking',
-            agents: []
+            agents: this.inventoryStatus?.agents || []
         }
-        this.statuses.set(remote.id, checking)
+        this.commitStatus(version, checking)
+        if (!remote.enabled) {
+            const status: GatewayRemoteStatus = {
+                ...checking,
+                state: 'unknown',
+                error: '尚未在 Koishi 插件设置中配置 Gateway API Key。'
+            }
+            this.commitStatus(version, status)
+            return status
+        }
         try {
             const result = await this.options.client.listAgents(remote)
             const status: GatewayRemoteStatus = {
                 ...checking,
                 state: 'ready',
-                agents: (result.agents || []).map((agent) => ({
-                    id: agent.id,
-                    name: agent.name,
-                    description: agent.description,
-                    protocol: 'acp',
-                    ready: agent.ready,
-                    version: agent.version,
-                    error: agent.error
-                })),
+                agents: (result.agents || []).map(mapGatewayAgent),
                 lastCheckedAt: Date.now()
             }
-            this.statuses.set(remote.id, status)
+            this.commitStatus(version, status)
             return status
         } catch (error) {
             const status: GatewayRemoteStatus = {
                 ...checking,
                 state: 'error',
-                agents: [],
                 lastCheckedAt: Date.now(),
                 error: errorMessage(error)
             }
-            this.statuses.set(remote.id, status)
+            this.commitStatus(version, status)
             return status
         }
     }
 
     listAgents(): RemoteAgentInfo[] {
-        const config = this.options.getConfig()
-        const status = new Map(this.getStatus().map((item) => [item.id, item]))
-        return (config.delegation?.agents || [])
-            .filter((agent) => agent.provider === 'gateway')
-            .map((agent) => this.agentInfo(agent, status.get(agent.remoteId)))
+        const overrides = new Map(
+            this.options
+                .getConfig()
+                .delegation.agents.map((agent) => [agent.agentId, agent])
+        )
+        const discovered = new Map(
+            this.getStatus().agents.map((agent) => [agent.id, agent])
+        )
+        const ids = new Set([...discovered.keys(), ...overrides.keys()])
+        return Array.from(ids)
+            .sort((left, right) => left.localeCompare(right))
+            .map((id) => this.agentInfo(id, overrides.get(id), discovered.get(id)))
     }
 
-    async discover(agent: RemoteAgentInfo) {
-        await this.discoverRemote(agent.remoteId)
+    async discover() {
+        await this.discoverRemote()
     }
 
     async run(
@@ -103,19 +130,16 @@ export class NexusGatewayProvider implements DelegationProvider {
         job: DelegationJob,
         request: DelegationRunRequest
     ) {
-        const remote = this.requireRemote(agent.remoteId)
+        const remote = this.requireRemote()
         let sessionId = stateString(job, 'gatewaySessionId')
         let session: GatewaySessionView
         if (!sessionId || request.newTask) {
             if (!agent.agentId) {
                 throw new Error(`Gateway agent id is missing for ${agent.name}`)
             }
-            if (!agent.workspace) {
-                throw new Error(`Workspace is required for ACP agent ${agent.name}`)
-            }
             session = await this.options.client.createSession(remote, {
                 agentId: agent.agentId,
-                workspace: agent.workspace
+                ...(agent.workspace ? { workspace: agent.workspace } : {})
             })
             sessionId = session.id
         }
@@ -135,17 +159,17 @@ export class NexusGatewayProvider implements DelegationProvider {
         return this.run(agent, job, { ...request, sameTask: true })
     }
 
-    async status(agent: RemoteAgentInfo, job: DelegationJob) {
+    async status(_agent: RemoteAgentInfo, job: DelegationJob) {
         const sessionId = stateString(job, 'gatewaySessionId')
         if (!sessionId) throw new Error('Nexus Gateway did not return a session id.')
         const session = await this.options.client.getSession(
-            this.requireRemote(agent.remoteId),
+            this.requireRemote(),
             sessionId
         )
         return fromGatewaySession(session, job.providerState)
     }
 
-    async cancel(agent: RemoteAgentInfo, job: DelegationJob) {
+    async cancel(_agent: RemoteAgentInfo, job: DelegationJob) {
         const sessionId = stateString(job, 'gatewaySessionId')
         if (!sessionId) {
             return {
@@ -156,64 +180,87 @@ export class NexusGatewayProvider implements DelegationProvider {
             } satisfies DelegationProviderResult
         }
         const session = await this.options.client.cancelSession(
-            this.requireRemote(agent.remoteId),
+            this.requireRemote(),
             sessionId
         )
         return fromGatewaySession(session, job.providerState)
     }
 
     private agentInfo(
-        route: DelegationAgentConfig,
-        remoteStatus?: GatewayRemoteStatus
+        id: string,
+        override?: DelegationAgentConfig,
+        discovered?: GatewayAgentSummary
     ): RemoteAgentInfo {
-        const remote = this.options
-            .getConfig()
-            .gateway.remotes.find((item) => item.id === route.remoteId)
-        const discovered = remoteStatus?.agents.find(
-            (agent) => agent.id === route.agentId
-        )
-        const configuredSkills = (route.skills || []).map((skill) => ({
+        const remote = this.options.remote
+        const status = this.getStatus()
+        const missing =
+            status.state === 'ready' && !discovered
+                ? `Gateway 没有返回 Agent：${id}`
+                : undefined
+        const unavailable = discovered && !discovered.ready
+        const configuredSkills = (override?.skills || []).map((skill) => ({
             id: skill,
             name: skill,
             description: '',
             tags: []
         }))
-        const missing = !remote
-            ? `Nexus Gateway remote does not exist: ${route.remoteId}`
-            : !route.agentId
-              ? 'Gateway agentId is required'
-              : remoteStatus?.state === 'ready' && !discovered
-                ? `Gateway does not report agent: ${route.agentId}`
-                : undefined
         return {
-            id: route.id,
-            name: route.name,
+            id,
+            name: override?.name || discovered?.name || id,
             provider: 'gateway',
-            remoteId: route.remoteId,
-            remoteName: remote?.name || route.remoteId,
-            agentId: route.agentId,
-            workspace: route.workspace,
-            aliases: [route.agentId || ''].filter(Boolean),
-            enabled: route.enabled && Boolean(remote?.enabled) && !missing,
+            remoteId: remote.id,
+            remoteName: remote.name,
+            agentId: id,
+            protocol: discovered?.protocol,
+            workspace: override?.workspace || discovered?.workspace,
+            aliases: [id, discovered?.name || ''].filter(Boolean),
+            enabled:
+                remote.enabled &&
+                (override?.enabled ?? true) &&
+                discovered?.enabled !== false &&
+                discovered?.ready !== false &&
+                !missing,
             state:
-                missing || (discovered && !discovered.ready)
+                missing || unavailable
                     ? 'error'
-                    : remoteStatus?.state || 'unknown',
-            description: route.description || discovered?.description,
+                    : discovered
+                      ? status.state
+                      : status.state === 'error'
+                        ? 'error'
+                        : 'unknown',
+            description: override?.description || discovered?.description,
             skills: configuredSkills,
-            error: missing || discovered?.error || remoteStatus?.error
+            error: missing || discovered?.error || status.error
         }
     }
 
-    private requireRemote(id: string, requireEnabled = true): GatewayRemoteConfig {
-        const remote = this.options
-            .getConfig()
-            .gateway.remotes.find((item) => item.id === id)
-        if (!remote) throw new Error(`Nexus Gateway remote not found: ${id}`)
-        if (requireEnabled && !remote.enabled) {
-            throw new Error(`Nexus Gateway remote is disabled: ${remote.name}`)
+    private requireRemote() {
+        const remote = this.options.remote
+        if (!remote.enabled) {
+            throw new Error('Nexus Gateway API Key 尚未配置。')
         }
         return remote
+    }
+
+    private commitStatus(version: number, status: GatewayRemoteStatus) {
+        if (this.discoveryVersion === version) this.inventoryStatus = status
+    }
+}
+
+function mapGatewayAgent(agent: GatewayAgentSummary): GatewayAgentSummary {
+    return {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        protocol: agent.protocol,
+        driver: agent.driver,
+        ready: agent.ready,
+        enabled: agent.enabled,
+        workspace: agent.workspace,
+        version: agent.version,
+        error: agent.error,
+        checkedAt: agent.checkedAt,
+        responseMs: agent.responseMs
     }
 }
 
@@ -236,15 +283,21 @@ function fromGatewaySession(
             url: artifact.url,
             filename: artifact.filename,
             mediaType: artifact.mediaType,
+            data: artifact.data,
+            bytesBase64: artifact.bytesBase64,
             metadata: artifact.metadata
         })),
         providerState: {
             ...structuredClone(previousState),
             gatewaySessionId: session.id,
+            protocol: session.protocol,
+            ...(session.protocolSessionId
+                ? { protocolSessionId: session.protocolSessionId }
+                : {}),
             ...(session.acpSessionId ? { acpSessionId: session.acpSessionId } : {}),
             ...(session.lastEventId ? { lastEventId: session.lastEventId } : {}),
             agentId: session.agentId,
-            workspace: session.workspace,
+            ...(session.workspace ? { workspace: session.workspace } : {}),
             remoteState: session.state
         }
     }
@@ -267,7 +320,9 @@ function formatPendingRequest(
         .join('\n\n')
 }
 
-function gatewayState(value: GatewaySessionView['state']): DelegationProviderResult['state'] {
+function gatewayState(
+    value: GatewaySessionView['state']
+): DelegationProviderResult['state'] {
     if (value === 'input_required') return 'input_required'
     if (value === 'permission_required') return 'permission_required'
     if (value === 'completed') return 'completed'

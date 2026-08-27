@@ -1,650 +1,379 @@
 <template>
     <div class="nexus-page">
-        <div class="hero">
+        <header class="hero">
             <div class="hero-copy">
+                <span class="eyebrow">CHATLUNA · AGENT NEXUS</span>
                 <div class="title-row">
-                    <div class="title">AgentNexus</div>
-                    <el-tag size="small" effect="plain" :type="overview.connected ? 'success' : 'info'">
-                        {{ overview.connected ? 'SSH 就绪' : '待连接' }}
-                    </el-tag>
+                    <h1>Agent 中枢</h1>
+                    <span class="gateway-pill" :class="status.gateway.state">
+                        <i />{{ gatewayStateLabel }}
+                    </span>
                 </div>
-                <div class="subtitle">
-                    SSH 运维 · A2A / ACP 委托 · Agent 安装 · Skills · 文件与终端
-                </div>
+                <p>
+                    Nexus Gateway 负责接入 ACP 与 A2A Agent；本插件只负责把可用
+                    Agent 发布为 ChatLuna 工具，并维护委派任务上下文。
+                </p>
             </div>
-            <div class="actions">
-                <el-button size="small" :loading="loading" @click="reload(true)">刷新并重扫</el-button>
-            </div>
-        </div>
-
-        <div class="stats">
-            <div class="stat-card">
-                <div class="stat-label">主机</div>
-                <div class="stat-value">{{ overview.hostLabel }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">已连接</div>
-                <div class="stat-value">{{ overview.connectedCount }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">可用 Agent</div>
-                <div class="stat-value">{{ overview.agentCount }}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">SSH 连接</div>
-                <div class="stat-value">{{ status.activeSessions || 0 }}</div>
-            </div>
-        </div>
-
-        <div class="tabs">
-            <button
-                v-for="tab in tabs"
-                :key="tab"
-                class="tab"
-                :class="{ active: active === tab }"
-                type="button"
-                @click="active = tab"
+            <el-button
+                class="refresh-button"
+                :loading="loading"
+                @click="reload(true)"
             >
-                {{ tabLabel[tab] }}
-            </button>
-        </div>
+                重新检查 Gateway
+            </el-button>
+        </header>
 
-        <div class="content" :class="{ terminal: active === 'terminal' }" v-loading="loading">
-            <computer-panel
-                v-if="active === 'computer'"
+        <section class="metrics" aria-label="运行概览">
+            <article>
+                <span>Gateway</span>
+                <strong>{{ status.gateway.state === 'ready' ? '在线' : '离线' }}</strong>
+                <small>{{ status.gateway.baseUrl }}</small>
+            </article>
+            <article>
+                <span>发现 Agent</span>
+                <strong>{{ status.gateway.agents.length }}</strong>
+                <small>由 Gateway 统一提供</small>
+            </article>
+            <article>
+                <span>可用 Agent</span>
+                <strong>{{ readyCount }}</strong>
+                <small>通过健康检查</small>
+            </article>
+            <article>
+                <span>ChatLuna 工具</span>
+                <strong>{{ toolCount }}</strong>
+                <small>已自动注册</small>
+            </article>
+        </section>
+
+        <section v-if="!gatewayKeyConfigured" class="setup-notice">
+            <span class="notice-index">需要配置</span>
+            <div>
+                <strong>请在 Koishi 插件设置中填写 Gateway API Key</strong>
+                <p>
+                    Key 在 Nexus Gateway 的“API 密钥”页面生成；这里需要的是 API
+                    Key，不是 Gateway 控制台登录密码。
+                </p>
+            </div>
+        </section>
+
+        <main class="control-surface" v-loading="loading">
+            <div class="surface-title">
+                <div>
+                    <span>单一连接 · 自动发现</span>
+                    <h2>Gateway Agent 清单</h2>
+                </div>
+                <code>URL + API KEY → AGENTS → TOOLS</code>
+            </div>
+            <gateway-panel
                 :config="config"
                 :status="status"
-                :connecting="connecting"
-                :maintaining="maintaining"
-                :deploying-agentd="deployingAgentd"
-                :agentd-progress="agentdProgress"
-                @connect="connectComputer"
-                @remove="removeComputer"
-                @maintain="maintainAgent"
-                @deploy-agentd="deployAgentd"
-                @open-acp="active = 'a2a'"
-            />
-            <skills-panel
-                v-if="active === 'skills'"
-                :config="config"
-                :status="status"
-                @sync="syncSkill"
-                @refresh="refreshSkills"
-            />
-            <a2a-panel
-                v-show="active === 'a2a'"
-                :config="config"
-                :status="status"
+                :gateway-key-configured="gatewayKeyConfigured"
                 @updated="applyConsoleData"
             />
-            <file-manager-panel
-                v-show="active === 'files'"
-                :config="config"
-                :status="status"
-                :visible="active === 'files'"
-            />
-            <!-- Keep terminal mounted so tabs/WebSocket survive Computer/Skills switches. -->
-            <terminal-panel
-                v-show="active === 'terminal'"
-                :config="config"
-                :status="status"
-                :visible="active === 'terminal'"
-            />
-        </div>
+        </main>
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import ComputerPanel from './components/computer-panel.vue'
-import SkillsPanel from './components/skills-panel.vue'
-import TerminalPanel from './components/terminal-panel.vue'
-import FileManagerPanel from './components/file-manager-panel.vue'
-import A2aPanel from './components/a2a-panel.vue'
-import type {
-    AgentKind,
-    AgentdDeploymentInput,
-    AgentdDeploymentProgress,
-    AgentMaintenanceInput,
-    NexusConfig,
-    NexusConsoleData,
-    NexusStatus,
-    SshAuth
-} from '../src/types'
+import { ElMessage } from 'element-plus'
+import GatewayPanel from './components/gateway-panel.vue'
+import type { NexusConfig, NexusConsoleData, NexusStatus } from '../src/types'
 
-type ComputerConnectInput = {
-    id?: string
-    name: string
-    host: string
-    port: number
-    username: string
-    auth?: SshAuth
-    cwd?: string
-    setAsDefault?: boolean
-}
-
-const tabs = ['computer', 'a2a', 'skills', 'files', 'terminal'] as const
-const tabLabel = {
-    computer: 'Computer',
-    a2a: 'A2A / ACP',
-    skills: 'Skills',
-    files: '文件',
-    terminal: '终端'
-}
-
-const active = ref<(typeof tabs)[number]>('computer')
 const loading = ref(false)
-const connecting = ref(false)
-const maintaining = ref<string[]>([])
-const deployingAgentd = ref<string[]>([])
-const agentdProgress = ref<Record<string, AgentdDeploymentProgress>>({})
-let statusGeneration = 0
-const config = ref<NexusConfig>({
-    hosts: [],
-    agents: {
-        hermes: true,
-        openclaw: true,
-        claude: true,
-        opencode: true,
-        codex: true,
-        pi: true
-    },
-    skills: [],
-    skillRoot: '~/.agent-nexus/skills',
-    a2a: {
-        remotes: []
-    },
-    gateway: {
-        remotes: []
-    },
-    delegation: {
-        agents: []
-    }
-})
+let generation = 0
+const config = ref<NexusConfig>({ delegation: { agents: [] } })
 const status = ref<NexusStatus>({
-    enabled: false,
-    hosts: [],
-    skills: { total: 0, items: [] },
-    activeSessions: 0,
-    a2a: {
-        remotes: []
-    },
     gateway: {
-        remotes: []
-    },
-    delegation: {
+        id: 'primary-gateway',
+        name: 'Nexus Gateway',
+        baseUrl: '',
+        enabled: false,
+        state: 'unknown',
         agents: []
-    }
+    },
+    delegation: { agents: [] }
+})
+const gatewayKeyConfigured = ref(false)
+
+const readyCount = computed(
+    () => status.value.gateway.agents.filter((agent) => agent.ready).length
+)
+const toolCount = computed(
+    () =>
+        status.value.delegation.agents.filter(
+            (agent) => agent.enabled && agent.toolName
+        ).length
+)
+const gatewayStateLabel = computed(() => {
+    if (!gatewayKeyConfigured.value) return '等待 API Key'
+    if (status.value.gateway.state === 'ready') return 'Gateway 在线'
+    if (status.value.gateway.state === 'checking') return '正在检查'
+    if (status.value.gateway.state === 'error') return '连接异常'
+    return '尚未检查'
 })
 
-const overview = computed(() => {
-    const hosts = status.value.hosts
-    const connectedCount = hosts.filter((item) => item.state === 'connected').length
-    const agentCount = hosts.reduce(
-        (sum, item) => sum + item.agents.filter((agent) => agent.installed).length,
-        0
-    )
-    const defaultHost =
-        hosts.find((item) => item.id === status.value.defaultHostId) || hosts[0]
-    const hostLabel = !hosts.length
-        ? '未配置'
-        : hosts.length === 1
-          ? defaultHost?.name || defaultHost?.host || '1 台'
-          : `${hosts.length} 台 · ${connectedCount} 已连接`
-    return {
-        connected: connectedCount > 0,
-        connectedCount,
-        agentCount,
-        hostLabel
-    }
-})
-
-async function refreshAgentdProgress(hostId: string) {
-    try {
-        const progress = await send(
-            'agent-nexus/getAgentdDeploymentProgress',
-            hostId
-        )
-        if (progress) {
-            agentdProgress.value = {
-                ...agentdProgress.value,
-                [hostId]: progress
-            }
-        }
-        return progress || undefined
-    } catch {
-        return agentdProgress.value[hostId]
-    }
-}
-
-async function reload(scan = false) {
-    const generation = ++statusGeneration
+async function reload(discover = false) {
+    const current = ++generation
     loading.value = true
     try {
         const data = await send('agent-nexus/getConsoleData')
-        if (generation !== statusGeneration) return
-        config.value = data.config
-        status.value = data.status
-        await Promise.all(
-            data.config.hosts.map((host) => refreshAgentdProgress(host.id))
-        )
-        if (scan && data.config.hosts.some((host) => host.enabled)) {
-            const scanned = await send('agent-nexus/scanAgents')
-            if (generation !== statusGeneration) return
-            status.value = scanned
+        if (current !== generation) return
+        applyConsoleData(data)
+        if (discover) {
+            status.value = await send('agent-nexus/refreshGateway')
         }
-        if (scan) {
-            const refreshed = await send('agent-nexus/refreshRemoteStatuses')
-            if (generation !== statusGeneration) return
-            status.value = refreshed
-        }
-    } catch (err: any) {
-        ElMessage.error(err?.message || String(err))
-    } finally {
-        if (generation === statusGeneration) loading.value = false
-    }
-}
-
-async function autoConnectAndScan() {
-    const hostId =
-        config.value.defaultHostId ||
-        config.value.hosts.find((host) => host.enabled)?.id ||
-        config.value.hosts[0]?.id
-    if (!hostId) return
-
-    const hostStatus = status.value.hosts.find((item) => item.id === hostId)
-    const hasAgents = (hostStatus?.agents || []).some((agent) => agent.installed)
-    if (hostStatus && hasAgents) return
-
-    // Do not toggle the main connecting flag — that freezes the Computer UI.
-    try {
-        await Promise.race([
-            (async () => {
-                await send('agent-nexus/testHost', hostId)
-                status.value = await send('agent-nexus/scanAgents', hostId)
-            })(),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('auto connect timeout')), 25000)
-            )
-        ])
-    } catch {
-        // keep silent on page-load auto connect
-    } finally {
-        await reloadQuiet()
-    }
-}
-
-async function connectComputer(input: ComputerConnectInput, done: (hostId: string) => void) {
-    connecting.value = true
-    try {
-        const payload: Record<string, unknown> = {
-            name: input.name,
-            host: input.host,
-            port: input.port,
-            username: input.username,
-            enabled: true,
-            setAsDefault: input.setAsDefault
-        }
-        // Only send id when editing an existing device.
-        if (input.id) payload.id = input.id
-        if (input.cwd !== undefined) payload.cwd = input.cwd
-        if (input.auth) payload.auth = input.auth as SshAuth
-        const result = await send('agent-nexus/saveHost', payload as any)
-        config.value = result.data.config
-        status.value = result.data.status
-        done(result.hostId)
-        ElMessage.success(input.id ? '设备已保存，正在连接扫描…' : '设备已添加，正在连接扫描…')
-
-        // Background connect/scan finishes after save returns; refresh status shortly.
-        window.setTimeout(() => {
-            void reloadQuiet()
-        }, 1500)
-        window.setTimeout(() => {
-            void reloadQuiet()
-        }, 5000)
-    } catch (err: any) {
-        ElMessage.error(err?.message || String(err))
-    } finally {
-        connecting.value = false
-    }
-}
-
-async function reloadQuiet() {
-    if (maintaining.value.length || deployingAgentd.value.length) return
-    const generation = ++statusGeneration
-    try {
-        const data = await send('agent-nexus/getConsoleData')
-        if (
-            generation !== statusGeneration ||
-            maintaining.value.length ||
-            deployingAgentd.value.length
-        ) return
-        config.value = data.config
-        status.value = data.status
-        await Promise.all(
-            data.config.hosts.map((host) => refreshAgentdProgress(host.id))
-        )
-    } catch {
-        // ignore background refresh errors
-    }
-}
-
-async function removeComputer(hostId: string) {
-    try {
-        const host = config.value.hosts.find((item) => item.id === hostId)
-        const managedGateways = config.value.gateway.remotes.filter(
-            (remote) => remote.managedHostId === hostId
-        ).length
-        await ElMessageBox.confirm(
-            managedGateways
-                ? `确定删除设备“${host?.name || hostId}”吗？关联的 ${managedGateways} 个 Gateway 会解除 SSH 托管并保留，远端服务不会卸载。`
-                : `确定删除设备“${host?.name || hostId}”吗？`,
-            '删除 SSH 设备',
-            {
-                confirmButtonText: '删除',
-                cancelButtonText: '取消',
-                type: 'warning'
-            }
-        )
-        await send('agent-nexus/removeHost', hostId)
-        await reload()
-        ElMessage.success('SSH 设备已删除')
-    } catch (err: any) {
-        if (err === 'cancel' || err === 'close') return
-        ElMessage.error(err?.message || String(err))
-    }
-}
-
-async function maintainAgent(input: AgentMaintenanceInput) {
-    const key = `${input.hostId}:${input.kind}`
-    if (maintaining.value.includes(key)) return
-    maintaining.value = [...maintaining.value, key]
-    statusGeneration += 1
-    const host = status.value.hosts.find((item) => item.id === input.hostId)
-    const agent = host?.agents.find((item) => item.kind === input.kind)
-    const action = '安装'
-    const labels: Record<AgentKind, string> = {
-        hermes: 'Hermes',
-        openclaw: 'OpenClaw',
-        claude: 'Claude Code',
-        opencode: 'OpenCode',
-        codex: 'Codex',
-        pi: 'Pi'
-    }
-    try {
-        await ElMessageBox.confirm(
-            `将在设备“${host?.name || input.hostId}”上以当前 SSH 用户执行${action}。渠道：${agent?.maintenanceMethod || '官方安装渠道'}。是否继续？`,
-            `${action} ${labels[input.kind]}`,
-            {
-                confirmButtonText: action,
-                cancelButtonText: '取消',
-                type: 'warning'
-            }
-        )
-        const result = await send('agent-nexus/maintainAgent', input)
-        statusGeneration += 1
-        status.value = result.status
-        ElMessage.success(
-            `${labels[input.kind]} 安装完成`
-        )
     } catch (error: any) {
-        if (error === 'cancel' || error === 'close') return
         ElMessage.error(error?.message || String(error))
     } finally {
-        maintaining.value = maintaining.value.filter((item) => item !== key)
-    }
-}
-
-async function deployAgentd(input: AgentdDeploymentInput, done: () => void) {
-    if (deployingAgentd.value.includes(input.hostId)) return
-    try {
-        deployingAgentd.value = [...deployingAgentd.value, input.hostId]
-        statusGeneration += 1
-        let progress = await send('agent-nexus/deployAgentd', input)
-        agentdProgress.value = {
-            ...agentdProgress.value,
-            [input.hostId]: progress
-        }
-        const deadline = Date.now() + 6 * 60 * 1000
-        while (progress.state === 'running' && Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 800))
-            progress =
-                (await refreshAgentdProgress(input.hostId)) || progress
-        }
-        if (progress.state === 'running') {
-            throw new Error('前端等待部署结果超时；后台任务仍在运行，请稍后查看当前阶段。')
-        }
-        if (progress.state === 'error') {
-            throw new Error(progress.error || 'ACP Gateway 部署失败')
-        }
-        statusGeneration += 1
-        const data = await send('agent-nexus/getConsoleData')
-        config.value = data.config
-        status.value = data.status
-        done()
-        if (progress.warning) ElMessage.warning(progress.warning)
-        else ElMessage.success('ACP Gateway 已部署并注册')
-    } catch (error: any) {
-        const progress = await refreshAgentdProgress(input.hostId)
-        const detail = progress?.error || readableConsoleError(error)
-        await ElMessageBox.alert(detail, 'ACP Gateway 部署失败', {
-            confirmButtonText: '知道了',
-            type: 'error'
-        }).catch(() => undefined)
-    } finally {
-        await refreshAgentdProgress(input.hostId)
-        deployingAgentd.value = deployingAgentd.value.filter(
-            (hostId) => hostId !== input.hostId
-        )
-    }
-}
-
-function readableConsoleError(error: unknown) {
-    const value =
-        error && typeof error === 'object' && 'message' in error
-            ? String((error as { message?: unknown }).message || error)
-            : String(error)
-    const normalized = value.replace(/^Error:\s*/i, '').trim()
-    const stack = normalized.search(/\n\s*at\s+/)
-    return (stack >= 0 ? normalized.slice(0, stack) : normalized) || '部署失败'
-}
-
-async function syncSkill(input: {
-    repoUrl: string
-    name?: string
-    branch?: string
-    subdir?: string
-    hostId?: string
-}, done: () => void) {
-    try {
-        await send('agent-nexus/saveConfig', config.value)
-        await send('agent-nexus/syncSkill', input)
-        ElMessage.success('Skill 同步完成')
-        await refreshSkills(input.hostId)
-    } catch (err: any) {
-        ElMessage.error(err?.message || String(err))
-    } finally {
-        done()
-    }
-}
-
-async function refreshSkills(hostId?: string) {
-    try {
-        await send('agent-nexus/saveConfig', config.value)
-        const items = await send('agent-nexus/listSkills', hostId)
-        status.value = {
-            ...status.value,
-            skills: {
-                total: items.length,
-                items,
-                hostId: hostId || status.value.defaultHostId
-            }
-        }
-    } catch (err: any) {
-        ElMessage.error(err?.message || String(err))
+        if (current === generation) loading.value = false
     }
 }
 
 function applyConsoleData(data: NexusConsoleData) {
-    statusGeneration += 1
     config.value = data.config
     status.value = data.status
+    gatewayKeyConfigured.value = data.gatewayKeyConfigured
 }
 
-onMounted(async () => {
-    await reload(false)
-    await autoConnectAndScan()
-})
+onMounted(() => reload(true))
 </script>
 
 <style scoped>
 .nexus-page {
+    --nexus-line: color-mix(in srgb, var(--k-color-divider), transparent 8%);
+    --nexus-ink: var(--k-text-dark);
     display: flex;
-    flex-direction: column;
-    gap: 18px;
-    width: min(100%, 1440px);
+    width: min(100%, 1420px);
     min-height: 100%;
     margin: 0 auto;
-    padding: 24px clamp(20px, 4vw, 56px) 40px
-        calc(var(--activity-width, 0px) + clamp(20px, 4vw, 56px));
+    padding: 30px clamp(18px, 4vw, 58px) 52px
+        calc(var(--activity-width, 0px) + clamp(18px, 4vw, 58px));
     box-sizing: border-box;
+    flex-direction: column;
+    gap: 22px;
 }
 
 .hero,
-.stats,
-.tabs,
 .title-row,
-.actions {
+.surface-title {
     display: flex;
     align-items: center;
-    gap: 12px;
 }
 
 .hero {
+    position: relative;
     justify-content: space-between;
+    gap: 28px;
+    padding: 6px 0 24px 18px;
+    border-bottom: 1px solid var(--nexus-line);
+}
+
+.hero::before {
+    position: absolute;
+    top: 8px;
+    bottom: 26px;
+    left: 0;
+    width: 3px;
+    background: var(--k-color-primary);
+    content: '';
+}
+
+.hero-copy {
+    min-width: 0;
+}
+
+.eyebrow,
+.surface-title span,
+.surface-title code,
+.metrics span,
+.notice-index {
+    font-family: 'Cascadia Mono', 'Microsoft YaHei UI', monospace;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.eyebrow,
+.surface-title span {
+    color: var(--k-color-primary);
+    font-size: 10px;
 }
 
 .title-row {
-    gap: 10px;
+    gap: 14px;
+    margin-top: 7px;
 }
 
-.title {
-    font-size: 24px;
-    font-weight: 700;
-    letter-spacing: 0;
-    color: var(--k-text-dark);
+h1,
+h2,
+.hero p,
+.setup-notice p {
+    margin: 0;
 }
 
-.subtitle {
-    margin-top: 6px;
-    font-size: 13px;
-    line-height: 1.55;
+h1 {
+    color: var(--nexus-ink);
+    font-family: 'Microsoft YaHei UI', 'Noto Sans SC', sans-serif;
+    font-size: clamp(30px, 4vw, 48px);
+    font-weight: 760;
+    line-height: 1;
+    letter-spacing: -0.05em;
+}
+
+.hero p {
+    max-width: 760px;
+    margin-top: 12px;
     color: var(--k-text-light);
+    font-size: 13px;
+    line-height: 1.7;
 }
 
-.stats {
+.gateway-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--k-text-light);
+    font-size: 12px;
+}
+
+.gateway-pill i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #8b949e;
+}
+
+.gateway-pill.ready i {
+    background: #1fa66b;
+    box-shadow: 0 0 0 4px color-mix(in srgb, #1fa66b, transparent 82%);
+}
+
+.gateway-pill.checking i {
+    background: #d99b2b;
+}
+
+.gateway-pill.error i {
+    background: #d65757;
+}
+
+.metrics {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
+    gap: 1px;
+    overflow: hidden;
+    border: 1px solid var(--nexus-line);
+    background: var(--nexus-line);
 }
 
-.stat-card {
+.metrics article {
+    display: grid;
     min-width: 0;
-    padding: 14px 16px;
-    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 18%);
+    padding: 16px 18px;
+    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 30%);
 }
 
-.stat-label {
-    font-size: 12px;
+.metrics span {
     color: var(--k-text-light);
+    font-size: 9px;
 }
 
-.stat-value {
+.metrics strong {
+    margin-top: 9px;
+    color: var(--nexus-ink);
+    font-size: 27px;
+    line-height: 1;
+}
+
+.metrics small {
     margin-top: 8px;
     overflow: hidden;
-    font-size: 16px;
-    font-weight: 650;
-    color: var(--k-text-dark);
+    color: var(--k-text-light);
+    font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.tabs {
-    gap: 8px;
-    padding: 6px;
-    border: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 20%);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 24%);
-    overflow-x: auto;
+.setup-notice {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+    padding: 16px 18px;
+    border: 1px solid color-mix(in srgb, #d99b2b, transparent 52%);
+    background: color-mix(in srgb, #d99b2b, transparent 93%);
 }
 
-.tab {
-    flex: 0 0 auto;
-    border: 0;
-    border-radius: 6px;
-    padding: 9px 16px;
-    background: transparent;
-    color: var(--k-text-light);
-    cursor: pointer;
-    font: inherit;
+.notice-index {
+    color: #b7790c;
+    font-size: 10px;
+}
+
+.setup-notice strong {
+    color: var(--nexus-ink);
     font-size: 13px;
-    transition: 0.18s ease;
 }
 
-.tab:hover {
-    color: var(--k-text-dark);
-    background: color-mix(in srgb, var(--k-page-bg), transparent 20%);
+.setup-notice p {
+    margin-top: 5px;
+    color: var(--k-text-light);
+    font-size: 12px;
+    line-height: 1.6;
 }
 
-.tab.active {
-    color: var(--k-text-dark);
-    background: color-mix(in srgb, var(--k-color-primary), transparent 86%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--k-color-primary), transparent 72%);
-    font-weight: 650;
-}
-
-.content {
-    flex: 1;
-    min-height: 0;
+.control-surface {
     min-width: 0;
+    padding: 21px;
+    border: 1px solid var(--nexus-line);
+    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 38%);
 }
 
-.content.terminal {
-    overflow: visible;
+.surface-title {
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 22px;
+}
+
+.surface-title h2 {
+    margin: 5px 0 0;
+    color: var(--nexus-ink);
+    font-size: 19px;
+}
+
+.surface-title code {
+    color: var(--k-text-light);
+    font-size: 9px;
 }
 
 @media (max-width: 900px) {
-    .stats {
+    .metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 680px) {
     .nexus-page {
-        gap: 14px;
-        padding: 16px 14px 28px calc(var(--activity-width, 0px) + 14px);
+        padding: 17px 13px 32px calc(var(--activity-width, 0px) + 13px);
     }
 
-    .hero {
+    .hero,
+    .surface-title {
         align-items: flex-start;
         flex-direction: column;
     }
 
-    .actions,
-    .tabs {
+    .refresh-button {
         width: 100%;
     }
 
-    .actions :deep(.el-button) {
-        width: 100%;
+    .setup-notice {
+        grid-template-columns: 1fr;
+        gap: 8px;
     }
 
-    .stats {
-        grid-template-columns: 1fr 1fr;
+    .control-surface {
+        padding: 16px 13px;
     }
 }
 </style>
