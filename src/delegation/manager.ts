@@ -664,19 +664,12 @@ export class DelegationManager {
             if (!job) throw new Error(`AgentNexus job no longer exists: ${id}`)
             if (job.state !== 'running') return job
             if (signal?.aborted) {
-                const background = Boolean(
-                    job.parentConversationId && job.routing
-                )
-                await this.store.save({
-                    ...job,
-                    background,
-                    updatedAt: this.now()
-                })
-                this.startMonitor(id)
+                const cancellation = await this.cancelForAbortedForeground(id)
+                const detail = cancellation.error
+                    ? ` Remote cancellation failed: ${errorMessage(cancellation.error)}`
+                    : ' The remote task was canceled.'
                 throw new Error(
-                    background
-                        ? `Waiting for AgentNexus job ${id} was canceled; the remote task continues in the background and its result will be delivered to this conversation.`
-                        : `Waiting for AgentNexus job ${id} was canceled; the remote task is still running and can be checked with action=status.`
+                    `Waiting for AgentNexus job ${id} was canceled.${detail}`
                 )
             }
             if (job.expiresAt <= this.now()) {
@@ -731,6 +724,40 @@ export class DelegationManager {
             await delay(this.pollIntervalMs, signal)
         }
         throw new Error(`AgentNexus stopped while waiting for job ${id}.`)
+    }
+
+    private async cancelForAbortedForeground(id: string) {
+        return this.withJobLock(id, async () => {
+            const current = await this.store.get(id)
+            if (!current || current.state !== 'running') {
+                return { job: current }
+            }
+
+            this.stopMonitor(id)
+            let job = current
+            let cancellationError: unknown
+            try {
+                const agent = this.agentForJob(job)
+                const result = await this.providers
+                    .providerFor(agent)
+                    .cancel(agent, job)
+                job = applyResult(job, result, this.now(), this.retentionMs)
+            } catch (error) {
+                cancellationError = error
+                job.error = clip(errorMessage(error), 32 * 1024)
+            }
+
+            const now = this.now()
+            job.state = 'canceled'
+            job.pendingRequest = undefined
+            job.remoteState ||= 'canceled'
+            job.endedAt = now
+            job.updatedAt = now
+            job.expiresAt = now + this.retentionMs
+            job.notifiedRunId = job.activeRunId
+            await this.store.save(job)
+            return { job, error: cancellationError }
+        })
     }
 
     private async withJobLock<T>(id: string, operation: () => Promise<T>) {

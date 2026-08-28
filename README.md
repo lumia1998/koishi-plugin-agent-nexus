@@ -49,7 +49,7 @@ npm install koishi-plugin-agent-nexus@alpha
 
 当前 0.2 单 Gateway 架构发布在 npm 的 alpha 标签。直接执行 npm install koishi-plugin-agent-nexus
 会跟随 latest 标签；在 latest 尚未切换前，它可能安装旧的 0.1.x 架构。也可以固定到
-npm install koishi-plugin-agent-nexus@0.2.0-alpha.3。
+npm install koishi-plugin-agent-nexus@0.2.0-alpha.4。
 
 然后在 Koishi 插件设置中配置：
 

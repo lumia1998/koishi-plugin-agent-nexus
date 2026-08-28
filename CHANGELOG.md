@@ -2,6 +2,11 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.2.0-alpha.4] - 2026-08-28
+
+- 修复 ChatLuna 停止当前回复生成后 Gateway 任务仍继续运行的问题：前台任务收到 AbortSignal 时会调用
+  Gateway `cancelSession`，并将本地任务置为 `canceled`，不再脱离为后台任务。
+
 ## [0.2.0-alpha.3] - 2026-08-28
 
 - Agent 产物按媒体类型发送为 Koishi 原生元素：音频 `h.audio`、视频 `h.video`、图片 `h.image`、

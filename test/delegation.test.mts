@@ -188,6 +188,47 @@ test('cancels the remote session and starts the next run with fresh state', asyn
     }
 })
 
+test('aborting a foreground task cancels the remote session instead of detaching it', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let cancellations = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async (_agent, current) => runningWithState(current.providerState)
+    fixture.provider.cancel = async (_agent, current) => {
+        cancellations += 1
+        return {
+            state: 'canceled',
+            remoteState: 'canceled',
+            artifacts: [],
+            providerState: structuredClone(current.providerState)
+        }
+    }
+    const controller = new AbortController()
+    try {
+        await fixture.manager.start()
+        const task = fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '长任务',
+                background: false
+            },
+            context(),
+            controller.signal
+        )
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        controller.abort()
+        await assert.rejects(task, /remote task was canceled/)
+
+        const [current] = await fixture.store.list()
+        assert.equal(cancellations, 1)
+        assert.equal(current.state, 'canceled')
+        assert.equal(current.pendingRequest, undefined)
+        assert.equal(current.remoteState, 'canceled')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('runs without ChatLuna context, preserves the exact prompt, and waits for completion', async () => {
     const fixture = await managerFixture({ pollIntervalMs: 1 })
     const prompt = '  第一行不要改\n第二行：原样交给 Hermes  '
@@ -596,6 +637,15 @@ function running() {
         remoteState: 'running',
         artifacts: [],
         providerState: { gatewaySessionId: 'session-1', protocol: 'acp' }
+    }
+}
+
+function runningWithState(providerState: Record<string, unknown>) {
+    return {
+        state: 'running' as const,
+        remoteState: 'running',
+        artifacts: [],
+        providerState: structuredClone(providerState)
     }
 }
 
