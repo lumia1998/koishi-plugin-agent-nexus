@@ -72,15 +72,23 @@
                 @updated="applyConsoleData"
             />
         </main>
+
+        <task-history :jobs="jobs" :loading="jobsLoading" @refresh="reloadJobs" />
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage } from 'element-plus'
 import GatewayPanel from './components/gateway-panel.vue'
-import type { NexusConfig, NexusConsoleData, NexusStatus } from '../src/types'
+import TaskHistory from './components/task-history.vue'
+import type {
+    NexusConfig,
+    NexusConsoleData,
+    NexusStatus,
+    NexusTaskSummary
+} from '../src/types'
 
 const loading = ref(false)
 let generation = 0
@@ -97,6 +105,9 @@ const status = ref<NexusStatus>({
     delegation: { agents: [] }
 })
 const gatewayKeyConfigured = ref(false)
+const jobs = ref<NexusTaskSummary[]>([])
+const jobsLoading = ref(false)
+let jobsTimer: ReturnType<typeof setInterval> | undefined
 
 const readyCount = computed(
     () => status.value.gateway.agents.filter((agent) => agent.ready).length
@@ -119,9 +130,13 @@ async function reload(discover = false) {
     const current = ++generation
     loading.value = true
     try {
-        const data = await send('agent-nexus/getConsoleData')
+        const [data, taskRows] = await Promise.all([
+            send('agent-nexus/getConsoleData'),
+            send('agent-nexus/getDelegationJobs')
+        ])
         if (current !== generation) return
         applyConsoleData(data)
+        jobs.value = taskRows
         if (discover) {
             status.value = await send('agent-nexus/refreshGateway')
         }
@@ -132,13 +147,31 @@ async function reload(discover = false) {
     }
 }
 
+async function reloadJobs() {
+    jobsLoading.value = true
+    try {
+        jobs.value = await send('agent-nexus/getDelegationJobs')
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        jobsLoading.value = false
+    }
+}
+
 function applyConsoleData(data: NexusConsoleData) {
     config.value = data.config
     status.value = data.status
     gatewayKeyConfigured.value = data.gatewayKeyConfigured
 }
 
-onMounted(() => reload(true))
+onMounted(() => {
+    void reload(true)
+    jobsTimer = setInterval(() => void reloadJobs(), 5_000)
+})
+
+onBeforeUnmount(() => {
+    if (jobsTimer) clearInterval(jobsTimer)
+})
 </script>
 
 <style scoped>

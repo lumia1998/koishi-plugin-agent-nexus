@@ -9,6 +9,11 @@ import {
     NexusAgentDelegateTool,
     registerAgentDelegationTools
 } from '../src/tools/delegate.ts'
+import {
+    NEXUS_FILE_PUBLISH_TOOL,
+    NexusFilePublishTool,
+    registerGatewayFilePublishTool
+} from '../src/tools/publish.ts'
 
 test('builds stable, Agent-facing delegation tool names', () => {
     const names = buildDelegationToolNames([
@@ -235,4 +240,68 @@ test('registers one tool per enabled Agent and disposes stale tools on sync', ()
     agents.splice(0, agents.length, agents[2])
     for (const dispose of disposers) dispose()
     assert.deepEqual([...registered.keys()], [])
+})
+
+test('file publish tool forwards exact paths and current conversation context', async () => {
+    let invocation: any
+    const sent: any[] = []
+    const nexus = {
+        async publishDelegationFiles(input: unknown, context: unknown) {
+            invocation = { input, context }
+            return [{
+                id: 'file-1',
+                name: 'result.zip',
+                url: 'http://gateway.local/v1/artifacts/token/result.zip',
+                size: 128,
+                mediaType: 'application/zip',
+                sha256: 'abc',
+                expiresAt: Date.now() + 60_000
+            }]
+        }
+    }
+    const tool = new NexusFilePublishTool(nexus as any)
+    const result = await tool._call(
+        { id: 'job-1', paths: ['D:\\workspace\\result.zip'] },
+        undefined,
+        {
+            configurable: {
+                conversationId: 'conversation-1',
+                userId: 'user-1',
+                session: {
+                    platform: 'test',
+                    selfId: 'bot',
+                    userId: 'user-1',
+                    send(content: unknown) {
+                        sent.push(content)
+                        return Promise.resolve([])
+                    }
+                }
+            }
+        }
+    )
+    assert.match(result, /文件已发布/)
+    assert.doesNotMatch(result, /http:\/\/gateway\.local/)
+    assert.equal(sent[0].type, 'file')
+    assert.equal(sent[0].attrs.src, 'http://gateway.local/v1/artifacts/token/result.zip')
+    assert.equal(sent[0].attrs.filename, 'result.zip')
+    assert.deepEqual(invocation.input, {
+        id: 'job-1',
+        paths: ['D:\\workspace\\result.zip']
+    })
+    assert.equal(invocation.context.parentConversationId, 'conversation-1')
+
+    const registered = new Map<string, any>()
+    const dispose = registerGatewayFilePublishTool(
+        {
+            registerTool(name: string, spec: any) {
+                registered.set(name, spec)
+                return () => registered.delete(name)
+            }
+        },
+        nexus as any
+    )
+    assert.deepEqual([...registered.keys()], [NEXUS_FILE_PUBLISH_TOOL])
+    assert.match(registered.get(NEXUS_FILE_PUBLISH_TOOL).description, /Base64/)
+    dispose?.()
+    assert.equal(registered.size, 0)
 })

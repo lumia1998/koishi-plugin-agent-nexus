@@ -9,6 +9,7 @@ import type { GatewayClient } from '../gateway/client'
 import type { GatewaySessionView } from '../gateway/types'
 import type {
     DelegationJob,
+    DelegationPendingRequest,
     DelegationProvider,
     DelegationProviderResult,
     DelegationRunRequest,
@@ -289,6 +290,9 @@ function fromGatewaySession(
             ? formatPendingRequest(session.pendingRequest, session.output)
             : session.output,
         error: session.error,
+        pendingRequest: session.pendingRequest
+            ? structuredClone(session.pendingRequest as DelegationPendingRequest)
+            : undefined,
         artifacts: (session.artifacts || []).map((artifact) => ({
             artifactId: artifact.id,
             name: artifact.name,
@@ -321,6 +325,11 @@ function formatPendingRequest(
     request: NonNullable<GatewaySessionView['pendingRequest']>,
     output?: string
 ) {
+    const paymentUrl =
+        request.inputType === 'payment' &&
+        typeof request.metadata?.paymentUrl === 'string'
+            ? `Payment URL: ${request.metadata.paymentUrl}`
+            : ''
     const options = request.options?.length
         ? `\nOptions:\n${request.options
               .map(
@@ -329,7 +338,7 @@ function formatPendingRequest(
               )
               .join('\n')}`
         : ''
-    return [output?.trim(), request.prompt.trim(), options.trim()]
+    return [output?.trim(), request.prompt.trim(), paymentUrl, options.trim()]
         .filter(Boolean)
         .join('\n\n')
 }

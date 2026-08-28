@@ -1,5 +1,5 @@
 import type { ChatInvocationInput } from 'koishi-plugin-chatluna'
-import type { DelegationJob } from './types'
+import type { DelegationArtifact, DelegationJob } from './types'
 import { delegationToolNameForJob } from './tool-name'
 
 export async function notifyChatLunaDelegation(
@@ -72,12 +72,15 @@ export function formatDelegationWakeup(
     job: DelegationJob,
     toolName = delegationToolNameForJob(job)
 ) {
+    const output = redactArtifactUrls(job.output, job.artifacts)
     const details = [
-        job.output?.trim(),
-        job.error?.trim() ? `Error: ${job.error.trim()}` : undefined,
+        output?.trim(),
+        job.error?.trim()
+            ? `Error: ${redactArtifactUrls(job.error, job.artifacts)!.trim()}`
+            : undefined,
         ...job.artifacts.map((artifact) =>
             artifact.url
-                ? `${artifact.name || artifact.filename || 'file'}: ${artifact.url}`
+                ? `${artifact.name || artifact.filename || 'file'}: [attachment published]`
                 : artifactContent(artifact)
         )
     ]
@@ -90,13 +93,28 @@ export function formatDelegationWakeup(
         : job.state === 'failed'
           ? `Report the remote agent failure to the user. Retry with ${toolName} action=run id=${job.id} only when appropriate.`
           : `Use this remote agent result to answer the user. Continue the same context with ${toolName} action=run id=${job.id} if needed.`
+    const attachmentInstruction = job.artifacts.some((artifact) => artifact.url)
+        ? ' Published files are included as message attachments; do not print, quote, or expose their temporary URLs. Tell the user the file was sent and use its filename only.'
+        : ''
     return [
         `<delegation_job_result job_id="${escapeXml(job.id)}" agent="${escapeXml(job.agentName)}" state="${job.state}">`,
         escapeXml(details || '(empty result)'),
         '</delegation_job_result>',
         '',
-        `Automatic notice: a background AgentNexus job started by this conversation has updated. ${instruction}`
+        `Automatic notice: a background AgentNexus job started by this conversation has updated. ${instruction}${attachmentInstruction}`
     ].join('\n')
+}
+
+function redactArtifactUrls(
+    value: string | undefined,
+    artifacts: DelegationArtifact[]
+) {
+    if (!value) return value
+    return artifacts.reduce((result, artifact) => {
+        if (!artifact.url) return result
+        const label = artifact.name || artifact.filename || 'attachment'
+        return result.split(artifact.url).join(`[${label} attached]`)
+    }, value)
 }
 
 function artifactContent(artifact: DelegationJob['artifacts'][number]) {

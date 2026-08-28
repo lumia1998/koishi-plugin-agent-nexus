@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
   "description": "Nexus Gateway agent delegation for ChatLuna",
-  "version": "0.2.1",
+  "version": "0.2.0-alpha.2",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -37,8 +37,7 @@
     },
     "service": {
       "required": [
-        "chatluna",
-        "chatluna_storage"
+        "chatluna"
       ],
       "optional": [
         "console"
@@ -57,8 +56,7 @@
   ],
   "peerDependencies": {
     "koishi": "^4.18.0",
-    "koishi-plugin-chatluna": "*",
-    "koishi-plugin-chatluna-storage-service": "^1.0.6"
+    "koishi-plugin-chatluna": "*"
   },
   "devDependencies": {
     "@element-plus/icons-vue": "^2.3.1",

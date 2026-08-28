@@ -69,11 +69,26 @@ export interface DelegationInputAttachment {
     bytes: Uint8Array
 }
 
+export interface DelegationPendingRequest {
+    id: string
+    kind: 'permission' | 'input'
+    prompt: string
+    step?: string
+    inputType?: 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown'
+    options?: Array<{
+        id: string
+        name: string
+        kind?: string
+    }>
+    metadata?: Record<string, unknown>
+}
+
 export interface DelegationProviderResult {
     state: DelegationState
     remoteState?: string
     text?: string
     error?: string
+    pendingRequest?: DelegationPendingRequest
     artifacts: DelegationArtifact[]
     providerState: Record<string, unknown>
 }
@@ -110,6 +125,7 @@ export interface DelegationJob {
     output?: string
     error?: string
     pollError?: string
+    pendingRequest?: DelegationPendingRequest
     artifacts: DelegationArtifact[]
     activeRunId?: string
     notifiedRunId?: string

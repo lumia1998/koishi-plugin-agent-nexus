@@ -1,7 +1,5 @@
-import { createHash } from 'crypto'
-import { Context, Service } from 'koishi'
+import { Context, h, Service } from 'koishi'
 import path from 'path'
-import { Readable } from 'stream'
 import { fileURLToPath } from 'url'
 import { readFile as readBinaryFile } from 'fs/promises'
 import type {
@@ -9,7 +7,10 @@ import type {
     GatewayRemoteConfig,
     NexusConfig,
     NexusConsoleData,
-    NexusStatus
+    NexusStatus,
+    NexusTaskArtifact,
+    NexusTaskDetail,
+    NexusTaskSummary
 } from './types'
 import {
     createGatewayConnection,
@@ -18,6 +19,7 @@ import {
     type Config
 } from './config'
 import { registerAgentDelegationTools } from './tools/delegate'
+import { registerGatewayFilePublishTool } from './tools/publish'
 import { getErrorMessage } from './utils/shell'
 import { moveCorruptFileAside, writeTextFileAtomic } from './utils/atomic-file'
 import { redactNexusConfig } from './utils/config'
@@ -25,6 +27,7 @@ import {
     DelegationManager,
     DelegationProviderRegistry,
     DelegationStore,
+    formatDelegationUserReply,
     notifyChatLunaDelegation,
     type DelegateToolInput,
     type DelegationArtifact,
@@ -35,9 +38,14 @@ import {
 } from './delegation'
 import { NexusGatewayProvider } from './providers'
 import { NexusGatewayClient } from './gateway'
+import type { GatewayPublishedFile } from './gateway/types'
+import {
+    delegationContextFromSession,
+    sameDelegationRouting
+} from './tools/context'
 
 export class AgentNexusService extends Service {
-    static readonly inject = ['chatluna', 'chatluna_storage']
+    static readonly inject = ['chatluna']
 
     private readonly gatewayRemote: GatewayRemoteConfig
     private readonly gatewayClient: NexusGatewayClient
@@ -46,6 +54,7 @@ export class AgentNexusService extends Service {
     private readonly delegations: DelegationManager
     private readonly delegationProviders: DelegationProviderRegistry
     private toolDispose: (() => void)[] = []
+    private pendingMessageDispose?: () => boolean
     private remoteRefreshTimer?: NodeJS.Timeout
     private running = false
     private nexusConfig: NexusConfig
@@ -78,7 +87,7 @@ export class AgentNexusService extends Service {
             (job) => this.notifyDelegation(job),
             {
                 prepareArtifacts: (artifacts, job) =>
-                    this.prepareDelegationArtifacts(artifacts, job)
+                    this.sanitizeDelegationArtifacts(artifacts, job)
             }
         )
     }
@@ -88,6 +97,7 @@ export class AgentNexusService extends Service {
         this.running = true
         this.syncTools()
         await this.delegations.start()
+        this.installPendingMessageMiddleware()
         void this.refreshRemoteStatuses().catch((error) => {
             this.ctx.logger.warn(
                 `[agent-nexus] initial remote discovery failed: ${getErrorMessage(error)}`
@@ -105,6 +115,8 @@ export class AgentNexusService extends Service {
 
     async stop() {
         this.running = false
+        this.pendingMessageDispose?.()
+        this.pendingMessageDispose = undefined
         await this.delegations.stop()
         for (const dispose of this.toolDispose) dispose()
         this.toolDispose = []
@@ -126,6 +138,183 @@ export class AgentNexusService extends Service {
         signal?: AbortSignal
     ) {
         return this.delegations.handle(input, context, signal)
+    }
+
+    private installPendingMessageMiddleware() {
+        this.pendingMessageDispose?.()
+        if (this.pluginConfig.autoResumePending === false) return
+        this.pendingMessageDispose = this.ctx.middleware(async (session, next) => {
+            if (!this.running || !session.userId || session.userId === session.selfId) {
+                return next()
+            }
+            try {
+                const handled = await this.resumePendingMessage(session)
+                if (handled) return
+            } catch (error) {
+                this.ctx.logger.warn(
+                    `[agent-nexus] pending message continuation failed: ${getErrorMessage(error)}`
+                )
+                await session.send(`继续 Agent 任务失败：${getErrorMessage(error)}`)
+                return
+            }
+            return next()
+        }, true)
+    }
+
+    private async resumePendingMessage(session: any) {
+        const isDirect = Boolean(session.isDirect ?? !session.guildId)
+        const stripped = session.stripped
+        if (
+            !isDirect &&
+            this.pluginConfig.pendingRequireMention === true &&
+            !stripped?.atSelf
+        ) {
+            return false
+        }
+        // Never consume a message addressed to another user in a group.
+        if (!isDirect && stripped?.hasAt && !stripped.atSelf) return false
+
+        const chatluna = (this.ctx as any).chatluna
+        const conversationService = chatluna?.conversation
+        if (typeof conversationService?.resolveConversation !== 'function') {
+            return false
+        }
+        let resolution: any
+        try {
+            resolution = await conversationService.resolveConversation(session, {
+                mode: 'active'
+            })
+        } catch {
+            return false
+        }
+        const context = delegationContextFromSession(
+            session,
+            String(resolution?.conversationId || '')
+        )
+        if (!context) return false
+
+        const attachments = await this.collectInputAttachments({
+            configurable: { session }
+        })
+        const prompt = String(
+            stripped?.atSelf ? stripped.content : session.content || ''
+        ).trim() || (attachments.length ? '请处理我发送的附件。' : '')
+        if (!prompt) return false
+
+        const continuation = await this.delegations.continuePendingFromMessage(
+            context,
+            prompt,
+            attachments
+        )
+        if (!continuation.handled) {
+            if (continuation.ambiguous) {
+                await session.send(
+                    '当前对话有多个等待中的 Agent 任务，请 @Bot 并说明要继续哪个任务，或先结束其他任务。'
+                )
+                return true
+            }
+            return false
+        }
+        if (continuation.job) await this.sendDelegationReply(session, continuation.job)
+        return true
+    }
+
+    private async sendDelegationReply(session: any, job: DelegationJob) {
+        const text = formatDelegationUserReply(job)
+        if (text) await session.send(text)
+        for (const artifact of job.artifacts) {
+            if (!artifact.url) continue
+            await session.send(
+                h.file(artifact.url, {
+                    filename: artifact.filename || artifact.name || undefined,
+                    mime: artifact.mediaType || undefined
+                })
+            )
+        }
+    }
+
+    async publishDelegationFiles(
+        input: { id?: string; paths: string[] },
+        context?: DelegationContext
+    ): Promise<GatewayPublishedFile[]> {
+        const paths = Array.from(
+            new Set(
+                (Array.isArray(input.paths) ? input.paths : [])
+                    .map((value) => String(value || '').trim())
+                    .filter(Boolean)
+            )
+        )
+        if (!paths.length) throw new Error('至少需要一个要发布的文件路径。')
+        if (paths.length > 32) throw new Error('一次最多发布 32 个文件。')
+
+        const requestedId = String(input.id || '').trim()
+        let job = requestedId ? await this.delegationStore.get(requestedId) : undefined
+        if (!job && !requestedId && context?.parentConversationId) {
+            const candidates = (await this.delegationStore.list(
+                context.parentConversationId
+            )).filter(
+                (candidate) =>
+                    typeof candidate.providerState.gatewaySessionId === 'string' &&
+                    (!candidate.routing ||
+                        sameDelegationRouting(candidate.routing, context.routing))
+            )
+            const exact = candidates.filter(
+                (candidate) => candidate.routing !== undefined
+            )
+            if (exact.length > 1 || (!exact.length && candidates.length > 1)) {
+                throw new Error(
+                    '当前路由存在多个 AgentNexus 任务，请传入明确的任务 ID。'
+                )
+            }
+            job = (exact[0] || candidates[0])
+        }
+        if (!job) {
+            throw new Error(
+                requestedId
+                    ? `未找到 AgentNexus 任务：${requestedId}`
+                    : '当前对话没有可用于发布文件的 AgentNexus 任务，请传入任务 ID。'
+            )
+        }
+        if (
+            context?.parentConversationId &&
+            job.parentConversationId &&
+            job.parentConversationId !== context.parentConversationId
+        ) {
+            throw new Error(`未找到 AgentNexus 任务：${job.id}`)
+        }
+        if (
+            context?.routing &&
+            job.routing &&
+            !sameDelegationRouting(job.routing, context.routing)
+        ) {
+            throw new Error(`未找到 AgentNexus 任务：${job.id}`)
+        }
+        const sessionId = String(job.providerState.gatewaySessionId || '').trim()
+        if (!sessionId) throw new Error('该任务没有可用的 Nexus Gateway Session。')
+
+        const result = await this.gatewayClient.publishFiles(
+            this.gatewayRemote,
+            sessionId,
+            paths
+        )
+        const additions: DelegationArtifact[] = result.files.map((file) => ({
+            artifactId: file.id,
+            name: file.name,
+            filename: file.name,
+            url: file.url,
+            mediaType: file.mediaType,
+            metadata: {
+                size: file.size,
+                sha256: file.sha256,
+                expiresAt: file.expiresAt
+            }
+        }))
+        const knownUrls = new Set(job.artifacts.map((artifact) => artifact.url).filter(Boolean))
+        job.artifacts.push(...additions.filter((artifact) => !knownUrls.has(artifact.url)))
+        job.updatedAt = Date.now()
+        await this.delegationStore.save(job)
+
+        return result.files
     }
 
     async collectInputAttachments(parentConfig: any) {
@@ -265,6 +454,18 @@ export class AgentNexusService extends Service {
         }
     }
 
+    async getDelegationJobs(): Promise<NexusTaskSummary[]> {
+        const jobs = await this.delegationStore.list()
+        return jobs.map(toTaskSummary)
+    }
+
+    async getDelegationJob(id: string): Promise<NexusTaskDetail | undefined> {
+        const normalizedId = String(id || '').trim()
+        if (!normalizedId) return undefined
+        const job = await this.delegationStore.get(normalizedId)
+        return job ? toTaskDetail(job) : undefined
+    }
+
     private async notifyDelegation(job: DelegationJob) {
         await notifyChatLunaDelegation(
             (this.ctx as any).chatluna,
@@ -273,88 +474,23 @@ export class AgentNexusService extends Service {
         )
     }
 
-    private async prepareDelegationArtifacts(
+    private async sanitizeDelegationArtifacts(
         artifacts: DelegationArtifact[],
-        job: DelegationJob
+        _job: DelegationJob
     ) {
-        const existingById = new Map(
-            job.artifacts
-                .filter((artifact) => artifact.artifactId && artifact.url)
-                .map((artifact) => [artifact.artifactId!, artifact])
-        )
-        return Promise.all(
-            artifacts.map(async (artifact) => {
-                if (!artifact.bytesBase64) return artifact
-                const existing = artifact.artifactId
-                    ? existingById.get(artifact.artifactId)
-                    : undefined
-                if (existing?.url) {
-                    return {
-                        ...artifact,
-                        name: artifact.name || existing.name,
-                        filename: artifact.filename || existing.filename,
-                        url: existing.url,
-                        bytesBase64: undefined,
-                        metadata: { ...existing.metadata, ...artifact.metadata }
-                    }
-                }
-
-                const bytes = decodeArtifactBase64(artifact.bytesBase64)
-                if (bytes.length > MAX_DELEGATION_ARTIFACT_BYTES) {
-                    return {
-                        ...artifact,
-                        bytesBase64: undefined,
-                        text: [
-                            artifact.text,
-                            `[binary artifact omitted: ${bytes.length} bytes exceed the temporary-file limit]`
-                        ]
-                            .filter(Boolean)
-                            .join('\n')
-                    }
-                }
-                const sha256 = createHash('sha256').update(bytes).digest('hex')
-                const artifactId = artifact.artifactId || `sha256:${sha256}`
-                const hashedExisting = existingById.get(artifactId)
-                if (hashedExisting?.url) {
-                    return {
-                        ...artifact,
-                        artifactId,
-                        name: artifact.name || hashedExisting.name,
-                        filename: artifact.filename || hashedExisting.filename,
-                        url: hashedExisting.url,
-                        bytesBase64: undefined,
-                        metadata: {
-                            ...hashedExisting.metadata,
-                            ...artifact.metadata,
-                            size: bytes.length,
-                            sha256
-                        }
-                    }
-                }
-                const filename = delegationArtifactFilename(artifact, sha256)
-                const file =
-                    await this.ctx.chatluna_storage.createTempFileFromStream(
-                        Readable.from([bytes]),
-                        filename,
-                        {
-                            size: bytes.length,
-                            mimeType: artifact.mediaType
-                        }
-                    )
-                return {
-                    ...artifact,
-                    artifactId,
-                    name: artifact.name || file.name || filename,
-                    filename: artifact.filename || file.name || filename,
-                    url: file.url,
-                    bytesBase64: undefined,
-                    metadata: {
-                        ...artifact.metadata,
-                        size: bytes.length,
-                        sha256
-                    }
-                }
-            })
+        return artifacts.map((artifact) =>
+            artifact.bytesBase64
+                ? {
+                      ...artifact,
+                      bytesBase64: undefined,
+                      text: [
+                          artifact.text,
+                          '[binary artifact omitted: Nexus Gateway must publish binary artifacts as URLs]'
+                      ]
+                          .filter(Boolean)
+                          .join('\n')
+                  }
+                : artifact
         )
     }
 
@@ -373,6 +509,8 @@ export class AgentNexusService extends Service {
             this,
             this.delegationProviders.listAgents()
         )
+        const disposePublish = registerGatewayFilePublishTool(platform, this)
+        if (disposePublish) this.toolDispose.push(disposePublish)
     }
 
     private delegationToolName(job: DelegationJob) {
@@ -429,7 +567,6 @@ export class AgentNexusService extends Service {
     }
 }
 
-const MAX_DELEGATION_ARTIFACT_BYTES = 32 * 1024 * 1024
 const MAX_DELEGATION_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
 const MAX_DELEGATION_INPUT_BYTES = 32 * 1024 * 1024
 
@@ -445,54 +582,74 @@ interface InputAttachment {
     bytes: Uint8Array
 }
 
-function decodeArtifactBase64(value: string) {
-    const normalized = value.replace(/\s/g, '')
-    if (
-        !normalized ||
-        normalized.length % 4 === 1 ||
-        !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
-    ) {
-        throw new Error('Gateway returned invalid base64 artifact data.')
+function toTaskSummary(job: DelegationJob): NexusTaskSummary {
+    return {
+        id: job.id,
+        agentId: job.agentId,
+        agentName: job.agentName,
+        toolName: job.toolName,
+        state: job.state,
+        background: job.background,
+        promptPreview: clipTaskText(job.prompt, 180) || '(无提示词)',
+        outputPreview: clipTaskText(job.output, 240),
+        remoteState: job.remoteState,
+        artifactCount: job.artifacts.length,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        endedAt: job.endedAt,
+        expiresAt: job.expiresAt
     }
-    const bytes = Buffer.from(normalized, 'base64')
-    if (
-        bytes.toString('base64').replace(/=+$/, '') !==
-        normalized.replace(/=+$/, '')
-    ) {
-        throw new Error('Gateway returned invalid base64 artifact data.')
-    }
-    return bytes
 }
 
-function delegationArtifactFilename(
-    artifact: DelegationArtifact,
-    sha256: string
-) {
-    const preferred = artifact.filename || artifact.name
-    const basename = preferred ? path.basename(preferred.replace(/\\/g, '/')) : ''
-    const safe = basename
-        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-        .trim()
-        .slice(0, 180)
-    return (
-        safe ||
-        `agent-nexus-${sha256.slice(0, 12)}${extensionForMediaType(artifact.mediaType)}`
-    )
+function toTaskDetail(job: DelegationJob): NexusTaskDetail {
+    return {
+        ...toTaskSummary(job),
+        prompt: job.prompt,
+        output: job.output,
+        error: job.error,
+        pollError: job.pollError,
+        pendingRequest: job.pendingRequest,
+        artifacts: job.artifacts.map(toTaskArtifact)
+    }
 }
 
-function extensionForMediaType(mediaType?: string) {
-    const extensions: Record<string, string> = {
-        'image/png': '.png',
-        'image/jpeg': '.jpg',
-        'image/gif': '.gif',
-        'image/webp': '.webp',
-        'audio/mpeg': '.mp3',
-        'audio/wav': '.wav',
-        'audio/ogg': '.ogg',
-        'application/pdf': '.pdf',
-        'application/zip': '.zip'
+function toTaskArtifact(artifact: DelegationArtifact): NexusTaskArtifact {
+    const metadata = artifact.metadata || {}
+    return {
+        artifactId: artifact.artifactId,
+        name: artifact.name || artifact.filename || '未命名产物',
+        filename: artifact.filename,
+        url: artifact.url,
+        mediaType: artifact.mediaType,
+        size: typeof metadata.size === 'number' ? metadata.size : undefined,
+        sha256: typeof metadata.sha256 === 'string' ? metadata.sha256 : undefined,
+        expiresAt:
+            typeof metadata.expiresAt === 'number'
+                ? metadata.expiresAt
+                : undefined,
+        preview: artifactPreview(artifact)
     }
-    return mediaType ? extensions[mediaType.toLowerCase()] || '' : ''
+}
+
+function artifactPreview(artifact: DelegationArtifact) {
+    if (artifact.text) return clipTaskText(artifact.text, 1000)
+    if (artifact.data !== undefined) {
+        try {
+            return clipTaskText(JSON.stringify(artifact.data), 1000)
+        } catch {}
+    }
+    if (artifact.bytesBase64) {
+        return '[二进制产物，内容未在记录中展开]'
+    }
+    return undefined
+}
+
+function clipTaskText(value: string | undefined, maxChars: number) {
+    if (!value) return undefined
+    const text = value.trim()
+    if (!text) return undefined
+    return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`
 }
 
 function inputElement(value: any): InputAttachmentSource | undefined {

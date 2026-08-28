@@ -7,13 +7,17 @@ import {
     DelegationManager,
     DelegationProviderRegistry,
     DelegationStore,
+    formatDelegationUserReply,
     formatJob,
     type DelegationContext,
     type DelegationJob,
     type DelegationProvider,
     type RemoteAgentInfo
 } from '../src/delegation/index.ts'
-import { formatDelegationWakeup } from '../src/delegation/wakeup.ts'
+import {
+    formatDelegationWakeup,
+    notifyChatLunaDelegation
+} from '../src/delegation/wakeup.ts'
 
 test('persists only single-Gateway jobs and drops obsolete provider records', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-store-'))
@@ -316,6 +320,75 @@ test('serializes concurrent follow-up messages for the same job', async () => {
     }
 })
 
+test('automatically continues the unique pending job for the exact sender route', async () => {
+    const fixture = await managerFixture()
+    const seen: string[] = []
+    fixture.provider.run = async () => ({
+        state: 'input_required',
+        remoteState: 'input_required',
+        text: '请选择套餐',
+        pendingRequest: {
+            id: 'choose-meal',
+            kind: 'input',
+            prompt: '请选择套餐',
+            inputType: 'choice',
+            options: [{ id: 'meal-a', name: '套餐 A' }]
+        },
+        artifacts: [],
+        providerState: { gatewaySessionId: 'session-1' }
+    })
+    fixture.provider.message = async (_agent, current, request) => {
+        seen.push(request.prompt)
+        return {
+            state: 'input_required',
+            remoteState: 'input_required',
+            text: '请回复支付完成',
+            pendingRequest: {
+                id: 'payment-1',
+                kind: 'input',
+                prompt: '请回复支付完成',
+                inputType: 'payment',
+                metadata: {
+                    orderId: 'order-1',
+                    paymentUrl: 'https://pay.example/order-1'
+                }
+            },
+            artifacts: [],
+            providerState: structuredClone(current.providerState)
+        }
+    }
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: '下单', background: false },
+            context()
+        )
+        const continuation = await fixture.manager.continuePendingFromMessage(
+            context(),
+            '第一个'
+        )
+        assert.equal(continuation.handled, true)
+        assert.equal(continuation.job?.state, 'input_required')
+        assert.equal(continuation.job?.pendingRequest?.inputType, 'payment')
+        assert.deepEqual(seen, ['第一个'])
+        assert.match(formatDelegationUserReply(continuation.job!), /支付完成/)
+        assert.match(
+            formatDelegationUserReply(continuation.job!),
+            /https:\/\/pay\.example\/order-1/
+        )
+
+        const otherUser = context()
+        otherUser.routing.userId = 'other-user'
+        const rejected = await fixture.manager.continuePendingFromMessage(
+            otherUser,
+            '支付完成'
+        )
+        assert.equal(rejected.handled, false)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('stores structured artifacts and replaces prepared binary payloads with URLs', async () => {
     const fixture = await managerFixture({
         prepareArtifacts: async (artifacts) =>
@@ -357,12 +430,51 @@ test('stores structured artifacts and replaces prepared binary payloads with URL
             current.artifacts[1].url,
             'http://127.0.0.1:5140/temp/result.png'
         )
-        assert.match(output, /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/)
+        assert.doesNotMatch(output, /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/)
         assert.match(formatJob(current), /\{"answer":42\}/)
         assert.match(formatDelegationWakeup(current), /result\.png/)
+        assert.doesNotMatch(formatJob(current), /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/)
+        assert.doesNotMatch(formatDelegationWakeup(current), /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/)
+        assert.doesNotMatch(
+            formatDelegationUserReply(current),
+            /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/
+        )
     } finally {
         await fixture.dispose()
     }
+})
+
+test('keeps published files as media while hiding their URLs from the wakeup text', async () => {
+    const url = 'http://127.0.0.1:5140/temp/result.zip'
+    const current = {
+        ...job('background-file', 'gateway'),
+        background: true,
+        activeRunId: 'run-1',
+        artifacts: [{
+            artifactId: 'file-1',
+            name: 'result.zip',
+            filename: 'result.zip',
+            mediaType: 'application/zip',
+            url
+        }]
+    } as DelegationJob
+    let invocation: any
+    await notifyChatLunaDelegation(
+        {
+            async invoke(input) {
+                invocation = input
+                return { ok: true }
+            }
+        },
+        current
+    )
+    assert.ok(Array.isArray(invocation.message))
+    assert.doesNotMatch(invocation.message[0].text, /127\.0\.0\.1:5140/)
+    assert.match(invocation.message[0].text, /do not print, quote, or expose/)
+    assert.deepEqual(invocation.message[1], {
+        type: 'file_url',
+        file_url: { url, mimeType: 'application/zip' }
+    })
 })
 
 async function managerFixture(options: any = {}) {

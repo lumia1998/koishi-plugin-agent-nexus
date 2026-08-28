@@ -4,6 +4,7 @@ import type {
     GatewayAgentsResponse,
     GatewayAttachmentView,
     GatewayEvent,
+    GatewayPublishedFilesResponse,
     GatewaySessionView
 } from './types'
 
@@ -35,6 +36,11 @@ export interface GatewayClient {
         remote: GatewayRemoteConfig,
         sessionId: string
     ): Promise<GatewaySessionView>
+    publishFiles(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        paths: string[]
+    ): Promise<GatewayPublishedFilesResponse>
 }
 
 export class NexusGatewayClient {
@@ -48,7 +54,7 @@ export class NexusGatewayClient {
         remote: GatewayRemoteConfig,
         input: { agentId: string; workspace?: string }
     ) {
-        return this.request<GatewaySessionView>(
+        return this.sessionRequest(
             remote,
             '/v1/sessions',
             {
@@ -60,7 +66,7 @@ export class NexusGatewayClient {
     }
 
     async getSession(remote: GatewayRemoteConfig, sessionId: string) {
-        return this.request<GatewaySessionView>(
+        return this.sessionRequest(
             remote,
             `/v1/sessions/${encodeURIComponent(sessionId)}`
         )
@@ -72,7 +78,7 @@ export class NexusGatewayClient {
         message: string,
         attachments: string[] = []
     ) {
-        return this.request<GatewaySessionView>(
+        return this.sessionRequest(
             remote,
             `/v1/sessions/${encodeURIComponent(sessionId)}/message`,
             {
@@ -106,7 +112,7 @@ export class NexusGatewayClient {
     }
 
     async cancelSession(remote: GatewayRemoteConfig, sessionId: string) {
-        return this.request<GatewaySessionView>(
+        return this.sessionRequest(
             remote,
             `/v1/sessions/${encodeURIComponent(sessionId)}/cancel`,
             {
@@ -114,6 +120,28 @@ export class NexusGatewayClient {
                 body: '{}'
             }
         )
+    }
+
+    async publishFiles(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        paths: string[]
+    ) {
+        const result = await this.request<GatewayPublishedFilesResponse>(
+            remote,
+            `/v1/sessions/${encodeURIComponent(sessionId)}/files/publish`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ paths })
+            },
+            SESSION_START_TIMEOUT_MS
+        )
+        return {
+            files: (result.files || []).map((file) => ({
+                ...file,
+                url: absoluteGatewayUrl(remote, file.url)
+            }))
+        }
     }
 
     async *events(
@@ -184,6 +212,24 @@ export class NexusGatewayClient {
         }
     }
 
+    private async sessionRequest(
+        remote: GatewayRemoteConfig,
+        path: string,
+        init: RequestInit = {},
+        timeoutMs = DEFAULT_TIMEOUT_MS
+    ) {
+        const session = await this.request<GatewaySessionView>(remote, path, init, timeoutMs)
+        return {
+            ...session,
+            artifacts: (session.artifacts || []).map((artifact) => ({
+                ...artifact,
+                ...(artifact.url
+                    ? { url: absoluteGatewayUrl(remote, artifact.url) }
+                    : {})
+            }))
+        }
+    }
+
     private headers(remote: GatewayRemoteConfig, input?: any) {
         const headers = new Headers(input)
         headers.set('Accept', headers.get('Accept') || 'application/json')
@@ -215,6 +261,18 @@ export function validateGatewayUrl(value: string) {
 export function gatewayUrl(remote: GatewayRemoteConfig, path: string) {
     const base = validateGatewayUrl(remote.baseUrl)
     return new URL(path.replace(/^\/+/, ''), `${base}/`).toString()
+}
+
+function absoluteGatewayUrl(remote: GatewayRemoteConfig, value: string) {
+    const text = String(value || '').trim()
+    if (!text) return text
+    try {
+        const parsed = new URL(text)
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            return parsed.toString()
+        }
+    } catch {}
+    return gatewayUrl(remote, text)
 }
 
 export async function requestGatewayJson<T>(

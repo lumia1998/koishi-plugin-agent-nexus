@@ -37,7 +37,7 @@ export class NexusAgentDelegateTool extends NexusToolBase {
         this.name = name
         this.description =
             description ||
-            `通过 AgentNexus 将任务交给 ${agentName}。prompt 必须原样传递用户要求；当前消息中的图片和文件会一并转发。默认等待 ${agentName} 回复，只有需要异步执行时才设置 background=true；返回的任务 ID 可用于 action=status、action=message 或 action=stop。`
+            `通过 AgentNexus 将任务交给 ${agentName}。prompt 必须原样传递用户要求；当前消息中的图片和文件会一并转发。默认等待 ${agentName} 回复。若任务状态为 input_required 或 permission_required，后续用户的“第一个/可以/支付完成”等原文由 AgentNexus 自动续接到同一任务；模型手动续接时必须使用 action=message，不要重新创建任务，也不要要求用户再次说“调用 Hermes”。只有需要异步执行时才设置 background=true；返回的任务 ID 可用于 action=status、action=message 或 action=stop。`
         this.schema = z.object({
             action: z
                 .enum(['run', 'status', 'message', 'stop'])

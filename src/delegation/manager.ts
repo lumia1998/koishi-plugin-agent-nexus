@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { DelegationProviderRegistry } from './provider'
 import { DelegationStore } from './store'
+import { sameDelegationRouting } from '../tools/context'
 import {
     buildDelegationToolNames,
     delegationToolNameForAgent,
@@ -10,7 +11,9 @@ import type {
     DelegateToolInput,
     DelegationArtifact,
     DelegationContext,
+    DelegationInputAttachment,
     DelegationJob,
+    DelegationPendingRequest,
     DelegationProviderResult,
     DelegationState,
     RemoteAgentInfo
@@ -91,6 +94,66 @@ export class DelegationManager {
         if (action === 'stop') return this.stopJob(input.id, context, input.remote)
         if (action === 'message') return this.messageJob(input, context, signal)
         return this.runJob(input, context, signal)
+    }
+
+    /**
+     * Continue the one pending interaction owned by this exact Koishi route.
+     * This is intentionally separate from action=message: the raw-message
+     * middleware must never select a running or ambiguous job implicitly.
+     */
+    async continuePendingFromMessage(
+        context: DelegationContext,
+        prompt: string,
+        attachments: DelegationInputAttachment[] = [],
+        signal?: AbortSignal
+    ): Promise<{
+        handled: boolean
+        ambiguous?: boolean
+        job?: DelegationJob
+    }> {
+        const candidates = (await this.store.list(context.parentConversationId)).filter(
+            (job) =>
+                isInteractive(job.state) &&
+                Boolean(job.routing) &&
+                sameDelegationRouting(job.routing!, context.routing)
+        )
+        if (!candidates.length) return { handled: false }
+        if (candidates.length > 1) return { handled: false, ambiguous: true }
+
+        const original = candidates[0]
+        const now = this.now()
+        if (original.expiresAt <= now) {
+            const expired: DelegationJob = {
+                ...original,
+                state: 'failed',
+                pendingRequest: undefined,
+                output: undefined,
+                error: 'This interactive AgentNexus job has expired.',
+                endedAt: now,
+                updatedAt: now,
+                expiresAt: now + this.retentionMs
+            }
+            await this.store.save(expired)
+            return { handled: true, job: expired }
+        }
+
+        await this.sendTurn(
+            original,
+            requiredPrompt(prompt),
+            {
+                action: 'message',
+                id: original.id,
+                prompt,
+                background: false,
+                ...(attachments.length ? { attachments } : {})
+            },
+            signal,
+            true
+        )
+        return {
+            handled: true,
+            job: (await this.store.get(original.id)) || undefined
+        }
     }
 
     private async runJob(
@@ -799,6 +862,9 @@ function applyResult(
         remoteState: result.remoteState,
         state: result.state,
         output: clip(result.text ?? job.output, MAX_STORED_OUTPUT_CHARS),
+        pendingRequest: result.pendingRequest
+            ? structuredClone(result.pendingRequest)
+            : undefined,
         artifacts: storedArtifacts(result.artifacts || []),
         error:
             result.error ||
@@ -882,16 +948,25 @@ export function formatJob(
         `Tool: ${toolName}`,
         `State: ${job.state}`
     ]
-    if (job.output?.trim()) lines.push('', job.output.trim())
-    if (job.error?.trim()) lines.push('', `Error: ${job.error.trim()}`)
-    if (job.pollError?.trim()) lines.push('', `Monitor: ${job.pollError.trim()}`)
+    const output = redactArtifactUrls(job.output, job.artifacts)
+    if (output?.trim()) lines.push('', output.trim())
+    const error = redactArtifactUrls(job.error, job.artifacts)
+    const pollError = redactArtifactUrls(job.pollError, job.artifacts)
+    if (error?.trim()) lines.push('', `Error: ${error.trim()}`)
+    if (pollError?.trim()) lines.push('', `Monitor: ${pollError.trim()}`)
     if (job.artifacts.length) {
         lines.push('', 'Artifacts:')
         for (const artifact of job.artifacts) {
             lines.push(
                 artifact.url
-                    ? `- ${artifact.name || artifact.filename || 'file'}: ${artifact.url}`
+                    ? `- ${artifact.name || artifact.filename || 'file'}: [附件已发布]`
                     : `- ${artifact.name || 'artifact'}: ${artifactPreview(artifact)}`
+            )
+        }
+        if (job.artifacts.some((artifact) => artifact.url)) {
+            lines.push(
+                '',
+                'Published files are available as message attachments. Do not print or expose their temporary URLs; use filenames only.'
             )
         }
     }
@@ -909,11 +984,63 @@ export function formatJob(
     return lines.join('\n')
 }
 
+/** Format a completed/pending result for direct delivery to the user. */
+export function formatDelegationUserReply(job: DelegationJob) {
+    const output = redactArtifactUrls(job.output, job.artifacts)?.trim()
+    const error = redactArtifactUrls(job.error, job.artifacts)?.trim()
+    const pending = job.pendingRequest
+        ? formatPendingUserRequest(job.pendingRequest)
+        : undefined
+    const paymentUrl = pendingPaymentUrl(job.pendingRequest)
+    const pendingSupplement =
+        paymentUrl && !output?.includes(paymentUrl)
+            ? `支付链接：${paymentUrl}`
+            : undefined
+    return [
+        output,
+        pending && !output ? pending : undefined,
+        pendingSupplement,
+        error ? `Error: ${error}` : undefined
+    ]
+        .filter(Boolean)
+        .join('\n\n')
+}
+
+function redactArtifactUrls(
+    value: string | undefined,
+    artifacts: DelegationArtifact[]
+) {
+    if (!value) return value
+    return artifacts.reduce((result, artifact) => {
+        if (!artifact.url) return result
+        const label = artifact.name || artifact.filename || '附件'
+        return result.split(artifact.url).join(`[${label}已作为附件发送]`)
+    }, value)
+}
+
 function requiredPrompt(value: unknown) {
     if (typeof value !== 'string' || !value.trim()) {
         throw new Error('Delegation prompt is required.')
     }
     return value
+}
+
+function formatPendingUserRequest(request: DelegationPendingRequest) {
+    const options = request.options?.length
+        ? request.options.map((option, index) => `${index + 1}. ${option.name}`).join('\n')
+        : ''
+    const paymentUrlValue = pendingPaymentUrl(request)
+    const paymentUrl = paymentUrlValue ? `支付链接：${paymentUrlValue}` : ''
+    return [request.prompt.trim(), paymentUrl, options]
+        .filter(Boolean)
+        .join('\n\n')
+}
+
+function pendingPaymentUrl(request?: DelegationPendingRequest) {
+    return request?.inputType === 'payment' &&
+        typeof request.metadata?.paymentUrl === 'string'
+        ? request.metadata.paymentUrl
+        : undefined
 }
 
 function clean(value: unknown) {

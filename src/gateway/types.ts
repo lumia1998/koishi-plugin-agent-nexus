@@ -35,6 +35,20 @@ export interface GatewayAttachmentView {
     size: number
 }
 
+export interface GatewayPublishedFile {
+    id: string
+    name: string
+    url: string
+    size: number
+    mediaType: string
+    sha256: string
+    expiresAt: number
+}
+
+export interface GatewayPublishedFilesResponse {
+    files: GatewayPublishedFile[]
+}
+
 export interface GatewayArtifactView {
     id?: string
     name?: string
@@ -63,11 +77,14 @@ export interface GatewaySessionView {
         id: string
         kind: 'permission' | 'input'
         prompt: string
+        step?: string
+        inputType?: 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown'
         options?: Array<{
             id: string
             name: string
             kind?: string
         }>
+        metadata?: Record<string, unknown>
     }
     lastEventId?: string
     createdAt: number

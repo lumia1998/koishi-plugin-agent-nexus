@@ -14,6 +14,10 @@ export interface Config {
     gatewayKey: string
     commandAuthority: number
     maxResponseBytes: number
+    /** Automatically route the original user's next message to a pending job. */
+    autoResumePending?: boolean
+    /** Keep @bot required for pending replies in group chats. */
+    pendingRequireMention?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -33,7 +37,13 @@ export const Config: Schema<Config> = Schema.object({
         .min(1048576)
         .max(268435456)
         .default(32 * 1024 * 1024)
-        .description('单个 Gateway HTTP 或 SSE 响应允许读取的最大字节数')
+        .description('单个 Gateway HTTP 或 SSE 响应允许读取的最大字节数'),
+    autoResumePending: Schema.boolean()
+        .default(true)
+        .description('任务等待用户输入时，自动把原用户下一条消息继续发送给同一 Agent'),
+    pendingRequireMention: Schema.boolean()
+        .default(false)
+        .description('群聊中继续等待任务是否仍要求 @Bot；关闭后原用户可直接回复“第一个/支付完成”')
 })
 
 export function createDefaultNexusConfig(): NexusConfig {

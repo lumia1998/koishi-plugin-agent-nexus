@@ -31,7 +31,8 @@ src/delegation/manager.ts     任务生命周期、续聊、轮询与取消
 src/delegation/store.ts       Gateway 任务持久化
 src/delegation/wakeup.ts      后台任务完成后唤醒 ChatLuna
 src/tools/delegate.ts         每 Agent 独立 ChatLuna Tool
-src/service.ts                Koishi Service、工具同步与产物转存
+src/tools/publish.ts          Session 工作区文件发布 Tool
+src/service.ts                Koishi Service、工具同步与 Gateway 文件发布
 src/webui/index.ts            最小 Console RPC
 client/components/gateway-panel.vue  单 Gateway 中文控制台
 ```
@@ -46,6 +47,8 @@ interface Config {
     gatewayKey: string
     commandAuthority: number
     maxResponseBytes: number
+    autoResumePending?: boolean
+    pendingRequireMention?: boolean
 }
 ```
 
@@ -81,6 +84,9 @@ GET  /v1/sessions/:id
 POST /v1/sessions/:id/message
 POST /v1/sessions/:id/cancel
 GET  /v1/sessions/:id/events
+GET  /v1/sessions/:id/files
+GET  /v1/sessions/:id/files/content
+POST /v1/sessions/:id/files/publish
 ```
 
 Agent inventory 必须保留 `protocol: "acp" | "a2a"`；Session 必须保留 `protocol`、
@@ -101,7 +107,8 @@ Agent inventory 必须保留 `protocol: "acp" | "a2a"`；Session 必须保留 `p
 - `gatewayKey` 使用 Koishi secret 字段，不写入 `data/agent-nexus/config.json` 或 Console 响应。
 - Gateway URL 仅允许 HTTP/HTTPS，拒绝 URL 凭据与 fragment。
 - Gateway 负责 API Key scope 与 Session 所有权校验。
-- 二进制产物有 32 MiB 转存上限，并校验 base64 后写入 ChatLuna 临时文件。
+- 插件不读取或转存 Agent 输出文件，也不依赖 ChatLuna Storage。Gateway 校验 Session 所有权和
+  工作区边界后，流式复制到其独立发布仓库，并返回有时效的不可猜测 URL。
 - 局域网部署时，`0.0.0.0` 只作为 Gateway 监听地址；插件连接真实 IP/域名。
 
 ## 发布门槛

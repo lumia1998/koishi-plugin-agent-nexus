@@ -51,8 +51,7 @@ const external = [
     'koishi',
     'ws',
     '@koishijs/plugin-console',
-    'koishi-plugin-chatluna',
-    'koishi-plugin-chatluna-storage-service'
+    'koishi-plugin-chatluna'
 ]
 
 Promise.all([

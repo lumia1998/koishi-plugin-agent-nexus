@@ -5,7 +5,7 @@ import * as webui from './webui'
 
 export const name = pluginName
 export const inject = {
-    required: ['chatluna', 'chatluna_storage'],
+    required: ['chatluna'],
     optional: ['console']
 }
 

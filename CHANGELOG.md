@@ -2,7 +2,18 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
-## 未发布
+## [0.2.0-alpha.2] - 2026-08-28
+
+- 适配 Gateway 的 Agent 交互指令注入和协议级 `input_required` 等待状态，支持不重复调用 Agent 的多轮确认流程。
+- 收紧 pending Job 的会话、用户和频道路由绑定，避免后续回复续接到错误任务。
+
+## [0.2.0-alpha.1] - 2026-08-27
+
+- 移除 `koishi-plugin-chatluna-storage-service` 强依赖；Agent 输出文件统一由 Nexus Gateway 的独立
+  临时仓库发布。
+- 新增 `nexus_file_publish` 工具，可按 Gateway Job/Session 发布工作区内文件，避免大文件 Base64
+  膨胀；有 Koishi 会话时会通过 `h.file` 发送附件，工具和后台唤醒消息不会把临时 URL 展示给用户。
+- Console 新增任务与调用记录，可查看委派任务状态、输入、输出、耗时和产物。
 
 - `nexus_<agent>` 工具不再强制要求 ChatLuna 会话上下文；默认原样传递用户任务并前台等待
   Agent 结果，显式 `background=true` 才切换为后台任务。

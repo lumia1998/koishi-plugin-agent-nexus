@@ -18,6 +18,13 @@ export function apply(ctx: Context) {
     ctx.console.addListener('agent-nexus/getConsoleData', async () =>
         nexus().getConsoleData()
     )
+    ctx.console.addListener('agent-nexus/getDelegationJobs', async () =>
+        nexus().getDelegationJobs()
+    )
+    ctx.console.addListener(
+        'agent-nexus/getDelegationJob',
+        async (jobId: string) => nexus().getDelegationJob(jobId)
+    )
     ctx.console.addListener(
         'agent-nexus/refreshGateway',
         async () => nexus().refreshRemoteStatuses(),
@@ -39,6 +46,10 @@ export function apply(ctx: Context) {
 declare module '@koishijs/plugin-console' {
     interface Events {
         'agent-nexus/getConsoleData'(): Promise<import('../types').NexusConsoleData>
+        'agent-nexus/getDelegationJobs'(): Promise<import('../types').NexusTaskSummary[]>
+        'agent-nexus/getDelegationJob'(
+            jobId: string
+        ): Promise<import('../types').NexusTaskDetail | undefined>
         'agent-nexus/refreshGateway'(): Promise<import('../types').NexusStatus>
         'agent-nexus/saveDelegationAgent'(
             input: Partial<import('../types').DelegationAgentConfig>

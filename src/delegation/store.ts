@@ -178,6 +178,7 @@ function normalizeJob(value: unknown): DelegationJob | undefined {
         output: optionalString(value.output),
         error: optionalString(value.error),
         pollError: optionalString(value.pollError),
+        pendingRequest: normalizePendingRequest(value.pendingRequest),
         artifacts: Array.isArray(value.artifacts)
             ? structuredClone(value.artifacts)
             : [],
@@ -244,6 +245,45 @@ function finiteNumber(value: unknown, fallback: number) {
 function optionalFiniteNumber(value: unknown) {
     const number = Number(value)
     return Number.isFinite(number) ? number : undefined
+}
+
+function normalizePendingRequest(value: unknown) {
+    if (!isRecord(value)) return undefined
+    const id = stringValue(value.id)
+    const prompt = stringValue(value.prompt)
+    if (!id || !prompt || !['permission', 'input'].includes(String(value.kind))) {
+        return undefined
+    }
+    const inputType = [
+        'text',
+        'choice',
+        'confirmation',
+        'payment',
+        'unknown'
+    ].includes(String(value.inputType))
+        ? (String(value.inputType) as 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown')
+        : undefined
+    const options = Array.isArray(value.options)
+        ? value.options
+              .filter(isRecord)
+              .map((option) => ({
+                  id: stringValue(option.id),
+                  name: stringValue(option.name),
+                  kind: optionalString(option.kind)
+              }))
+              .filter((option) => option.id && option.name)
+        : undefined
+    return {
+        id,
+        kind: String(value.kind) as 'permission' | 'input',
+        prompt,
+        step: optionalString(value.step),
+        inputType,
+        options: options?.length ? options : undefined,
+        metadata: isRecord(value.metadata)
+            ? structuredClone(value.metadata)
+            : undefined
+    }
 }
 
 export type {

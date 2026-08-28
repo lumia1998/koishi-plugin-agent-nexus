@@ -124,6 +124,69 @@ test('uploads current-message attachments as bounded binary Session input', asyn
     }
 })
 
+test('publishes workspace files and resolves Gateway-relative artifact URLs', async () => {
+    const requests: Array<{ path: string; auth?: string; body: string }> = []
+    const server = http.createServer(async (request, response) => {
+        let body = ''
+        for await (const chunk of request) body += String(chunk)
+        requests.push({
+            path: request.url || '',
+            auth: request.headers.authorization,
+            body
+        })
+        response.setHeader('Content-Type', 'application/json')
+        if (request.url === '/gateway/v1/sessions/session-1') {
+            response.end(JSON.stringify({
+                ...session('completed'),
+                artifacts: [{ name: 'inline.txt', url: '/v1/artifacts/token/inline.txt' }]
+            }))
+            return
+        }
+        if (request.url === '/gateway/v1/sessions/session-1/files/publish') {
+            response.end(JSON.stringify({
+                files: [{
+                    id: 'published-1',
+                    name: 'result.zip',
+                    url: '/v1/artifacts/token/result.zip',
+                    size: 45 * 1024 * 1024,
+                    mediaType: 'application/zip',
+                    sha256: 'abc',
+                    expiresAt: Date.now() + 60_000
+                }]
+            }))
+            return
+        }
+        response.statusCode = 404
+        response.end(JSON.stringify({ error: 'missing' }))
+    })
+    await listen(server)
+    const remote = {
+        ...gatewayRemote(server),
+        baseUrl: `${gatewayRemote(server).baseUrl}/gateway`
+    }
+    const client = new NexusGatewayClient()
+    try {
+        const sessionView = await client.getSession(remote, 'session-1')
+        assert.equal(
+            sessionView.artifacts[0].url,
+            `${remote.baseUrl}/v1/artifacts/token/inline.txt`
+        )
+        const published = await client.publishFiles(remote, 'session-1', [
+            '/workspace/result.zip'
+        ])
+        assert.equal(
+            published.files[0].url,
+            `${remote.baseUrl}/v1/artifacts/token/result.zip`
+        )
+        assert.equal(requests[1].auth, 'Bearer TOKEN')
+        assert.deepEqual(JSON.parse(requests[1].body), {
+            paths: ['/workspace/result.zip']
+        })
+    } finally {
+        await close(server)
+    }
+})
+
 test('parses replayable SSE events including artifacts', async () => {
     let requestUrl = ''
     let lastEventId = ''
@@ -261,7 +324,10 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
                     id: 'permission-1',
                     kind: 'permission',
                     prompt: '允许修改 package.json 吗？',
-                    options: [{ id: 'allow', name: '允许一次' }]
+                    step: 'permission',
+                    inputType: 'confirmation',
+                    options: [{ id: 'allow', name: '允许一次' }],
+                    metadata: { scope: 'package.json' }
                 }
             }
         }
@@ -284,6 +350,15 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
     })
     assert.equal(result.state, 'permission_required')
     assert.match(result.text || '', /允许一次/)
+    assert.deepEqual(result.pendingRequest, {
+        id: 'permission-1',
+        kind: 'permission',
+        prompt: '允许修改 package.json 吗？',
+        step: 'permission',
+        inputType: 'confirmation',
+        options: [{ id: 'allow', name: '允许一次' }],
+        metadata: { scope: 'package.json' }
+    })
     assert.equal(result.providerState.protocol, 'acp')
     assert.equal(result.providerState.protocolSessionId, 'acp-1')
     assert.equal(result.providerState.acpSessionId, 'acp-1')
