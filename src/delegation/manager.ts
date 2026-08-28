@@ -346,8 +346,27 @@ export class DelegationManager {
         } catch (error) {
             if (
                 original.activeRunId &&
-                (original.state === 'running' || isInteractive(original.state))
+                isInteractive(original.state)
             ) {
+                const now = this.now()
+                const failed: DelegationJob = {
+                    ...original,
+                    state: 'failed',
+                    providerState: {},
+                    remoteState: 'failed',
+                    output: undefined,
+                    error: clip(errorMessage(error), 32 * 1024),
+                    pollError: undefined,
+                    pendingRequest: undefined,
+                    endedAt: now,
+                    updatedAt: now,
+                    expiresAt: now + this.retentionMs,
+                    notifiedRunId: original.activeRunId
+                }
+                await this.store.save(failed)
+                throw error
+            }
+            if (original.activeRunId && original.state === 'running') {
                 const restored: DelegationJob = {
                     ...original,
                     pollError: clip(errorMessage(error), 32 * 1024),

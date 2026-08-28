@@ -14,6 +14,11 @@ import {
     NexusFilePublishTool,
     registerGatewayFilePublishTool
 } from '../src/tools/publish.ts'
+import {
+    createNexusArtifactElement,
+    isNexusArtifactElement
+} from '../src/utils/artifact-element.ts'
+import { AgentNexusService } from '../src/service.ts'
 
 test('builds stable, Agent-facing delegation tool names', () => {
     const names = buildDelegationToolNames([
@@ -304,4 +309,158 @@ test('file publish tool forwards exact paths and current conversation context', 
     assert.match(registered.get(NEXUS_FILE_PUBLISH_TOOL).description, /Base64/)
     dispose?.()
     assert.equal(registered.size, 0)
+})
+
+test('builds native Koishi elements for artifact media types and buffers', () => {
+    const audio = createNexusArtifactElement({
+        bytes: Buffer.from([1, 2, 3]),
+        filename: 'voice.wav',
+        mediaType: 'audio/wav'
+    })
+    assert.equal(audio.type, 'audio')
+    assert.equal(audio.attrs.src, 'data:audio/wav;base64,AQID')
+    assert.equal(audio.attrs.filename, 'voice.wav')
+    assert.equal(isNexusArtifactElement(audio), true)
+
+    const view = new Uint8Array([9, 1, 2, 3, 8]).subarray(1, 4)
+    const viewAudio = createNexusArtifactElement({
+        bytes: view,
+        filename: 'view.wav',
+        mediaType: 'audio/wav'
+    })
+    assert.equal(viewAudio.attrs.src, 'data:audio/wav;base64,AQID')
+
+    const video = createNexusArtifactElement({
+        url: 'https://gateway.example/video.mp4',
+        filename: 'video.mp4',
+        mediaType: 'video/mp4'
+    })
+    assert.equal(video.type, 'video')
+    assert.equal(video.attrs.src, 'https://gateway.example/video.mp4')
+    assert.equal(video.attrs.filename, 'video.mp4')
+    assert.equal(isNexusArtifactElement(video), true)
+
+    const file = createNexusArtifactElement({
+        url: 'https://gateway.example/report.zip',
+        filename: 'report.zip',
+        mediaType: 'application/zip'
+    })
+    assert.equal(file.type, 'file')
+    assert.equal(file.attrs.src, 'https://gateway.example/report.zip')
+    assert.equal(file.attrs.filename, 'report.zip')
+    assert.equal(file.attrs.mime, 'application/zip')
+    assert.equal(isNexusArtifactElement(file), true)
+})
+
+test('file publish sends audio and video as native Koishi media elements', async () => {
+    const sent: any[] = []
+    const nexus = {
+        async publishDelegationFiles() {
+            return [
+                {
+                    id: 'audio-1',
+                    name: 'song.mp3',
+                    url: 'https://gateway.example/song.mp3',
+                    size: 3,
+                    mediaType: 'audio/mpeg',
+                    sha256: 'audio',
+                    expiresAt: Date.now() + 60_000
+                },
+                {
+                    id: 'video-1',
+                    name: 'clip.mp4',
+                    url: 'https://gateway.example/clip.mp4',
+                    size: 3,
+                    mediaType: 'video/mp4',
+                    sha256: 'video',
+                    expiresAt: Date.now() + 60_000
+                }
+            ]
+        }
+    }
+    const tool = new NexusFilePublishTool(nexus as any)
+    await tool._call(
+        { paths: ['song.mp3', 'clip.mp4'] },
+        undefined,
+        {
+            configurable: {
+                session: {
+                    send(content: unknown) {
+                        sent.push(content)
+                        return Promise.resolve([])
+                    }
+                }
+            }
+        }
+    )
+    assert.deepEqual(
+        sent.map((element) => [element.type, element.attrs.src]),
+        [
+            ['audio', 'https://gateway.example/song.mp3'],
+            ['video', 'https://gateway.example/clip.mp4']
+        ]
+    )
+})
+
+test('does not re-read echoed artifacts as user attachments', async () => {
+    const service = Object.create(AgentNexusService.prototype) as any
+    service.ctx = { logger: { debug() {} } }
+    const echoedArtifact = createNexusArtifactElement({
+        url: 'https://gateway.example/song.mp3',
+        filename: 'song.mp3',
+        mediaType: 'audio/mpeg'
+    })
+
+    const attachments = await service.collectInputAttachments({
+        configurable: {
+            session: {
+                elements: [
+                    echoedArtifact,
+                    { type: 'audio', attrs: { src: 'marshmello_alone.mp3' } }
+                ]
+            }
+        }
+    })
+    assert.deepEqual(attachments, [])
+})
+
+test('pending continuation failure does not swallow the current Koishi message', async () => {
+    const service = Object.create(AgentNexusService.prototype) as any
+    let middleware: any
+    let nextCalls = 0
+    const sent: string[] = []
+    service.ctx = {
+        logger: { warn() {} },
+        middleware(handler: any) {
+            middleware = handler
+            return () => undefined
+        }
+    }
+    service.pluginConfig = { autoResumePending: true }
+    service.running = true
+    service.resumePendingMessage = async () => {
+        throw new Error('Nexus Gateway request failed (404): Agent Nexus session not found')
+    }
+
+    service.installPendingMessageMiddleware()
+    const result = await middleware(
+        {
+            userId: 'user',
+            selfId: 'bot',
+            send(content: string) {
+                sent.push(content)
+                return Promise.resolve([])
+            }
+        },
+        async () => {
+            nextCalls += 1
+            return 'next-result'
+        }
+    )
+
+    assert.equal(result, 'next-result')
+    assert.equal(nextCalls, 1)
+    assert.deepEqual(sent, [
+        '继续 Agent 任务失败：Nexus Gateway request failed (404): Agent Nexus session not found'
+    ])
 })

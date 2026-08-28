@@ -1,4 +1,4 @@
-import { Context, h, Service } from 'koishi'
+import { Context, Service } from 'koishi'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { readFile as readBinaryFile } from 'fs/promises'
@@ -43,6 +43,10 @@ import {
     delegationContextFromSession,
     sameDelegationRouting
 } from './tools/context'
+import {
+    createNexusArtifactElement,
+    isNexusArtifactElement
+} from './utils/artifact-element'
 
 export class AgentNexusService extends Service {
     static readonly inject = ['chatluna']
@@ -154,8 +158,14 @@ export class AgentNexusService extends Service {
                 this.ctx.logger.warn(
                     `[agent-nexus] pending message continuation failed: ${getErrorMessage(error)}`
                 )
-                await session.send(`继续 Agent 任务失败：${getErrorMessage(error)}`)
-                return
+                try {
+                    await session.send(`继续 Agent 任务失败：${getErrorMessage(error)}`)
+                } catch (sendError) {
+                    this.ctx.logger.warn(
+                        `[agent-nexus] failed to report pending continuation error: ${getErrorMessage(sendError)}`
+                    )
+                }
+                return next()
             }
             return next()
         }, true)
@@ -223,13 +233,8 @@ export class AgentNexusService extends Service {
         const text = formatDelegationUserReply(job)
         if (text) await session.send(text)
         for (const artifact of job.artifacts) {
-            if (!artifact.url) continue
-            await session.send(
-                h.file(artifact.url, {
-                    filename: artifact.filename || artifact.name || undefined,
-                    mime: artifact.mediaType || undefined
-                })
-            )
+            const element = createNexusArtifactElement(artifact)
+            if (element) await session.send(element)
         }
     }
 
@@ -338,6 +343,12 @@ export class AgentNexusService extends Service {
         const attachments: InputAttachment[] = []
         let total = 0
         for (const source of sources) {
+            if (!isReadableAttachmentSource(source.source)) {
+                this.ctx.logger.debug(
+                    `[agent-nexus] ignoring attachment without a readable source: ${source.name}`
+                )
+                continue
+            }
             const attachment = await loadInputAttachment(source)
             total += attachment.bytes.length
             if (total > MAX_DELEGATION_INPUT_BYTES) {
@@ -654,6 +665,7 @@ function clipTaskText(value: string | undefined, maxChars: number) {
 
 function inputElement(value: any): InputAttachmentSource | undefined {
     if (!value || typeof value !== 'object') return undefined
+    if (isNexusArtifactElement(value)) return undefined
     const type = String(value.type || '').toLowerCase()
     if (!['img', 'image', 'file', 'attachment', 'audio', 'video'].includes(type)) {
         return undefined
@@ -671,6 +683,14 @@ function inputElement(value: any): InputAttachmentSource | undefined {
             String(attrs.mediaType || attrs.mimeType || attrs.mime || '').trim()
         ) || mediaTypeFromSource(source, type)
     }
+}
+
+function isReadableAttachmentSource(source: string) {
+    return (
+        /^data:/i.test(source) ||
+        /^file:\/\//i.test(source) ||
+        /^[a-z][a-z\d+.-]*:\/\//i.test(source)
+    )
 }
 
 async function loadInputAttachment(source: InputAttachmentSource): Promise<InputAttachment> {

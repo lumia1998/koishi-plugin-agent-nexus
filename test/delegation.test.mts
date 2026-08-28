@@ -389,6 +389,58 @@ test('automatically continues the unique pending job for the exact sender route'
     }
 })
 
+test('ends a pending job after continuation failure and does not capture later messages', async () => {
+    const fixture = await managerFixture()
+    fixture.provider.run = async () => ({
+        state: 'input_required',
+        remoteState: 'input_required',
+        text: '请选择套餐',
+        pendingRequest: {
+            id: 'choose-meal',
+            kind: 'input',
+            prompt: '请选择套餐',
+            inputType: 'choice',
+            options: [{ id: 'meal-a', name: '套餐 A' }]
+        },
+        artifacts: [],
+        providerState: {
+            gatewaySessionId: 'stale-session',
+            protocol: 'acp'
+        }
+    })
+    fixture.provider.message = async () => {
+        throw new Error(
+            'Nexus Gateway request failed (404): Agent Nexus session not found: stale-session'
+        )
+    }
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: '下单', background: false },
+            context()
+        )
+        const [before] = await fixture.store.list()
+        await assert.rejects(
+            () => fixture.manager.continuePendingFromMessage(context(), '同意'),
+            /404.*session not found/
+        )
+
+        const failed = await fixture.store.get(before.id)
+        assert.equal(failed?.state, 'failed')
+        assert.equal(failed?.pendingRequest, undefined)
+        assert.deepEqual(failed?.providerState, {})
+        assert.match(failed?.error || '', /404.*session not found/)
+
+        const nextMessage = await fixture.manager.continuePendingFromMessage(
+            context(),
+            'chatluna.delete'
+        )
+        assert.deepEqual(nextMessage, { handled: false })
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('stores structured artifacts and replaces prepared binary payloads with URLs', async () => {
     const fixture = await managerFixture({
         prepareArtifacts: async (artifacts) =>

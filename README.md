@@ -23,7 +23,8 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 - 会话上下文不是调用前提；显式使用后台模式时，如有 ChatLuna 会话上下文则在完成后唤醒原会话，
   没有上下文时可通过返回的任务 ID 查询。
 - 注册 `nexus_file_publish` 工具，把 Agent 在 Session 工作区中生成的文件交给 Gateway 发布；有当前
-  Koishi 会话时，插件会用 `h.file` 将文件作为附件发送，模型回复中不会展示临时 URL。
+  Koishi 会话时，插件按媒体类型发送原生元素：音频用 `h.audio`、视频用 `h.video`、图片用 `h.image`、
+  其他文件用 `h.file`。模型回复中不会展示临时 URL。
 - 在 Console 的“任务与调用记录”中查看委派任务状态、输入、输出、耗时和产物。
 - 为单个 Agent 提供改名、停用、工作区、描述和技能标签覆盖。
 
@@ -48,7 +49,7 @@ npm install koishi-plugin-agent-nexus@alpha
 
 当前 0.2 单 Gateway 架构发布在 npm 的 alpha 标签。直接执行 npm install koishi-plugin-agent-nexus
 会跟随 latest 标签；在 latest 尚未切换前，它可能安装旧的 0.1.x 架构。也可以固定到
-npm install koishi-plugin-agent-nexus@0.2.0-alpha.2。
+npm install koishi-plugin-agent-nexus@0.2.0-alpha.3。
 
 然后在 Koishi 插件设置中配置：
 
@@ -122,12 +123,20 @@ Gateway 的 Session 附件接口。Gateway 会在对应 Session 中临时保存�
 2. A2A Agent 收到带文件名和媒体类型的二进制 Part。
 3. Agent 返回的内联二进制产物由 Gateway 自动写入 Gateway 配置的 Artifact 发布仓库，插件只接收 URL。
 4. Agent 报告了工作区文件路径时，ChatLuna 可调用 `nexus_file_publish`；Gateway 校验该路径必须
-   位于对应 Session 的工作区内，再流式复制；插件通过 `h.file` 发送附件，不把下载 URL 放进用户回复。
+   位于对应 Session 的工作区内，再流式复制；插件按媒体类型通过 `h.audio`、`h.video`、`h.image` 或
+   `h.file` 发送原生附件，不把下载 URL 放进用户回复。大文件始终走 Gateway URL，不会在插件中转成 Base64。
 
 附件只跟随当前任务发送，不会拼接成历史对话；Session 空闲释放时 Gateway 同时清理临时附件。
 发布链接使用不可猜测 token，默认 24 小时失效。工作区本身从不作为静态目录公开，因此几十 MiB
 工作区文件发布使用流式复制，不经过 Base64/JSON；也不需要额外部署 FileBrowser 或 SFTP。若调用
-来自没有 Koishi 会话的后台环境，插件仍会保留 Gateway 产物记录，Console 可查看附件入口。
+来自没有 Koishi 会话的后台环境，插件仍会保留 Gateway 产物记录，Console 可查看附件入口。插件发出的
+产物元素会带内部回流标记，后续续接不会把机器人刚发送的音频、视频或文件再次当成用户附件；平台若只
+回传不可读取的裸文件名，也会被忽略而不会让续接任务失败。
+
+后台任务完成后的唤醒逻辑参考 ChatLuna 的 `agentTaskAutoWakeup`：插件通过已有会话重新注入任务结果，
+再由 ChatLuna 生成面向用户的回复；`toolCallReplyNextReply` 属于 Character 的短期触发条件，不用于定位
+AgentNexus 任务。等待中的任务若续接失败，会立即结束为失败状态并放行当前消息，避免普通文本或其他 Koishi
+命令被旧任务持续拦截。
 
 ## 局域网配置
 

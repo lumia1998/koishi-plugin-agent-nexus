@@ -2,6 +2,16 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.2.0-alpha.3] - 2026-08-28
+
+- Agent 产物按媒体类型发送为 Koishi 原生元素：音频 `h.audio`、视频 `h.video`、图片 `h.image`、
+  普通文件 `h.file`；大文件仍通过 Gateway URL 传输，不转回 Base64。
+- 忽略机器人产物回流时形成的不可读取附件名，避免续接 Agent 任务时报“无法读取用户附件地址”。
+- 修复等待中的 Agent 任务续接失败后持续拦截所有后续消息的问题：失败任务会清除 pending 和旧 Gateway
+  Session，普通消息与其他 Koishi 命令继续正常流转。
+- 后台任务唤醒逻辑对齐 ChatLuna `agentTaskAutoWakeup` 的已有会话注入语义；明确区分 Character 的
+  `toolCallReplyNextReply` 短期触发条件。
+
 ## [0.2.0-alpha.2] - 2026-08-28
 
 - 适配 Gateway 的 Agent 交互指令注入和协议级 `input_required` 等待状态，支持不重复调用 Agent 的多轮确认流程。

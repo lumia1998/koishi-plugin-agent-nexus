@@ -1,17 +1,17 @@
-import { h } from 'koishi'
 import z from './chatluna-dependencies'
 import type { AgentNexusService } from '../service'
 import { NexusToolBase } from './base'
 import { toolDelegationContext } from './context'
 import type { NexusToolPlatform } from './delegate'
 import type { GatewayPublishedFile } from '../gateway/types'
+import { createNexusArtifactElement } from '../utils/artifact-element'
 
 export const NEXUS_FILE_PUBLISH_TOOL = 'nexus_file_publish'
 
 export class NexusFilePublishTool extends NexusToolBase {
     readonly name = NEXUS_FILE_PUBLISH_TOOL
     readonly description =
-        '发布 Nexus Agent 在工作区中生成的图片或文件。传入该 Agent 返回的原始文件路径；工具会让 Nexus Gateway 流式复制文件，并在有当前 Koishi 会话时通过 h.file 作为文件附件发送给用户。不要把临时 URL 写入回复、展示给用户或要求用户点击 URL；只说明文件名和发送状态。不得猜测路径，也不要读取文件转成 Base64。'
+        '发布 Nexus Agent 在工作区中生成的图片、音频、视频或文件。传入该 Agent 返回的原始文件路径；工具会让 Nexus Gateway 流式复制文件，并在有当前 Koishi 会话时按媒体类型作为原生 Koishi 产物发送：图片 h.image、音频 h.audio、视频 h.video、其他文件 h.file。不要把临时 URL 写入回复、展示给用户或要求用户点击 URL；只说明文件名和发送状态。不得猜测路径，也不要读取文件转成 Base64。'
     readonly schema = z.object({
         id: z
             .string()
@@ -49,10 +49,8 @@ async function sendPublishedFiles(
 ) {
     if (typeof session?.send !== 'function') return false
     for (const file of files) {
-        const element = h.file(file.url, {
-            filename: file.name,
-            mime: file.mediaType || undefined
-        })
+        const element = createNexusArtifactElement(file)
+        if (!element) continue
         await session.send(element)
     }
     return true
