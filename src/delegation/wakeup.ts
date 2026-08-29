@@ -1,9 +1,26 @@
+import { HumanMessage } from '@langchain/core/messages'
 import type { ChatInvocationInput } from 'koishi-plugin-chatluna'
 import type { DelegationJob } from './types'
 import { delegationToolNameForJob } from './tool-name'
 
+interface ChatLunaWakeupService {
+    invoke(input: ChatInvocationInput): Promise<any>
+    conversation?: {
+        getConversation?: (
+            conversationId: string
+        ) => Promise<{ chatMode?: string } | null | undefined>
+    }
+    conversationRuntime?: {
+        appendPendingMessage?: (
+            conversationId: string,
+            message: HumanMessage,
+            chatMode?: string
+        ) => Promise<boolean>
+    }
+}
+
 export async function notifyChatLunaDelegation(
-    chatluna: { invoke(input: ChatInvocationInput): Promise<any> } | undefined,
+    chatluna: ChatLunaWakeupService | undefined,
     job: DelegationJob,
     toolName = delegationToolNameForJob(job)
 ) {
@@ -13,9 +30,28 @@ export async function notifyChatLunaDelegation(
     if (!job.routing || !job.parentConversationId) {
         throw new Error('This background job has no ChatLuna delivery context.')
     }
+    const message = wakeupMessage(job, toolName)
+    const getConversation = chatluna.conversation?.getConversation
+    const conversation = getConversation
+        ? await getConversation(job.parentConversationId)
+        : undefined
+    if (getConversation && !conversation) return
+
+    if (
+        conversation?.chatMode === 'plugin' &&
+        chatluna.conversationRuntime?.appendPendingMessage
+    ) {
+        const queued = await chatluna.conversationRuntime.appendPendingMessage(
+            job.parentConversationId,
+            new HumanMessage({ content: message, name: 'delegation_job' }),
+            conversation.chatMode
+        )
+        if (queued) return
+    }
+
     const invocation: ChatInvocationInput = {
         routing: job.routing,
-        message: wakeupMessage(job, toolName),
+        message,
         messageName: 'delegation_job',
         conversation: {
             type: 'existing',
