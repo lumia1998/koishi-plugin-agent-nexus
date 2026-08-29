@@ -50,6 +50,8 @@ export interface GatewayArtifactView {
 
 export interface GatewaySessionView {
     id: string
+    instanceId?: string
+    runId?: string
     protocol: GatewayProtocol
     protocolSessionId?: string
     acpSessionId?: string
@@ -72,6 +74,13 @@ export interface GatewaySessionView {
     lastEventId?: string
     createdAt: number
     updatedAt: number
+}
+
+export interface GatewayPendingResponse {
+    message?: string
+    optionId?: string
+    action?: 'accept' | 'decline' | 'cancel'
+    attachments?: string[]
 }
 
 export interface GatewayEvent {

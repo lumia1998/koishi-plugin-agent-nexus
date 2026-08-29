@@ -181,14 +181,50 @@ function normalizeJob(value: unknown): DelegationJob | undefined {
         artifacts: Array.isArray(value.artifacts)
             ? structuredClone(value.artifacts)
             : [],
+        pendingRequest: normalizePendingRequest(value.pendingRequest),
+        queuedMessages: normalizeQueuedMessages(value.queuedMessages),
         activeRunId: optionalString(value.activeRunId),
         notifiedRunId: optionalString(value.notifiedRunId),
+        notificationAttempts: optionalFiniteNumber(value.notificationAttempts),
+        notificationNextAt: optionalFiniteNumber(value.notificationNextAt),
         createdAt: finiteNumber(value.createdAt, now),
         updatedAt: finiteNumber(value.updatedAt, now),
         startedAt: finiteNumber(value.startedAt, now),
         endedAt: optionalFiniteNumber(value.endedAt),
         expiresAt: finiteNumber(value.expiresAt, now + 24 * 60 * 60 * 1000)
     }
+}
+
+function normalizePendingRequest(value: unknown) {
+    if (!isRecord(value)) return undefined
+    const id = stringValue(value.id)
+    const prompt = stringValue(value.prompt)
+    const kind = value.kind
+    if (!id || !prompt || (kind !== 'permission' && kind !== 'input')) {
+        return undefined
+    }
+    const options = Array.isArray(value.options)
+        ? value.options
+              .filter(isRecord)
+              .map((item) => ({
+                  id: stringValue(item.id),
+                  name: stringValue(item.name),
+                  kind: optionalString(item.kind)
+              }))
+              .filter((item) => item.id && item.name)
+        : undefined
+    return {
+        id,
+        kind,
+        prompt,
+        ...(options?.length ? { options } : {})
+    }
+}
+
+function normalizeQueuedMessages(value: unknown) {
+    if (!Array.isArray(value)) return undefined
+    const messages = value.map(stringValue).filter(Boolean).slice(0, 16)
+    return messages.length ? messages : undefined
 }
 
 function parseJson(raw: string, filePath: string) {

@@ -4,6 +4,7 @@ import type {
     GatewayAgentsResponse,
     GatewayAttachmentView,
     GatewayEvent,
+    GatewayPendingResponse,
     GatewaySessionView
 } from './types'
 
@@ -35,6 +36,27 @@ export interface GatewayClient {
         remote: GatewayRemoteConfig,
         sessionId: string
     ): Promise<GatewaySessionView>
+    resolvePending(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        requestId: string,
+        response: GatewayPendingResponse
+    ): Promise<GatewaySessionView>
+    closeSession(
+        remote: GatewayRemoteConfig,
+        sessionId: string
+    ): Promise<GatewaySessionView>
+    publishArtifact(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        path: string
+    ): Promise<GatewaySessionView>
+    events(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        after?: string,
+        signal?: AbortSignal
+    ): AsyncGenerator<GatewayEvent>
 }
 
 export class NexusGatewayClient {
@@ -113,6 +135,46 @@ export class NexusGatewayClient {
                 method: 'POST',
                 body: '{}'
             }
+        )
+    }
+
+    async resolvePending(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        requestId: string,
+        response: GatewayPendingResponse
+    ) {
+        return this.request<GatewaySessionView>(
+            remote,
+            `/v1/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(requestId)}/resolve`,
+            {
+                method: 'POST',
+                body: JSON.stringify(response)
+            }
+        )
+    }
+
+    async closeSession(remote: GatewayRemoteConfig, sessionId: string) {
+        return this.request<GatewaySessionView>(
+            remote,
+            `/v1/sessions/${encodeURIComponent(sessionId)}`,
+            { method: 'DELETE' }
+        )
+    }
+
+    async publishArtifact(
+        remote: GatewayRemoteConfig,
+        sessionId: string,
+        path: string
+    ) {
+        return this.request<GatewaySessionView>(
+            remote,
+            `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/publish`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ path })
+            },
+            SESSION_START_TIMEOUT_MS
         )
     }
 

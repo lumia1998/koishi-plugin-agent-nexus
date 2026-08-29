@@ -170,7 +170,69 @@ export class NexusGatewayProvider implements DelegationProvider {
         job: DelegationJob,
         request: DelegationRunRequest
     ) {
+        const sessionId = stateString(job, 'gatewaySessionId')
+        if (request.requestId) {
+            if (!sessionId) {
+                throw new Error('Nexus Gateway did not return a session id.')
+            }
+            const session = await this.options.client.resolvePending(
+                this.requireRemote(),
+                sessionId,
+                request.requestId,
+                {
+                    ...(request.prompt ? { message: request.prompt } : {}),
+                    ...(request.optionId ? { optionId: request.optionId } : {}),
+                    ...(request.decision ? { action: request.decision } : {})
+                }
+            )
+            return fromGatewaySession(session, job.providerState)
+        }
         return this.run(agent, job, { ...request, sameTask: true })
+    }
+
+    async *watch(
+        _agent: RemoteAgentInfo,
+        job: DelegationJob,
+        signal: AbortSignal
+    ) {
+        const sessionId = stateString(job, 'gatewaySessionId')
+        if (!sessionId) throw new Error('Nexus Gateway did not return a session id.')
+        let after = stateString(job, 'lastEventId')
+        for await (const event of this.options.client.events(
+            this.requireRemote(),
+            sessionId,
+            after,
+            signal
+        )) {
+            after = event.id || after
+            const session = await this.options.client.getSession(
+                this.requireRemote(),
+                sessionId
+            )
+            const result = fromGatewaySession(session, {
+                ...job.providerState,
+                ...(after ? { lastEventId: after } : {})
+            })
+            yield result
+            if (result.state !== 'running') return
+        }
+    }
+
+    async close(_agent: RemoteAgentInfo, job: DelegationJob) {
+        const sessionId = stateString(job, 'gatewaySessionId')
+        if (!sessionId) return
+        await this.options.client.closeSession(this.requireRemote(), sessionId)
+    }
+
+    async publish(_agent: RemoteAgentInfo, job: DelegationJob, path: string) {
+        const sessionId = stateString(job, 'gatewaySessionId')
+        if (!sessionId) throw new Error('Nexus Gateway did not return a session id.')
+        const session = await this.options.client.publishArtifact(
+            this.requireRemote(),
+            sessionId,
+            path
+        )
+        return fromGatewaySession(session, job.providerState)
     }
 
     async status(_agent: RemoteAgentInfo, job: DelegationJob) {
@@ -301,9 +363,16 @@ function fromGatewaySession(
             bytesBase64: artifact.bytesBase64,
             metadata: artifact.metadata
         })),
+        pendingRequest: session.pendingRequest
+            ? structuredClone(session.pendingRequest)
+            : undefined,
         providerState: {
             ...structuredClone(previousState),
             gatewaySessionId: session.id,
+            ...(session.instanceId
+                ? { gatewayInstanceId: session.instanceId }
+                : {}),
+            ...(session.runId ? { gatewayRunId: session.runId } : {}),
             protocol: session.protocol,
             ...(session.protocolSessionId
                 ? { protocolSessionId: session.protocolSessionId }

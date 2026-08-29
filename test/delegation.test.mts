@@ -120,6 +120,210 @@ test('polls background jobs and wakes ChatLuna for permission input', async () =
     }
 })
 
+test('queues background guidance and continues in the same Gateway task', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let completeFirst!: () => void
+    const firstTurn = new Promise<void>((resolve) => {
+        completeFirst = resolve
+    })
+    let guidance = ''
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async (_agent, current) => {
+        await firstTurn
+        return completed(current.providerState)
+    }
+    fixture.provider.message = async (_agent, current, request) => {
+        guidance = request.prompt
+        return completed(current.providerState)
+    }
+    try {
+        await fixture.manager.start()
+        const started = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'first turn',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(started)
+        const queued = await fixture.manager.handle(
+            { action: 'message', id, prompt: 'also update the README' },
+            context()
+        )
+        assert.match(queued, /Guidance queued: 1/)
+        completeFirst()
+        for (let attempt = 0; attempt < 100 && !guidance; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(guidance, 'also update the README')
+        const current = await fixture.store.get(id)
+        assert.equal(current?.state, 'completed')
+        assert.equal(current?.queuedMessages, undefined)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('publishes a workspace file through the existing Gateway task', async () => {
+    const fixture = await managerFixture()
+    let publishedPath = ''
+    fixture.provider.publish = async (_agent, current, filePath) => {
+        publishedPath = filePath
+        return {
+            ...completed(current.providerState),
+            artifacts: [{
+                artifactId: 'published-1',
+                filename: 'report.md',
+                mediaType: 'text/plain',
+                bytesBase64: Buffer.from('# report').toString('base64')
+            }]
+        }
+    }
+    try {
+        await fixture.manager.start()
+        const started = await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: 'write report' },
+            context()
+        )
+        const output = await fixture.manager.handle(
+            {
+                action: 'publish',
+                id: jobId(started),
+                path: 'dist/report.md'
+            },
+            context()
+        )
+        assert.equal(publishedPath, 'dist/report.md')
+        assert.match(output, /report\.md/)
+        assert.equal((await fixture.store.list())[0].artifacts[0].artifactId, 'published-1')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('resolves the exact structured pending request and rejects stale replies', async () => {
+    const fixture = await managerFixture()
+    let seenRequest: any
+    fixture.provider.run = async () => ({
+        state: 'permission_required',
+        remoteState: 'permission_required',
+        text: 'Allow write?',
+        artifacts: [],
+        pendingRequest: {
+            id: 'request-current',
+            kind: 'permission',
+            prompt: 'Allow write?',
+            options: [{ id: 'allow_once', name: 'Allow once' }]
+        },
+        providerState: { gatewaySessionId: 'session-1' }
+    })
+    fixture.provider.message = async (_agent, current, request) => {
+        seenRequest = structuredClone(request)
+        return completed(current.providerState)
+    }
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: 'edit', background: false },
+            context()
+        )
+        const id = jobId(output)
+        assert.match(output, /Request: request-current/)
+        await assert.rejects(
+            fixture.manager.handle(
+                {
+                    action: 'message',
+                    id,
+                    requestId: 'request-stale',
+                    optionId: 'allow_once'
+                },
+                context()
+            ),
+            /stale/
+        )
+        await assert.rejects(
+            fixture.manager.handle(
+                {
+                    action: 'message',
+                    id,
+                    optionId: 'allow_once'
+                },
+                context()
+            ),
+            /request id is required/i
+        )
+        const resolved = await fixture.manager.handle(
+            {
+                action: 'message',
+                id,
+                requestId: 'request-current',
+                optionId: 'allow_once'
+            },
+            context()
+        )
+        assert.match(resolved, /State: completed/)
+        assert.equal(seenRequest.requestId, 'request-current')
+        assert.equal(seenRequest.optionId, 'allow_once')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('a late provider response cannot resurrect a canceled conversation task', async () => {
+    const fixture = await managerFixture()
+    let finish!: (value: ReturnType<typeof completed>) => void
+    let started!: () => void
+    const providerStarted = new Promise<void>((resolve) => {
+        started = resolve
+    })
+    fixture.provider.run = async () => {
+        started()
+        return new Promise((resolve) => {
+            finish = resolve
+        })
+    }
+    try {
+        await fixture.manager.start()
+        const pending = fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: 'long task' },
+            context()
+        )
+        await providerStarted
+        assert.equal(await fixture.manager.cancelConversation('conversation-1'), 1)
+        finish(completed({ gatewaySessionId: 'session-late' }))
+        assert.match(await pending, /State: canceled/)
+        assert.equal((await fixture.store.list())[0].state, 'canceled')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('releases Gateway sessions and detaches jobs when a conversation is cleared', async () => {
+    const fixture = await managerFixture()
+    let closes = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.close = async () => {
+        closes += 1
+    }
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: 'long work', background: true },
+            context()
+        )
+        assert.equal(await fixture.manager.releaseConversation('conversation-1'), 1)
+        const [released] = await fixture.store.list()
+        assert.equal(closes, 1)
+        assert.equal(released.state, 'canceled')
+        assert.equal(released.parentConversationId, undefined)
+        assert.equal(released.routing, undefined)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('marks a newly created job failed when Gateway startup throws', async () => {
     const fixture = await managerFixture()
     fixture.provider.run = async () => {

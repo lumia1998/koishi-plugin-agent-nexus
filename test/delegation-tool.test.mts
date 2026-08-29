@@ -7,6 +7,7 @@ import {
 } from '../src/delegation/index.ts'
 import {
     NexusAgentDelegateTool,
+    NexusTaskTool,
     registerAgentDelegationTools
 } from '../src/tools/delegate.ts'
 
@@ -96,6 +97,49 @@ test('an Agent-specific tool works without conversation context', async () => {
         action: 'run',
         prompt: '原样发送',
         remote: 'hermes-route'
+    })
+})
+
+test('the unified nexus_task tool exposes ChatLuna-style task routing', async () => {
+    let invocation: any
+    const nexus = {
+        async handleDelegate(input: unknown) {
+            invocation = input
+            return 'delegated'
+        }
+    }
+    const tool = new NexusTaskTool(nexus as any)
+    assert.equal(
+        await tool._call({
+            action: 'message',
+            agent: 'hermes',
+            id: 'task-1',
+            requestId: 'request-1',
+            optionId: 'allow_once'
+        }),
+        'delegated'
+    )
+    assert.deepEqual(invocation, {
+        action: 'message',
+        agent: 'hermes',
+        id: 'task-1',
+        requestId: 'request-1',
+        optionId: 'allow_once',
+        remote: 'hermes'
+    })
+
+    await tool._call({
+        action: 'publish',
+        agent: 'hermes',
+        id: 'task-1',
+        path: 'dist/report.md'
+    })
+    assert.deepEqual(invocation, {
+        action: 'publish',
+        agent: 'hermes',
+        id: 'task-1',
+        path: 'dist/report.md',
+        remote: 'hermes'
     })
 })
 
@@ -228,7 +272,11 @@ test('registers one tool per enabled Agent and disposes stale tools on sync', ()
         {} as any,
         agents as any
     )
-    assert.deepEqual([...registered.keys()], ['nexus_hermes', 'nexus_opencode'])
+    assert.deepEqual([...registered.keys()], [
+        'nexus_task',
+        'nexus_hermes',
+        'nexus_opencode'
+    ])
     assert.doesNotMatch(registered.get('nexus_hermes').description, /A2A|ACP/)
     assert.equal(registered.has('nexus_a2a_delegate'), false)
 

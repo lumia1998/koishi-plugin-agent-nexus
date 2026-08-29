@@ -37,6 +37,7 @@ const DEFAULT_RETENTION = 7 * 24 * 60 * 60 * 1000
 const MAX_STORED_PROMPT_CHARS = 64 * 1024
 const MAX_STORED_OUTPUT_CHARS = 256 * 1024
 const MAX_STORED_ARTIFACTS = 64
+const MAX_QUEUED_MESSAGES = 16
 
 export class DelegationManager {
     private readonly pollIntervalMs: number
@@ -46,6 +47,8 @@ export class DelegationManager {
     private readonly prepareArtifacts?: DelegationManagerOptions['prepareArtifacts']
     private monitors = new Map<string, ActiveMonitor>()
     private jobLocks = new Map<string, Promise<void>>()
+    private notifyTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    private queuedTurnTimers = new Map<string, ReturnType<typeof setTimeout>>()
     private stopped = true
 
     constructor(
@@ -66,7 +69,14 @@ export class DelegationManager {
         await this.store.init()
         for (const job of await this.store.list()) {
             if (job.state === 'running') this.startMonitor(job.id)
-            else if (shouldNotify(job)) void this.notifyJob(job.id)
+            else if (job.state === 'completed' && job.queuedMessages?.length) {
+                this.scheduleQueuedTurn(job.id)
+            } else if (shouldNotify(job)) {
+                this.scheduleNotify(
+                    job.id,
+                    Math.max(0, (job.notificationNextAt ?? this.now()) - this.now())
+                )
+            }
         }
     }
 
@@ -76,7 +86,85 @@ export class DelegationManager {
         for (const monitor of monitors) monitor.controller.abort()
         await Promise.allSettled(monitors.map((monitor) => monitor.promise))
         this.monitors.clear()
+        for (const timer of this.notifyTimers.values()) clearTimeout(timer)
+        this.notifyTimers.clear()
+        for (const timer of this.queuedTurnTimers.values()) clearTimeout(timer)
+        this.queuedTurnTimers.clear()
         await this.store.flush()
+    }
+
+    async cancelConversation(parentConversationId: string) {
+        const jobs = await this.store.list(parentConversationId)
+        let count = 0
+        for (const job of jobs) {
+            if (!isActive(job.state) && !job.queuedMessages?.length) continue
+            this.stopMonitor(job.id)
+            this.clearNotifyTimer(job.id)
+            this.clearQueuedTurnTimer(job.id)
+            try {
+                const agent = this.agentForJob(job)
+                await this.providers.providerFor(agent).cancel(agent, job)
+            } catch (error) {
+                if (!isRemoteSessionMissing(error)) {
+                    job.pollError = clip(errorMessage(error), 32 * 1024)
+                }
+            }
+            const now = this.now()
+            job.state = 'canceled'
+            job.remoteState = 'canceled'
+            job.pendingRequest = undefined
+            job.queuedMessages = undefined
+            job.endedAt = now
+            job.updatedAt = now
+            job.expiresAt = now + this.retentionMs
+            job.notifiedRunId = job.activeRunId
+            await this.store.save(job)
+            count += 1
+        }
+        return count
+    }
+
+    async releaseConversation(parentConversationId: string) {
+        const jobs = await this.store.list(parentConversationId)
+        const closed = new Set<string>()
+        for (const job of jobs) {
+            this.stopMonitor(job.id)
+            this.clearNotifyTimer(job.id)
+            this.clearQueuedTurnTimer(job.id)
+            try {
+                const agent = this.agentForJob(job)
+                const provider = this.providers.providerFor(agent)
+                const sessionId = stateString(job.providerState.gatewaySessionId)
+                const key = sessionId
+                    ? `${job.provider}:${job.remoteId}:${sessionId}`
+                    : undefined
+                if (provider.close && (!key || !closed.has(key))) {
+                    await provider.close(agent, job)
+                    if (key) closed.add(key)
+                } else if (isActive(job.state)) {
+                    await provider.cancel(agent, job)
+                }
+            } catch (error) {
+                if (!isRemoteSessionMissing(error)) {
+                    job.pollError = clip(errorMessage(error), 32 * 1024)
+                }
+            }
+            const now = this.now()
+            if (isActive(job.state)) {
+                job.state = 'canceled'
+                job.remoteState = 'canceled'
+                job.endedAt = now
+                job.expiresAt = now + this.retentionMs
+                job.notifiedRunId = job.activeRunId
+            }
+            job.pendingRequest = undefined
+            job.queuedMessages = undefined
+            job.parentConversationId = undefined
+            job.routing = undefined
+            job.updatedAt = now
+            await this.store.save(job)
+        }
+        return jobs.length
     }
 
     async handle(
@@ -90,6 +178,7 @@ export class DelegationManager {
         if (action === 'status') return this.status(input.id, context, input.remote)
         if (action === 'stop') return this.stopJob(input.id, context, input.remote)
         if (action === 'message') return this.messageJob(input, context, signal)
+        if (action === 'publish') return this.publishJob(input, context)
         return this.runJob(input, context, signal)
     }
 
@@ -162,8 +251,13 @@ export class DelegationManager {
         context?: DelegationContext,
         signal?: AbortSignal
     ) {
-        const prompt = requiredPrompt(input.prompt)
-        const job = input.id
+        const prompt = clean(input.prompt) ?? ''
+        if (!prompt && !input.optionId && !input.decision) {
+            throw new Error(
+                'A message, optionId, or decision is required to continue a delegation.'
+            )
+        }
+        let job = input.id
             ? await this.ownedJobForAgent(input.id, context, input.remote)
             : await this.latestJob(context, [
                   'input_required',
@@ -177,7 +271,52 @@ export class DelegationManager {
                     : 'AgentNexus job id is required without a conversation context.'
             )
         }
+        if (job.state === 'running' && !this.jobLocks.has(job.id)) {
+            const queued = await this.queueRunningGuidance(job, prompt, input)
+            if (queued) return queued
+            job = await this.ownedJobForAgent(job.id, context, input.remote)
+        }
         return this.sendTurn(job, prompt, input, signal, true)
+    }
+
+    private async queueRunningGuidance(
+        original: DelegationJob,
+        prompt: string,
+        input: DelegateToolInput
+    ) {
+        if (!original.background) {
+            throw new Error(
+                'This foreground Gateway turn cannot accept live guidance. Wait for it to finish or stop it first.'
+            )
+        }
+        if (!prompt) {
+            throw new Error('A text message is required while a task is running.')
+        }
+        if (input.attachments?.length) {
+            throw new Error(
+                'Attachments cannot be queued during a running Gateway turn. Send them in the next turn.'
+            )
+        }
+        return this.withJobLock(original.id, async () => {
+            const current = await this.store.get(original.id)
+            if (!current || current.state !== 'running') return undefined
+            const queued = current.queuedMessages || []
+            if (queued.length >= MAX_QUEUED_MESSAGES) {
+                throw new Error('The AgentNexus guidance queue is full.')
+            }
+            current.queuedMessages = [
+                ...queued,
+                clip(prompt, MAX_STORED_PROMPT_CHARS)
+            ]
+            current.updatedAt = this.now()
+            await this.store.save(current)
+            return [
+                `AgentNexus job: ${current.id}`,
+                'State: running',
+                `Guidance queued: ${current.queuedMessages.length}`,
+                'The message will be sent in the same Gateway session after the current turn finishes.'
+            ].join('\n')
+        })
     }
 
     private async sendTurn(
@@ -196,6 +335,13 @@ export class DelegationManager {
         })
         if (outcome.kind === 'output') return outcome.value
         let job = await this.waitForForeground(outcome.id, signal)
+        if (job.state === 'completed' && job.queuedMessages?.length) {
+            job.background = true
+            job.notifiedRunId = undefined
+            await this.store.save(job)
+            this.scheduleQueuedTurn(job.id)
+            return formatJob(job, this.toolNameForJob(job))
+        }
         job.notifiedRunId = job.activeRunId
         await this.store.save(job)
         return formatJob(job, this.toolNameForJob(job))
@@ -221,7 +367,28 @@ export class DelegationManager {
         }
         const agent = this.agentForJob(original)
         const provider = this.providers.providerFor(agent)
+        const pending = isInteractive(original.state)
+            ? original.pendingRequest
+            : undefined
+        if (isInteractive(original.state) && pending) {
+            if (!input.requestId) {
+                throw new Error(
+                    `Pending request id is required; the current request is ${pending.id}.`
+                )
+            }
+            if (input.requestId !== pending.id) {
+                throw new Error(
+                    `Pending request ${input.requestId} is stale; the current request is ${pending.id}.`
+                )
+            }
+        }
         this.stopMonitor(original.id)
+        this.clearQueuedTurnTimer(original.id)
+        const notifyTimer = this.notifyTimers.get(original.id)
+        if (notifyTimer) {
+            clearTimeout(notifyTimer)
+            this.notifyTimers.delete(original.id)
+        }
         const now = this.now()
         const background = input.background === true
         const resetContext = Boolean(input.newTask)
@@ -239,7 +406,13 @@ export class DelegationManager {
             error: undefined,
             pollError: undefined,
             artifacts: [],
+            pendingRequest: pending,
+            queuedMessages: resetContext
+                ? undefined
+                : original.queuedMessages,
             activeRunId: randomUUID(),
+            notificationAttempts: undefined,
+            notificationNextAt: undefined,
             startedAt: now,
             updatedAt: now,
             endedAt: undefined,
@@ -254,6 +427,13 @@ export class DelegationManager {
                 newTask: resetContext,
                 sameTask: sameTask && !resetContext,
                 skill: job.skill,
+                ...(pending
+                    ? {
+                          requestId: pending.id,
+                          optionId: clean(input.optionId),
+                          decision: input.decision
+                      }
+                    : {}),
                 ...(input.attachments?.length
                     ? { attachments: input.attachments }
                     : {})
@@ -262,7 +442,20 @@ export class DelegationManager {
                 ? await provider.message(agent, job, request)
                 : await provider.run(agent, job, request)
             result = await this.prepareResultArtifacts(job, result)
-            job = applyResult(job, result, this.now(), this.retentionMs)
+            const current = await this.store.get(job.id)
+            if (
+                !current ||
+                current.state !== 'running' ||
+                current.activeRunId !== job.activeRunId
+            ) {
+                return {
+                    kind: 'output',
+                    value: current
+                        ? formatJob(current, this.toolNameForJob(current))
+                        : 'AgentNexus job no longer exists.'
+                }
+            }
+            job = applyResult(current, result, this.now(), this.retentionMs)
             if (job.state === 'running') {
                 await this.store.save(job)
                 if (background) {
@@ -281,6 +474,28 @@ export class DelegationManager {
                 value: formatJob(job, this.toolNameForJob(job))
             }
         } catch (error) {
+            const latest = await this.store.get(job.id)
+            if (
+                !latest ||
+                latest.state !== 'running' ||
+                latest.activeRunId !== job.activeRunId
+            ) {
+                return {
+                    kind: 'output',
+                    value: latest
+                        ? formatJob(latest, this.toolNameForJob(latest))
+                        : 'AgentNexus job no longer exists.'
+                }
+            }
+            if (isRemoteSessionMissing(error)) {
+                const lost = failLostSession(latest, this.now(), this.retentionMs)
+                lost.notifiedRunId = lost.activeRunId
+                await this.store.save(lost)
+                return {
+                    kind: 'output',
+                    value: formatJob(lost, this.toolNameForJob(lost))
+                }
+            }
             if (
                 original.activeRunId &&
                 (original.state === 'running' || isInteractive(original.state))
@@ -321,8 +536,8 @@ export class DelegationManager {
                 : 'AgentNexus job id is required without a conversation context.'
         }
         if (isActive(job.state)) {
+            const runId = job.activeRunId
             try {
-                const runId = job.activeRunId
                 const agent = this.agentForJob(job)
                 let result = await this.providers
                     .providerFor(agent)
@@ -340,14 +555,36 @@ export class DelegationManager {
                 }
                 job = applyResult(current, result, this.now(), this.retentionMs)
                 if (job.state !== 'running') {
-                    job.notifiedRunId = job.activeRunId
                     this.stopMonitor(job.id)
+                    if (job.state === 'completed' && job.queuedMessages?.length) {
+                        this.scheduleQueuedTurn(job.id)
+                    } else {
+                        job.notifiedRunId = job.activeRunId
+                    }
                 }
                 await this.store.save(job)
             } catch (error) {
-                job.pollError = clip(errorMessage(error), 32 * 1024)
-                job.updatedAt = this.now()
-                await this.store.save(job)
+                const current = await this.store.get(job.id)
+                if (
+                    !current ||
+                    !isActive(current.state) ||
+                    current.activeRunId !== runId
+                ) {
+                    return current
+                        ? formatJob(current, this.toolNameForJob(current))
+                        : 'AgentNexus job no longer exists.'
+                }
+                if (isRemoteSessionMissing(error)) {
+                    job = failLostSession(current, this.now(), this.retentionMs)
+                    job.notifiedRunId = job.activeRunId
+                    this.stopMonitor(job.id)
+                    await this.store.save(job)
+                } else {
+                    current.pollError = clip(errorMessage(error), 32 * 1024)
+                    current.updatedAt = this.now()
+                    await this.store.save(current)
+                    job = current
+                }
             }
         }
         return formatJob(job, this.toolNameForJob(job))
@@ -374,6 +611,8 @@ export class DelegationManager {
         return this.withJobLock(jobId, async () => {
             job = await this.ownedJobForAgent(jobId, context, remote)
             this.stopMonitor(job.id)
+            this.clearNotifyTimer(job.id)
+            this.clearQueuedTurnTimer(job.id)
             if (isActive(job.state)) {
                 try {
                     const agent = this.agentForJob(job)
@@ -392,6 +631,43 @@ export class DelegationManager {
             job.updatedAt = now
             job.expiresAt = now + this.retentionMs
             job.notifiedRunId = job.activeRunId
+            job.queuedMessages = undefined
+            await this.store.save(job)
+            return formatJob(job, this.toolNameForJob(job))
+        })
+    }
+
+    private async publishJob(
+        input: DelegateToolInput,
+        context?: DelegationContext
+    ) {
+        const path = clean(input.path)
+        if (!path) throw new Error('A workspace file path is required to publish an artifact.')
+        let job = input.id
+            ? await this.ownedJobForAgent(input.id, context, input.remote)
+            : await this.latestJob(
+                  context,
+                  undefined,
+                  this.agentIdForReference(input.remote)
+              )
+        if (!job) {
+            throw new Error(
+                context
+                    ? 'No AgentNexus job is bound to this conversation.'
+                    : 'AgentNexus job id is required without a conversation context.'
+            )
+        }
+        const jobId = job.id
+        return this.withJobLock(jobId, async () => {
+            job = await this.ownedJobForAgent(jobId, context, input.remote)
+            const agent = this.agentForJob(job)
+            const provider = this.providers.providerFor(agent)
+            if (!provider.publish) {
+                throw new Error(`${agent.name} does not support workspace file publishing.`)
+            }
+            let result = await provider.publish(agent, job, path)
+            result = await this.prepareResultArtifacts(job, result)
+            job = applyResult(job, result, this.now(), this.retentionMs)
             await this.store.save(job)
             return formatJob(job, this.toolNameForJob(job))
         })
@@ -638,9 +914,22 @@ export class DelegationManager {
                 if (updated.state !== 'running') return updated
             } catch (error) {
                 const current = await this.store.get(id)
-                if (!current || current.state !== 'running') {
+                if (
+                    !current ||
+                    current.state !== 'running' ||
+                    current.activeRunId !== job.activeRunId
+                ) {
                     if (current) return current
                     throw error
+                }
+                if (isRemoteSessionMissing(error)) {
+                    const lost = failLostSession(
+                        current,
+                        this.now(),
+                        this.retentionMs
+                    )
+                    await this.store.save(lost)
+                    return lost
                 }
                 current.pollError = clip(errorMessage(error), 32 * 1024)
                 current.updatedAt = this.now()
@@ -686,8 +975,23 @@ export class DelegationManager {
         monitor.controller.abort()
     }
 
+    private clearNotifyTimer(id: string) {
+        const timer = this.notifyTimers.get(id)
+        if (!timer) return
+        clearTimeout(timer)
+        this.notifyTimers.delete(id)
+    }
+
+    private clearQueuedTurnTimer(id: string) {
+        const timer = this.queuedTurnTimers.get(id)
+        if (!timer) return
+        clearTimeout(timer)
+        this.queuedTurnTimers.delete(id)
+    }
+
     private async monitor(id: string, signal: AbortSignal) {
         await delay(this.pollIntervalMs, signal)
+        if (await this.monitorEvents(id, signal)) return
         while (!this.stopped && !signal.aborted) {
             const job = await this.store.get(id)
             if (signal.aborted) return
@@ -728,6 +1032,13 @@ export class DelegationManager {
                 updated.pollError = undefined
                 await this.store.save(updated)
                 if (updated.state !== 'running') {
+                    if (
+                        updated.state === 'completed' &&
+                        updated.queuedMessages?.length
+                    ) {
+                        this.scheduleQueuedTurn(updated.id)
+                        return
+                    }
                     await this.notifyJob(updated.id)
                     return
                 }
@@ -741,6 +1052,16 @@ export class DelegationManager {
                 ) {
                     return
                 }
+                if (isRemoteSessionMissing(error)) {
+                    const lost = failLostSession(
+                        current,
+                        this.now(),
+                        this.retentionMs
+                    )
+                    await this.store.save(lost)
+                    await this.notifyJob(lost.id)
+                    return
+                }
                 current.pollError = clip(errorMessage(error), 32 * 1024)
                 current.updatedAt = this.now()
                 await this.store.save(current)
@@ -749,7 +1070,78 @@ export class DelegationManager {
         }
     }
 
+    private async monitorEvents(id: string, signal: AbortSignal) {
+        const job = await this.store.get(id)
+        if (!job || job.state !== 'running' || signal.aborted) return true
+        const agent = this.agentForJob(job)
+        const provider = this.providers.providerFor(agent)
+        if (!provider.watch) return false
+        try {
+            for await (let result of provider.watch(agent, job, signal)) {
+                if (signal.aborted || this.stopped) return true
+                result = await this.prepareResultArtifacts(job, result)
+                const current = await this.store.get(id)
+                if (
+                    !current ||
+                    current.state !== 'running' ||
+                    current.activeRunId !== job.activeRunId
+                ) {
+                    return true
+                }
+                const updated = applyResult(
+                    current,
+                    result,
+                    this.now(),
+                    this.retentionMs
+                )
+                updated.pollError = undefined
+                await this.store.save(updated)
+                if (updated.state !== 'running') {
+                    if (
+                        updated.state === 'completed' &&
+                        updated.queuedMessages?.length
+                    ) {
+                        this.scheduleQueuedTurn(updated.id)
+                        return true
+                    }
+                    await this.notifyJob(updated.id)
+                    return true
+                }
+            }
+            return signal.aborted || this.stopped
+        } catch (error) {
+            if (signal.aborted || this.stopped) return true
+            const current = await this.store.get(id)
+            if (
+                !current ||
+                current.state !== 'running' ||
+                current.activeRunId !== job.activeRunId
+            ) {
+                return true
+            }
+            if (isRemoteSessionMissing(error)) {
+                const lost = failLostSession(
+                    current,
+                    this.now(),
+                    this.retentionMs
+                )
+                await this.store.save(lost)
+                await this.notifyJob(lost.id)
+                return true
+            }
+            current.pollError = `Gateway event stream failed; polling fallback active: ${clip(errorMessage(error), 32 * 1024)}`
+            current.updatedAt = this.now()
+            await this.store.save(current)
+            return false
+        }
+    }
+
     private async notifyJob(id: string) {
+        const pendingTimer = this.notifyTimers.get(id)
+        if (pendingTimer) {
+            clearTimeout(pendingTimer)
+            this.notifyTimers.delete(id)
+        }
         let job = await this.store.get(id)
         if (!job || !shouldNotify(job)) return
         const runId = job.activeRunId
@@ -761,6 +1153,8 @@ export class DelegationManager {
                 if (!current || current.activeRunId !== runId) return
                 job = current
                 job.notifiedRunId = runId
+                job.notificationAttempts = undefined
+                job.notificationNextAt = undefined
                 job.pollError = undefined
                 job.updatedAt = this.now()
                 await this.store.save(job)
@@ -770,9 +1164,94 @@ export class DelegationManager {
                 if (attempt < 2) await delay(1000 * (attempt + 1))
             }
         }
+        const current = await this.store.get(id)
+        if (
+            !current ||
+            current.activeRunId !== runId ||
+            !shouldNotify(current)
+        ) {
+            return
+        }
+        job = current
+        const attempts = (job.notificationAttempts ?? 0) + 1
+        const delayMs = Math.min(5 * 60_000, 1000 * 2 ** Math.min(attempts, 8))
+        job.notificationAttempts = attempts
+        job.notificationNextAt = this.now() + delayMs
         job.pollError = `ChatLuna wakeup failed: ${errorMessage(lastError)}`
         job.updatedAt = this.now()
         await this.store.save(job)
+        this.scheduleNotify(job.id, delayMs)
+    }
+
+    private scheduleNotify(id: string, delayMs: number) {
+        if (this.stopped || this.notifyTimers.has(id)) return
+        const timer = setTimeout(() => {
+            this.notifyTimers.delete(id)
+            void this.notifyJob(id)
+        }, Math.max(0, delayMs))
+        timer.unref?.()
+        this.notifyTimers.set(id, timer)
+    }
+
+    private scheduleQueuedTurn(id: string) {
+        if (this.stopped || this.queuedTurnTimers.has(id)) return
+        const timer = setTimeout(() => {
+            this.queuedTurnTimers.delete(id)
+            void this.runQueuedTurn(id).catch((error) => {
+                void this.recordQueuedTurnFailure(id, error).catch(() => undefined)
+            })
+        }, 0)
+        timer.unref?.()
+        this.queuedTurnTimers.set(id, timer)
+    }
+
+    private async runQueuedTurn(id: string) {
+        const outcome = await this.withJobLock(id, async () => {
+            const current = await this.store.get(id)
+            if (
+                !current ||
+                current.state !== 'completed' ||
+                !current.queuedMessages?.length
+            ) {
+                return undefined
+            }
+            const [prompt, ...remaining] = current.queuedMessages
+            current.queuedMessages = remaining.length ? remaining : undefined
+            current.updatedAt = this.now()
+            await this.store.save(current)
+            return this.sendTurnLocked(
+                current,
+                prompt,
+                { action: 'message', prompt, background: true },
+                true
+            )
+        })
+        if (!outcome || outcome.kind === 'foreground') return
+        const current = await this.store.get(id)
+        if (!current || current.state === 'running') return
+        if (current.state === 'completed' && current.queuedMessages?.length) {
+            this.scheduleQueuedTurn(id)
+            return
+        }
+        current.notifiedRunId = undefined
+        await this.store.save(current)
+        await this.notifyJob(id)
+    }
+
+    private async recordQueuedTurnFailure(id: string, error: unknown) {
+        const current = await this.store.get(id)
+        if (!current || current.state === 'canceled') return
+        const now = this.now()
+        current.state = 'failed'
+        current.error = clip(errorMessage(error), 32 * 1024)
+        current.pollError = 'Queued AgentNexus guidance could not be delivered.'
+        current.queuedMessages = undefined
+        current.endedAt = now
+        current.updatedAt = now
+        current.expiresAt = now + this.retentionMs
+        current.notifiedRunId = undefined
+        await this.store.save(current)
+        await this.notifyJob(id)
     }
 
     private async prepareResultArtifacts(
@@ -800,6 +1279,9 @@ function applyResult(
         state: result.state,
         output: clip(result.text ?? job.output, MAX_STORED_OUTPUT_CHARS),
         artifacts: storedArtifacts(result.artifacts || []),
+        pendingRequest: result.pendingRequest
+            ? structuredClone(result.pendingRequest)
+            : undefined,
         error:
             result.error ||
             (result.state === 'failed'
@@ -865,9 +1347,14 @@ function formatRunning(
                 ? 'The result will be delivered back to this ChatLuna conversation automatically. Do not poll; continue other work or finish the reply.'
                 : `No conversation delivery context is available. Check this task later with ${toolName} action=status id=${job.id}.`
         )
+        lines.push(
+            `Use ${toolName} action=message id=${job.id} to queue guidance for the same Gateway session.`
+        )
+    } else {
+        lines.push('This foreground turn does not accept live guidance.')
     }
     lines.push(
-        `Use ${toolName} action=message id=${job.id} to send guidance, or action=stop id=${job.id} to cancel.`
+        `Use ${toolName} action=stop id=${job.id} to cancel.`
     )
     return lines.join('\n')
 }
@@ -885,6 +1372,9 @@ export function formatJob(
     if (job.output?.trim()) lines.push('', job.output.trim())
     if (job.error?.trim()) lines.push('', `Error: ${job.error.trim()}`)
     if (job.pollError?.trim()) lines.push('', `Monitor: ${job.pollError.trim()}`)
+    if (job.queuedMessages?.length) {
+        lines.push('', `Queued guidance: ${job.queuedMessages.length}`)
+    }
     if (job.artifacts.length) {
         lines.push('', 'Artifacts:')
         for (const artifact of job.artifacts) {
@@ -896,14 +1386,29 @@ export function formatJob(
         }
     }
     if (job.state === 'input_required' || job.state === 'permission_required') {
+        const request = job.pendingRequest
         lines.push(
             '',
-            `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Call ${toolName} action=message id=${job.id} prompt="...".`
+            `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}.`,
+            ...(request
+                ? [
+                      `Request: ${request.id}`,
+                      request.prompt,
+                      ...(request.options?.length
+                          ? request.options.map(
+                                (option, index) =>
+                                    `${index + 1}. ${option.name} (${option.id})`
+                            )
+                          : [])
+                  ]
+                : []),
+            `Call ${toolName} action=message id=${job.id}${request ? ` requestId=${request.id}` : ''} prompt="...".`
         )
     } else if (job.state === 'completed') {
         lines.push(
             '',
-            `Continue the same context with ${toolName} action=run id=${job.id} prompt="...".`
+            `Continue the same context with ${toolName} action=run id=${job.id} prompt="...".`,
+            `Publish a workspace file with ${toolName} action=publish id=${job.id} path="relative/path".`
         )
     }
     return lines.join('\n')
@@ -927,6 +1432,34 @@ function isInteractive(state: DelegationState) {
 
 function isActive(state: DelegationState) {
     return state === 'running' || isInteractive(state)
+}
+
+function isRemoteSessionMissing(error: unknown) {
+    return Boolean(
+        error &&
+            typeof error === 'object' &&
+            'status' in error &&
+            (error as { status?: unknown }).status === 404
+    )
+}
+
+function failLostSession(
+    job: DelegationJob,
+    now: number,
+    retentionMs: number
+): DelegationJob {
+    return {
+        ...job,
+        state: 'failed',
+        remoteState: 'lost',
+        pendingRequest: undefined,
+        error:
+            'The Nexus Gateway session no longer exists. The Gateway may have restarted or expired the session.',
+        pollError: undefined,
+        endedAt: now,
+        updatedAt: now,
+        expiresAt: now + retentionMs
+    }
 }
 
 function clip(value: string, maxChars: number): string

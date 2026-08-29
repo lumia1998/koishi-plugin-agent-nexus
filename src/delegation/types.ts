@@ -63,6 +63,17 @@ export interface DelegationArtifact {
     metadata?: Record<string, unknown>
 }
 
+export interface DelegationPendingRequest {
+    id: string
+    kind: 'permission' | 'input'
+    prompt: string
+    options?: Array<{
+        id: string
+        name: string
+        kind?: string
+    }>
+}
+
 export interface DelegationInputAttachment {
     name: string
     mediaType?: string
@@ -75,6 +86,7 @@ export interface DelegationProviderResult {
     text?: string
     error?: string
     artifacts: DelegationArtifact[]
+    pendingRequest?: DelegationPendingRequest
     providerState: Record<string, unknown>
 }
 
@@ -85,6 +97,9 @@ export interface DelegationRunRequest {
     sameTask: boolean
     skill?: string
     attachments?: DelegationInputAttachment[]
+    requestId?: string
+    optionId?: string
+    decision?: 'accept' | 'decline' | 'cancel'
 }
 
 export interface DelegationJob {
@@ -111,8 +126,13 @@ export interface DelegationJob {
     error?: string
     pollError?: string
     artifacts: DelegationArtifact[]
+    pendingRequest?: DelegationPendingRequest
+    /** Text guidance queued while a background Gateway turn is still running. */
+    queuedMessages?: string[]
     activeRunId?: string
     notifiedRunId?: string
+    notificationAttempts?: number
+    notificationNextAt?: number
     createdAt: number
     updatedAt: number
     startedAt: number
@@ -126,6 +146,7 @@ export type DelegateAction =
     | 'list'
     | 'agents'
     | 'message'
+    | 'publish'
     | 'stop'
 
 export interface DelegateToolInput {
@@ -137,6 +158,10 @@ export interface DelegateToolInput {
     newTask?: boolean
     skill?: string
     attachments?: DelegationInputAttachment[]
+    requestId?: string
+    optionId?: string
+    decision?: 'accept' | 'decline' | 'cancel'
+    path?: string
 }
 
 export interface DelegationProvider {
@@ -162,4 +187,15 @@ export interface DelegationProvider {
         agent: RemoteAgentInfo,
         job: DelegationJob
     ): Promise<DelegationProviderResult>
+    watch?(
+        agent: RemoteAgentInfo,
+        job: DelegationJob,
+        signal: AbortSignal
+    ): AsyncGenerator<DelegationProviderResult>
+    publish?(
+        agent: RemoteAgentInfo,
+        job: DelegationJob,
+        path: string
+    ): Promise<DelegationProviderResult>
+    close?(agent: RemoteAgentInfo, job: DelegationJob): Promise<void>
 }

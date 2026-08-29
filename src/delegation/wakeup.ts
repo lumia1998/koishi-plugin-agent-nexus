@@ -85,8 +85,9 @@ export function formatDelegationWakeup(
         .join('\n')
     const interactive =
         job.state === 'input_required' || job.state === 'permission_required'
+    const request = job.pendingRequest
     const instruction = interactive
-        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Use ${toolName} action=message id=${job.id} with the user's answer.`
+        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Use ${toolName} action=message id=${job.id}${request ? ` requestId=${request.id}` : ''} with the user's answer.`
         : job.state === 'failed'
           ? `Report the remote agent failure to the user. Retry with ${toolName} action=run id=${job.id} only when appropriate.`
           : `Use this remote agent result to answer the user. Continue the same context with ${toolName} action=run id=${job.id} if needed.`
@@ -94,6 +95,18 @@ export function formatDelegationWakeup(
         `<delegation_job_result job_id="${escapeXml(job.id)}" agent="${escapeXml(job.agentName)}" state="${job.state}">`,
         escapeXml(details || '(empty result)'),
         '</delegation_job_result>',
+        ...(request
+            ? [
+                  '',
+                  `<pending_request id="${escapeXml(request.id)}" kind="${request.kind}">`,
+                  escapeXml(request.prompt),
+                  ...(request.options?.map(
+                      (option) =>
+                          `<option id="${escapeXml(option.id)}">${escapeXml(option.name)}</option>`
+                  ) ?? []),
+                  '</pending_request>'
+              ]
+            : []),
         '',
         `Automatic notice: a background AgentNexus job started by this conversation has updated. ${instruction}`
     ].join('\n')

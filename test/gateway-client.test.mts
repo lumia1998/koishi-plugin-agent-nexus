@@ -46,6 +46,23 @@ test('authenticates inventory and the complete session lifecycle', async () => {
             response.end(JSON.stringify(session('running')))
         } else if (request.url === '/v1/sessions/session-1/cancel') {
             response.end(JSON.stringify(session('canceled')))
+        } else if (
+            request.url ===
+            '/v1/sessions/session-1/requests/request-1/resolve'
+        ) {
+            response.end(JSON.stringify(session('running')))
+        } else if (
+            request.url === '/v1/sessions/session-1/artifacts/publish'
+        ) {
+            response.end(JSON.stringify({
+                ...session('completed'),
+                artifacts: [{ filename: 'report.md', url: 'https://files/report.md' }]
+            }))
+        } else if (
+            request.url === '/v1/sessions/session-1' &&
+            request.method === 'DELETE'
+        ) {
+            response.end(JSON.stringify(session('canceled')))
         } else if (request.url === '/v1/sessions/session-1') {
             response.end(JSON.stringify(session('completed')))
         } else {
@@ -69,12 +86,34 @@ test('authenticates inventory and the complete session lifecycle', async () => {
         assert.equal((await client.sendMessage(remote, created.id, 'work')).state, 'running')
         assert.equal((await client.getSession(remote, created.id)).state, 'completed')
         assert.equal((await client.cancelSession(remote, created.id)).state, 'canceled')
+        assert.equal(
+            (
+                await client.resolvePending(
+                    remote,
+                    created.id,
+                    'request-1',
+                    { optionId: 'allow_once' }
+                )
+            ).state,
+            'running'
+        )
+        assert.equal(
+            (await client.publishArtifact(remote, created.id, 'dist/report.md'))
+                .artifacts[0].filename,
+            'report.md'
+        )
+        assert.equal((await client.closeSession(remote, created.id)).state, 'canceled')
         assert.ok(requests.every((request) => request.auth === 'Bearer TOKEN'))
         assert.deepEqual(JSON.parse(requests[1].body), {
             agentId: 'hermes',
             workspace: '/workspace'
         })
         assert.deepEqual(JSON.parse(requests[2].body), { message: 'work' })
+        assert.deepEqual(JSON.parse(requests[5].body), {
+            optionId: 'allow_once'
+        })
+        assert.deepEqual(JSON.parse(requests[6].body), { path: 'dist/report.md' })
+        assert.equal(requests[7].method, 'DELETE')
     } finally {
         await close(server)
     }

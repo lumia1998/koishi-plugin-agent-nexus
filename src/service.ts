@@ -81,6 +81,21 @@ export class AgentNexusService extends Service {
                     this.prepareDelegationArtifacts(artifacts, job)
             }
         )
+        ctx.on('chatluna/chat-stopped', async ({ conversationId }) => {
+            await this.delegations.cancelConversation(conversationId)
+        })
+        ctx.on(
+            'chatluna/before-conversation-clear-history',
+            async ({ conversation }) => {
+                await this.delegations.releaseConversation(conversation.id)
+            }
+        )
+        ctx.on(
+            'chatluna/before-conversation-delete',
+            async ({ conversation }) => {
+                await this.delegations.releaseConversation(conversation.id)
+            }
+        )
     }
 
     async start() {

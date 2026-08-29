@@ -2,21 +2,24 @@
 
 AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 Koishi / ChatLuna
 配套插件。Gateway 统一接入 ACP 与 A2A Agent；本插件自动发现这些 Agent，并为每个可用 Agent
-注册独立的 ChatLuna 工具。
+注册统一的 `nexus_task` 任务工具和独立的 `nexus_<agent>` 兼容工具。
 
 ## 功能边界
 
 插件负责：
 
 - 连接一个 Nexus Gateway，定时读取 `/v1/agents`。
-- 按 Agent 自动注册 `nexus_<agent>` ChatLuna 工具。
-- 创建、续接、查询和取消 Gateway Session。
+- 注册 ChatLuna 风格的 `nexus_task`（run/status/list/agents/message/publish/stop），并按 Agent
+  保留 `nexus_<agent>` 工具。
+- 创建、续接、查询、取消和显式释放 Gateway Session。
 - 默认把用户任务原样交给目标 Agent，并等待 Agent 返回结果。
 - 用户当前消息中的图片、文件、音频和视频会在工具真正执行时读取并上传到 Gateway，再按 ACP/A2A
   协议传递给目标 Agent；不会把整段 ChatLuna 历史上下文作为调用前提。
 - 会话上下文不是调用前提；显式使用后台模式时，如有 ChatLuna 会话上下文则在完成后唤醒原会话，
   没有上下文时可通过返回的任务 ID 查询。
 - 转存 Gateway 返回的二进制产物为 ChatLuna 临时文件。
+- 用精确 request ID 回复授权或输入请求，避免把过期确认提交给后一个请求。
+- 优先通过 SSE 跟踪后台任务；Gateway 重启导致内存 Session 丢失时，任务会立即收敛为失败。
 - 为单个 Agent 提供改名、停用、工作区、描述和技能标签覆盖。
 
 插件不再负责：
@@ -58,8 +61,11 @@ Gateway 的 Session 附件接口。Gateway 会在对应 Session 中临时保存�
 1. ACP Agent 优先收到其声明支持的图片/音频能力；不支持时由 Gateway 生成受限的临时资源链接。
 2. A2A Agent 收到带文件名和媒体类型的二进制 Part。
 3. Agent 返回的图片、音频、视频和文件由插件转成 ChatLuna 可发送的临时文件元素。
+4. Agent 只返回工作区路径时，可调用 `action=publish`；Gateway 会校验 realpath 边界并读取普通文件，
+   单个发布文件最多 12 MiB，再由插件转成 ChatLuna 临时文件。
 
-附件只跟随当前任务发送，不会拼接成历史对话；Session 空闲释放时 Gateway 同时清理临时附件。
+附件只跟随当前任务发送，不会拼接成历史对话；ChatLuna 清空或删除会话时，插件会关闭关联的
+Gateway Session 并清理临时附件。停止生成时会取消关联的活动任务。
 
 ## 局域网配置
 
@@ -94,10 +100,16 @@ Console 的“Agent 中枢”页面默认展示 Gateway 返回的全部 Agent。
 
 ## ChatLuna 调用方式
 
-每个 Agent 都会得到独立工具，例如 `nexus_hermes`、`nexus_claude` 或 `nexus_opencode`。
-`action=run` 默认以前台方式运行：插件不改写 `prompt`，并持续等待 Gateway 中的 Agent 完成、失败、
-请求输入或请求授权。只有明确设置 `background=true` 时才立即返回任务 ID。`action=status`、
-`action=message` 和 `action=stop` 可凭任务 ID 工作，即使当前工具调用没有 ChatLuna 会话上下文。
+推荐使用统一的 `nexus_task`。每个 Agent 仍会得到独立兼容工具，例如 `nexus_hermes`、
+`nexus_claude` 或 `nexus_opencode`。`action=run` 默认以前台方式运行：插件不改写 `prompt`，并持续等待
+Gateway 中的 Agent 完成、失败、请求输入或请求授权。只有明确设置 `background=true` 时才立即返回任务
+ID。后台任务完成或等待确认时会主动唤醒原 ChatLuna 会话，不需要轮询。后台任务仍在执行时，
+`action=message` 会把文字 guidance 持久化排队，并在当前远端 turn 完成后继续同一个 Gateway Session；
+排队期间不接受附件。
+
+授权/输入响应使用 `action=message id=<任务ID> requestId=<请求ID>`，并传 `optionId`、`decision`
+或 `prompt`。发布远端工作区文件使用 `action=publish id=<任务ID> path="dist/report.pdf"`。
+`status`、`message`、`publish` 和 `stop` 都可凭任务 ID 工作，即使当前工具调用没有 ChatLuna 会话上下文。
 
 ## 开发与验证
 
