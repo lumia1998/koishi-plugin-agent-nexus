@@ -2,6 +2,13 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.3.1] - 2026-08-30
+
+- 恢复 Koishi Console 委派任务进程面板，每 3 秒自动刷新，并显示原始任务、实时状态、输出、
+  待授权/输入、产物、主动回传与重试状态。
+- 明确展示 Koishi Job ID、Gateway Run ID、Gateway Session ID 与协议 Session ID 的对应关系，
+  ChatLuna 工具输出也会携带这些 ID，避免把本地 Job 误认为 Gateway 没有记录。
+
 ## [0.3.0] - 2026-08-30
 
 - 要求 Nexus Gateway 0.2.0+ 返回与当前 Run 绑定的完成证明；缺失、过期或协议不匹配的

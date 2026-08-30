@@ -120,6 +120,43 @@ test('polls background jobs and wakes ChatLuna for permission input', async () =
     }
 })
 
+test('exposes task progress with Koishi, Gateway Run, and Session identifiers', async () => {
+    const fixture = await managerFixture()
+    fixture.provider.run = async () =>
+        completed({
+            gatewaySessionId: 'gateway-session-1',
+            gatewayRunId: 'gateway-run-1',
+            protocolSessionId: 'acp-session-1',
+            protocol: 'acp'
+        })
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '生成报告',
+                background: false
+            },
+            context()
+        )
+        assert.match(output, /Gateway run: gateway-run-1/)
+        assert.match(output, /Gateway session: gateway-session-1/)
+
+        const [view] = await fixture.manager.listJobsForConsole()
+        assert.equal(view.id, jobId(output))
+        assert.equal(view.gatewayRunId, 'gateway-run-1')
+        assert.equal(view.gatewaySessionId, 'gateway-session-1')
+        assert.equal(view.protocolSessionId, 'acp-session-1')
+        assert.equal(view.protocol, 'acp')
+        assert.equal(view.conversationBound, true)
+        assert.equal(view.deliveryState, 'not_required')
+        assert.equal('routing' in view, false)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('queues background guidance and continues in the same Gateway task', async () => {
     const fixture = await managerFixture({ pollIntervalMs: 1 })
     let completeFirst!: () => void

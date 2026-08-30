@@ -143,6 +143,10 @@ export class AgentNexusService extends Service {
         return this.delegations.handle(input, context, signal)
     }
 
+    listDelegationJobs(limit?: number) {
+        return this.delegations.listJobsForConsole(limit)
+    }
+
     async collectInputAttachments(parentConfig: any) {
         const session = parentConfig?.configurable?.session
         const elements = [

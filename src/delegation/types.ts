@@ -140,6 +140,44 @@ export interface DelegationJob {
     expiresAt: number
 }
 
+/** Read-only, routing-safe task data exposed to the Koishi Console. */
+export interface DelegationJobView {
+    id: string
+    agentId: string
+    agentName: string
+    toolName?: string
+    state: DelegationState
+    background: boolean
+    prompt: string
+    skill?: string
+    remoteState?: string
+    output?: string
+    error?: string
+    pollError?: string
+    pendingRequest?: DelegationPendingRequest
+    artifacts: Array<{
+        id?: string
+        name: string
+        url?: string
+        filename?: string
+        mediaType?: string
+    }>
+    queuedMessageCount: number
+    conversationBound: boolean
+    deliveryState: 'not_required' | 'waiting' | 'delivered' | 'retrying'
+    notificationAttempts: number
+    notificationNextAt?: number
+    gatewaySessionId?: string
+    gatewayRunId?: string
+    protocolSessionId?: string
+    protocol?: 'acp' | 'a2a'
+    createdAt: number
+    updatedAt: number
+    startedAt: number
+    endedAt?: number
+    expiresAt: number
+}
+
 export type DelegateAction =
     | 'run'
     | 'status'

@@ -11,6 +11,7 @@ import type {
     DelegationArtifact,
     DelegationContext,
     DelegationJob,
+    DelegationJobView,
     DelegationProviderResult,
     DelegationState,
     RemoteAgentInfo
@@ -165,6 +166,52 @@ export class DelegationManager {
             await this.store.save(job)
         }
         return jobs.length
+    }
+
+    async listJobsForConsole(limit = 100): Promise<DelegationJobView[]> {
+        const bounded = Math.max(1, Math.min(256, Math.trunc(limit) || 100))
+        return (await this.store.list()).slice(0, bounded).map((job) => ({
+            id: job.id,
+            agentId: job.agentId,
+            agentName: job.agentName,
+            toolName: this.toolNameForJob(job),
+            state: job.state,
+            background: job.background,
+            prompt: job.prompt,
+            skill: job.skill,
+            remoteState: job.remoteState,
+            output: job.output,
+            error: job.error,
+            pollError: job.pollError,
+            pendingRequest: job.pendingRequest
+                ? structuredClone(job.pendingRequest)
+                : undefined,
+            artifacts: job.artifacts.map((artifact) => ({
+                id: artifact.artifactId,
+                name:
+                    artifact.name ||
+                    artifact.filename ||
+                    artifact.description ||
+                    'Artifact',
+                url: artifact.url,
+                filename: artifact.filename,
+                mediaType: artifact.mediaType
+            })),
+            queuedMessageCount: job.queuedMessages?.length || 0,
+            conversationBound: Boolean(job.parentConversationId && job.routing),
+            deliveryState: deliveryState(job),
+            notificationAttempts: job.notificationAttempts || 0,
+            notificationNextAt: job.notificationNextAt,
+            gatewaySessionId: stateString(job.providerState.gatewaySessionId),
+            gatewayRunId: stateString(job.providerState.gatewayRunId),
+            protocolSessionId: stateString(job.providerState.protocolSessionId),
+            protocol: protocolValue(job.providerState.protocol),
+            createdAt: job.createdAt,
+            updatedAt: job.updatedAt,
+            startedAt: job.startedAt,
+            endedAt: job.endedAt,
+            expiresAt: job.expiresAt
+        }))
     }
 
     async handle(
@@ -682,8 +729,10 @@ export class DelegationManager {
         return [
             'AgentNexus jobs:',
             ...jobs.slice(0, 20).map(
-                (job) =>
-                    `- ${job.id} [${job.state}] ${job.agentName} (${job.background ? 'background' : 'foreground'})\n  Tool: ${this.toolNameForJob(job)}`
+                (job) => {
+                    const ids = gatewayIdentifiers(job)
+                    return `- ${job.id} [${job.state}] ${job.agentName} (${job.background ? 'background' : 'foreground'})\n  Tool: ${this.toolNameForJob(job)}${ids.length ? `\n  ${ids.join('\n  ')}` : ''}`
+                }
             ),
             '',
             'Use the Tool shown for the target Agent with action=status or action=stop.'
@@ -1339,7 +1388,8 @@ function formatRunning(
         `AgentNexus job: ${job.id}`,
         `Agent: ${job.agentName}`,
         `Tool: ${toolName}`,
-        `State: running (${job.background ? 'background' : 'foreground'})`
+        `State: running (${job.background ? 'background' : 'foreground'})`,
+        ...gatewayIdentifiers(job)
     ]
     if (job.background) {
         lines.push(
@@ -1367,7 +1417,8 @@ export function formatJob(
         `AgentNexus job: ${job.id}`,
         `Agent: ${job.agentName}`,
         `Tool: ${toolName}`,
-        `State: ${job.state}`
+        `State: ${job.state}`,
+        ...gatewayIdentifiers(job)
     ]
     if (job.output?.trim()) lines.push('', job.output.trim())
     if (job.error?.trim()) lines.push('', `Error: ${job.error.trim()}`)
@@ -1565,6 +1616,34 @@ function errorMessage(error: unknown) {
 
 function stateString(value: unknown) {
     return typeof value === 'string' && value ? value : undefined
+}
+
+function protocolValue(value: unknown): 'acp' | 'a2a' | undefined {
+    return value === 'acp' || value === 'a2a' ? value : undefined
+}
+
+function gatewayIdentifiers(job: DelegationJob) {
+    const runId = stateString(job.providerState.gatewayRunId)
+    const sessionId = stateString(job.providerState.gatewaySessionId)
+    const protocolSessionId = stateString(job.providerState.protocolSessionId)
+    return [
+        runId ? `Gateway run: ${runId}` : undefined,
+        sessionId ? `Gateway session: ${sessionId}` : undefined,
+        protocolSessionId ? `Protocol session: ${protocolSessionId}` : undefined
+    ].filter((value): value is string => Boolean(value))
+}
+
+function deliveryState(
+    job: DelegationJob
+): DelegationJobView['deliveryState'] {
+    if (!job.background || !job.parentConversationId || !job.routing) {
+        return 'not_required'
+    }
+    if (job.notificationAttempts) return 'retrying'
+    if (job.activeRunId && job.notifiedRunId === job.activeRunId) {
+        return 'delivered'
+    }
+    return 'waiting'
 }
 
 function delay(ms: number, signal?: AbortSignal) {

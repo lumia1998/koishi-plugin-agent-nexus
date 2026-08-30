@@ -72,6 +72,7 @@
                 @updated="applyConsoleData"
             />
         </main>
+        <tasks-panel />
     </div>
 </template>
 
@@ -80,6 +81,7 @@ import { computed, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage } from 'element-plus'
 import GatewayPanel from './components/gateway-panel.vue'
+import TasksPanel from './components/tasks-panel.vue'
 import type { NexusConfig, NexusConsoleData, NexusStatus } from '../src/types'
 
 const loading = ref(false)
