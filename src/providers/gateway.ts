@@ -340,17 +340,38 @@ function mapGatewayAgent(agent: GatewayAgentSummary): GatewayAgentSummary {
     }
 }
 
-function fromGatewaySession(
+export function fromGatewaySession(
     session: GatewaySessionView,
     previousState: Record<string, unknown>
 ): DelegationProviderResult {
+    const completionError = validateGatewayCompletion(session)
+    const providerState = {
+        ...structuredClone(previousState),
+        gatewaySessionId: session.id,
+        ...(session.instanceId
+            ? { gatewayInstanceId: session.instanceId }
+            : {}),
+        ...(session.runId ? { gatewayRunId: session.runId } : {}),
+        protocol: session.protocol,
+        ...(session.protocolSessionId
+            ? { protocolSessionId: session.protocolSessionId }
+            : {}),
+        ...(session.acpSessionId ? { acpSessionId: session.acpSessionId } : {}),
+        ...(session.lastEventId ? { lastEventId: session.lastEventId } : {}),
+        agentId: session.agentId,
+        ...(session.workspace ? { workspace: session.workspace } : {}),
+        remoteState: completionError ? 'completed_unverified' : session.state,
+        gatewayCompletion: session.completion
+            ? structuredClone(session.completion)
+            : undefined
+    }
     return {
-        state: gatewayState(session.state),
-        remoteState: session.state,
+        state: completionError ? 'failed' : gatewayState(session.state),
+        remoteState: completionError ? 'completed_unverified' : session.state,
         text: session.pendingRequest
             ? formatPendingRequest(session.pendingRequest, session.output)
             : session.output,
-        error: session.error,
+        error: completionError || session.error,
         artifacts: (session.artifacts || []).map((artifact) => ({
             artifactId: artifact.id,
             name: artifact.name,
@@ -366,24 +387,32 @@ function fromGatewaySession(
         pendingRequest: session.pendingRequest
             ? structuredClone(session.pendingRequest)
             : undefined,
-        providerState: {
-            ...structuredClone(previousState),
-            gatewaySessionId: session.id,
-            ...(session.instanceId
-                ? { gatewayInstanceId: session.instanceId }
-                : {}),
-            ...(session.runId ? { gatewayRunId: session.runId } : {}),
-            protocol: session.protocol,
-            ...(session.protocolSessionId
-                ? { protocolSessionId: session.protocolSessionId }
-                : {}),
-            ...(session.acpSessionId ? { acpSessionId: session.acpSessionId } : {}),
-            ...(session.lastEventId ? { lastEventId: session.lastEventId } : {}),
-            agentId: session.agentId,
-            ...(session.workspace ? { workspace: session.workspace } : {}),
-            remoteState: session.state
-        }
+        providerState
     }
+}
+
+function validateGatewayCompletion(session: GatewaySessionView) {
+    if (session.state !== 'completed') return undefined
+    const completion = session.completion
+    if (!completion || completion.verified !== true) {
+        return 'Nexus Gateway reported completed without a verifiable turn-completion proof. Upgrade the Gateway before trusting this result.'
+    }
+    if (completion.protocol !== session.protocol) {
+        return 'Nexus Gateway completion proof does not match the Session protocol.'
+    }
+    if (session.runId && completion.runId !== session.runId) {
+        return 'Nexus Gateway completion proof belongs to a different run.'
+    }
+    if (session.pendingRequest) {
+        return 'Nexus Gateway reported completed while input or permission is still pending.'
+    }
+    if (!completion.outputPresent && completion.artifactCount < 1) {
+        return 'Nexus Gateway completion proof does not contain a final response or artifact.'
+    }
+    if (!session.output?.trim() && (session.artifacts?.length || 0) < 1) {
+        return 'Nexus Gateway completed Session does not expose a final response or artifact.'
+    }
+    return undefined
 }
 
 function formatPendingRequest(

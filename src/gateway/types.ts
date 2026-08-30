@@ -48,6 +48,20 @@ export interface GatewayArtifactView {
     metadata?: Record<string, unknown>
 }
 
+export interface GatewayTurnCompletion {
+    runId?: string
+    protocol: GatewayProtocol
+    source:
+        | 'acp_prompt_response'
+        | 'a2a_task_status'
+        | 'a2a_message_stream'
+    stopReason: string
+    verified: true
+    outputPresent: boolean
+    artifactCount: number
+    completedAt: number
+}
+
 export interface GatewaySessionView {
     id: string
     instanceId?: string
@@ -71,6 +85,7 @@ export interface GatewaySessionView {
             kind?: string
         }>
     }
+    completion?: GatewayTurnCompletion
     lastEventId?: string
     createdAt: number
     updatedAt: number

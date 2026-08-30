@@ -20,6 +20,8 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 - 转存 Gateway 返回的二进制产物为 ChatLuna 临时文件。
 - 用精确 request ID 回复授权或输入请求，避免把过期确认提交给后一个请求。
 - 优先通过 SSE 跟踪后台任务；Gateway 重启导致内存 Session 丢失时，任务会立即收敛为失败。
+- 只接受与当前 Gateway Run 匹配的协议完成证明；缺少证明、仍有待确认请求、或没有最终文本/产物的
+  `completed` 会转为失败，不会主动向 ChatLuna 谎报任务成功。
 - 为单个 Agent 提供改名、停用、工作区、描述和技能标签覆盖。
 
 插件不再负责：
@@ -34,7 +36,7 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 
 ## 安装
 
-要求 Node.js 20 或更高版本，并已安装 ChatLuna 与
+要求 Node.js 20、Nexus Gateway 0.2.0 或更高版本，并已安装 ChatLuna 与
 `koishi-plugin-chatluna-storage-service`。
 
 ```bash
@@ -101,8 +103,9 @@ Console 的“Agent 中枢”页面默认展示 Gateway 返回的全部 Agent。
 ## ChatLuna 调用方式
 
 推荐使用统一的 `nexus_task`。每个 Agent 仍会得到独立兼容工具，例如 `nexus_hermes`、
-`nexus_claude` 或 `nexus_opencode`。`action=run` 默认以前台方式运行：插件不改写 `prompt`，并持续等待
-Gateway 中的 Agent 完成、失败、请求输入或请求授权。只有明确设置 `background=true` 时才立即返回任务
+`nexus_claude` 或 `nexus_opencode`。`action=run` 默认以前台方式运行：插件原样传递用户 `prompt`，Gateway
+会另外附加协议级完成约束，并持续等待 Agent 完成、失败、请求输入或请求授权。只有明确设置
+`background=true` 时才立即返回任务
 ID。后台任务完成或等待确认时会主动唤醒原 ChatLuna 会话，不需要轮询。后台任务仍在执行时，
 `action=message` 会把文字 guidance 持久化排队，并在当前远端 turn 完成后继续同一个 Gateway Session；
 排队期间不接受附件。

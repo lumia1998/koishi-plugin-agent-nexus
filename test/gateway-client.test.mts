@@ -6,7 +6,10 @@ import {
     NexusGatewayClient,
     SESSION_START_TIMEOUT_MS
 } from '../src/gateway/client.ts'
-import { NexusGatewayProvider } from '../src/providers/gateway.ts'
+import {
+    NexusGatewayProvider,
+    fromGatewaySession
+} from '../src/providers/gateway.ts'
 import { PRIMARY_GATEWAY_ID } from '../src/types.ts'
 import type { DelegationJob } from '../src/delegation/index.ts'
 
@@ -330,6 +333,49 @@ test('maps protocol session ids, permission input, and binary artifacts', async 
     assert.equal(uploaded.name, '需求.png')
     assert.deepEqual([...uploaded.bytes], [1, 2, 3])
     assert.deepEqual(sentAttachmentIds, ['attachment-1'])
+})
+
+test('accepts only verified Gateway turn completion for the current run', () => {
+    const valid = {
+        ...session('completed'),
+        runId: 'gateway-run-1',
+        output: 'Completed and verified.',
+        completion: {
+            runId: 'gateway-run-1',
+            protocol: 'acp',
+            source: 'acp_prompt_response',
+            stopReason: 'end_turn',
+            verified: true,
+            outputPresent: true,
+            artifactCount: 0,
+            completedAt: 2
+        }
+    } as const
+    const completed = fromGatewaySession(valid, {})
+    assert.equal(completed.state, 'completed')
+    assert.equal(completed.error, undefined)
+    assert.equal(
+        (completed.providerState.gatewayCompletion as any).runId,
+        'gateway-run-1'
+    )
+
+    const missing = fromGatewaySession(
+        { ...session('completed'), output: 'Unverified result' } as any,
+        {}
+    )
+    assert.equal(missing.state, 'failed')
+    assert.equal(missing.remoteState, 'completed_unverified')
+    assert.match(missing.error || '', /completion proof/i)
+
+    const stale = fromGatewaySession(
+        {
+            ...valid,
+            completion: { ...valid.completion, runId: 'old-run' }
+        },
+        {}
+    )
+    assert.equal(stale.state, 'failed')
+    assert.match(stale.error || '', /different run/i)
 })
 
 test('keeps the previous inventory after a transient discovery failure', async () => {
