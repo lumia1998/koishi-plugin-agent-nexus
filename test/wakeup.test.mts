@@ -2,9 +2,14 @@ import { HumanMessage } from '@langchain/core/messages'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+    formatDelegationWakeup,
     notifyChatLunaDelegation,
     type DelegationJob
 } from '../src/delegation/index.ts'
+import {
+    delegationArtifactElements,
+    sendDelegationArtifacts
+} from '../src/delegation/media.ts'
 
 test('queues a wakeup while a plugin conversation is in flight', async () => {
     let invoked = false
@@ -115,6 +120,80 @@ test('skips delivery when the original conversation no longer exists', async () 
     )
 
     assert.equal(invoked, false)
+})
+
+test('keeps artifact URLs out of the model wakeup text', () => {
+    const job = wakeupJob()
+    job.artifacts = [
+        {
+            artifactId: 'pptx-1',
+            filename: '上海堡垒.pptx',
+            mediaType:
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'http://10.1.2.30:5140/temp/result.pptx'
+        }
+    ]
+    const message = formatDelegationWakeup(job)
+    assert.match(message, /上海堡垒\.pptx/)
+    assert.doesNotMatch(message, /10\.1\.2\.30:5140/)
+})
+
+test('sends artifacts as native Koishi resource elements', async () => {
+    const artifacts = [
+        {
+            artifactId: 'image-1',
+            filename: 'preview.png',
+            mediaType: 'image/png',
+            url: 'https://files/preview.png'
+        },
+        {
+            artifactId: 'audio-1',
+            filename: 'notice.mp3',
+            mediaType: 'audio/mpeg',
+            url: 'https://files/notice.mp3'
+        },
+        {
+            artifactId: 'file-1',
+            filename: 'report.pptx',
+            mediaType:
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'https://files/report.pptx'
+        }
+    ]
+    const elements = delegationArtifactElements(artifacts)
+    assert.deepEqual(elements.map((element) => element.type), [
+        'img',
+        'audio',
+        'file'
+    ])
+    assert.equal(elements[2].attrs.filename, 'report.pptx')
+
+    let sent: { channelId: string; content: any } | undefined
+    await sendDelegationArtifacts(
+        {
+            'onebot:bot-1': {
+                async createDirectChannel() {
+                    return { id: 'direct-channel-1' }
+                },
+                async sendMessage(channelId, content) {
+                    sent = { channelId, content }
+                }
+            }
+        },
+        {
+            platform: 'onebot',
+            selfId: 'bot-1',
+            userId: 'user-1',
+            isDirect: true
+        },
+        artifacts
+    )
+    assert.equal(sent?.channelId, 'direct-channel-1')
+    assert.deepEqual(sent?.content.map((element: any) => element.type), [
+        'img',
+        'audio',
+        'file'
+    ])
 })
 
 function wakeupJob(): DelegationJob {

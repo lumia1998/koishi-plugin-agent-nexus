@@ -33,6 +33,7 @@ import {
     buildDelegationToolNames,
     delegationToolNameForJob
 } from './delegation'
+import { sendDelegationArtifacts } from './delegation/media'
 import { NexusGatewayProvider } from './providers'
 import { NexusGatewayClient } from './gateway'
 
@@ -78,7 +79,15 @@ export class AgentNexusService extends Service {
             (job) => this.notifyDelegation(job),
             {
                 prepareArtifacts: (artifacts, job) =>
-                    this.prepareDelegationArtifacts(artifacts, job)
+                    this.prepareDelegationArtifacts(artifacts, job),
+                notifyArtifacts: (job, artifacts) =>
+                    job.routing
+                        ? sendDelegationArtifacts(
+                              (this.ctx as any).bots || {},
+                              job.routing,
+                              artifacts
+                          )
+                        : Promise.resolve()
             }
         )
         ctx.on('chatluna/chat-stopped', async ({ conversationId }) => {

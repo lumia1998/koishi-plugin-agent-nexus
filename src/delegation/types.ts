@@ -131,6 +131,8 @@ export interface DelegationJob {
     queuedMessages?: string[]
     activeRunId?: string
     notifiedRunId?: string
+    /** Artifact delivery keys already sent for the current notification run. */
+    notifiedArtifactIds?: string[]
     notificationAttempts?: number
     notificationNextAt?: number
     createdAt: number

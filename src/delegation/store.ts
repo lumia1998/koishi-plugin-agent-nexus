@@ -185,6 +185,7 @@ function normalizeJob(value: unknown): DelegationJob | undefined {
         queuedMessages: normalizeQueuedMessages(value.queuedMessages),
         activeRunId: optionalString(value.activeRunId),
         notifiedRunId: optionalString(value.notifiedRunId),
+        notifiedArtifactIds: normalizeStringArray(value.notifiedArtifactIds),
         notificationAttempts: optionalFiniteNumber(value.notificationAttempts),
         notificationNextAt: optionalFiniteNumber(value.notificationNextAt),
         createdAt: finiteNumber(value.createdAt, now),
@@ -225,6 +226,15 @@ function normalizeQueuedMessages(value: unknown) {
     if (!Array.isArray(value)) return undefined
     const messages = value.map(stringValue).filter(Boolean).slice(0, 16)
     return messages.length ? messages : undefined
+}
+
+function normalizeStringArray(value: unknown) {
+    if (!Array.isArray(value)) return undefined
+    const items = value
+        .map(stringValue)
+        .filter(Boolean)
+        .slice(0, 64)
+    return items.length ? Array.from(new Set(items)) : undefined
 }
 
 function parseJson(raw: string, filePath: string) {

@@ -26,6 +26,11 @@ export interface DelegationManagerOptions {
         artifacts: DelegationArtifact[],
         job: DelegationJob
     ) => Promise<DelegationArtifact[]>
+    /** Sends already-prepared output artifacts as native Koishi elements. */
+    notifyArtifacts?: (
+        job: DelegationJob,
+        artifacts: DelegationArtifact[]
+    ) => Promise<void>
 }
 
 interface ActiveMonitor {
@@ -46,6 +51,7 @@ export class DelegationManager {
     private readonly retentionMs: number
     private readonly now: () => number
     private readonly prepareArtifacts?: DelegationManagerOptions['prepareArtifacts']
+    private readonly notifyArtifacts?: DelegationManagerOptions['notifyArtifacts']
     private monitors = new Map<string, ActiveMonitor>()
     private jobLocks = new Map<string, Promise<void>>()
     private notifyTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -63,6 +69,7 @@ export class DelegationManager {
         this.retentionMs = Math.max(60_000, options.retentionMs ?? DEFAULT_RETENTION)
         this.now = options.now ?? Date.now
         this.prepareArtifacts = options.prepareArtifacts
+        this.notifyArtifacts = options.notifyArtifacts
     }
 
     async start() {
@@ -72,7 +79,7 @@ export class DelegationManager {
             if (job.state === 'running') this.startMonitor(job.id)
             else if (job.state === 'completed' && job.queuedMessages?.length) {
                 this.scheduleQueuedTurn(job.id)
-            } else if (shouldNotify(job)) {
+            } else if (shouldNotify(job, Boolean(this.notifyArtifacts))) {
                 this.scheduleNotify(
                     job.id,
                     Math.max(0, (job.notificationNextAt ?? this.now()) - this.now())
@@ -437,7 +444,11 @@ export class DelegationManager {
             this.notifyTimers.delete(original.id)
         }
         const now = this.now()
-        const background = input.background === true
+        const continuingInteractiveTurn =
+            isInteractive(original.state) && !input.newTask
+        const background = continuingInteractiveTurn
+            ? input.background ?? original.background
+            : input.background === true
         const resetContext = Boolean(input.newTask)
         let job: DelegationJob = {
             ...original,
@@ -458,6 +469,7 @@ export class DelegationManager {
                 ? undefined
                 : original.queuedMessages,
             activeRunId: randomUUID(),
+            notifiedArtifactIds: undefined,
             notificationAttempts: undefined,
             notificationNextAt: undefined,
             startedAt: now,
@@ -514,8 +526,9 @@ export class DelegationManager {
                 }
                 return { kind: 'foreground', id: job.id }
             }
-            job.notifiedRunId = job.activeRunId
+            if (!job.background) job.notifiedRunId = job.activeRunId
             await this.store.save(job)
+            if (job.background) void this.notifyJob(job.id)
             return {
                 kind: 'output',
                 value: formatJob(job, this.toolNameForJob(job))
@@ -536,8 +549,9 @@ export class DelegationManager {
             }
             if (isRemoteSessionMissing(error)) {
                 const lost = failLostSession(latest, this.now(), this.retentionMs)
-                lost.notifiedRunId = lost.activeRunId
+                if (!lost.background) lost.notifiedRunId = lost.activeRunId
                 await this.store.save(lost)
+                if (lost.background) void this.notifyJob(lost.id)
                 return {
                     kind: 'output',
                     value: formatJob(lost, this.toolNameForJob(lost))
@@ -563,8 +577,9 @@ export class DelegationManager {
             job.endedAt = this.now()
             job.updatedAt = job.endedAt
             job.expiresAt = job.endedAt + this.retentionMs
-            job.notifiedRunId = job.activeRunId
+            if (!job.background) job.notifiedRunId = job.activeRunId
             await this.store.save(job)
+            if (job.background) void this.notifyJob(job.id)
             throw error
         }
     }
@@ -1192,21 +1207,55 @@ export class DelegationManager {
             this.notifyTimers.delete(id)
         }
         let job = await this.store.get(id)
-        if (!job || !shouldNotify(job)) return
+        if (!job || !shouldNotify(job, Boolean(this.notifyArtifacts))) return
         const runId = job.activeRunId
         let lastError: unknown
+        let failureKind: 'wakeup' | 'artifact' = 'wakeup'
         for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-                await this.notify(job)
-                const current = await this.store.get(id)
-                if (!current || current.activeRunId !== runId) return
-                job = current
-                job.notifiedRunId = runId
-                job.notificationAttempts = undefined
-                job.notificationNextAt = undefined
-                job.pollError = undefined
-                job.updatedAt = this.now()
-                await this.store.save(job)
+                if (job.notifiedRunId !== runId) {
+                    failureKind = 'wakeup'
+                    await this.notify(job)
+                    const current = await this.store.get(id)
+                    if (!current || current.activeRunId !== runId) return
+                    job = current
+                    job.notifiedRunId = runId
+                    job.notificationAttempts = undefined
+                    job.notificationNextAt = undefined
+                    job.pollError = undefined
+                    job.updatedAt = this.now()
+                    await this.store.save(job)
+                }
+
+                if (this.notifyArtifacts) {
+                    const current = await this.store.get(id)
+                    if (!current || current.activeRunId !== runId) return
+                    const pending = pendingArtifactDelivery(current)
+                    if (pending.length) {
+                        failureKind = 'artifact'
+                        await this.notifyArtifacts(current, pending)
+                        const updated = await this.store.get(id)
+                        if (!updated || updated.activeRunId !== runId) return
+                        updated.notifiedArtifactIds = Array.from(
+                            new Set([
+                                ...(updated.notifiedArtifactIds || []),
+                                ...pending.map(artifactDeliveryKey)
+                            ])
+                        )
+                        updated.notificationAttempts = undefined
+                        updated.notificationNextAt = undefined
+                        updated.pollError = undefined
+                        updated.updatedAt = this.now()
+                        job = updated
+                        await this.store.save(job)
+                    } else {
+                        job = current
+                    }
+                }
+
+                if (shouldNotify(job, Boolean(this.notifyArtifacts))) {
+                    throw new Error('Delegation notification is still pending.')
+                }
                 return
             } catch (error) {
                 lastError = error
@@ -1217,7 +1266,7 @@ export class DelegationManager {
         if (
             !current ||
             current.activeRunId !== runId ||
-            !shouldNotify(current)
+            !shouldNotify(current, Boolean(this.notifyArtifacts))
         ) {
             return
         }
@@ -1226,7 +1275,7 @@ export class DelegationManager {
         const delayMs = Math.min(5 * 60_000, 1000 * 2 ** Math.min(attempts, 8))
         job.notificationAttempts = attempts
         job.notificationNextAt = this.now() + delayMs
-        job.pollError = `ChatLuna wakeup failed: ${errorMessage(lastError)}`
+        job.pollError = `${failureKind === 'artifact' ? 'Koishi artifact delivery' : 'ChatLuna wakeup'} failed: ${errorMessage(lastError)}`
         job.updatedAt = this.now()
         await this.store.save(job)
         this.scheduleNotify(job.id, delayMs)
@@ -1283,6 +1332,7 @@ export class DelegationManager {
             return
         }
         current.notifiedRunId = undefined
+        current.notifiedArtifactIds = undefined
         await this.store.save(current)
         await this.notifyJob(id)
     }
@@ -1299,6 +1349,7 @@ export class DelegationManager {
         current.updatedAt = now
         current.expiresAt = now + this.retentionMs
         current.notifiedRunId = undefined
+        current.notifiedArtifactIds = undefined
         await this.store.save(current)
         await this.notifyJob(id)
     }
@@ -1343,15 +1394,35 @@ function applyResult(
     }
 }
 
-function shouldNotify(job: DelegationJob) {
-    return Boolean(
+function shouldNotify(job: DelegationJob, deliverArtifacts = false) {
+    const eligible = Boolean(
         job.background &&
             job.parentConversationId &&
             job.routing &&
             job.activeRunId &&
-            job.activeRunId !== job.notifiedRunId &&
             job.state !== 'running' &&
             job.state !== 'canceled'
+    )
+    if (!eligible) return false
+    return (
+        job.activeRunId !== job.notifiedRunId ||
+        (deliverArtifacts && pendingArtifactDelivery(job).length > 0)
+    )
+}
+
+function pendingArtifactDelivery(job: DelegationJob) {
+    const delivered = new Set(job.notifiedArtifactIds || [])
+    return job.artifacts.filter(
+        (artifact) => artifact.url && !delivered.has(artifactDeliveryKey(artifact))
+    )
+}
+
+function artifactDeliveryKey(artifact: DelegationArtifact) {
+    return (
+        artifact.artifactId ||
+        [artifact.url, artifact.filename, artifact.name, artifact.mediaType]
+            .filter(Boolean)
+            .join('|')
     )
 }
 
@@ -1640,7 +1711,11 @@ function deliveryState(
         return 'not_required'
     }
     if (job.notificationAttempts) return 'retrying'
-    if (job.activeRunId && job.notifiedRunId === job.activeRunId) {
+    if (
+        job.activeRunId &&
+        job.notifiedRunId === job.activeRunId &&
+        pendingArtifactDelivery(job).length === 0
+    ) {
         return 'delivered'
     }
     return 'waiting'

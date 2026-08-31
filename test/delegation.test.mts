@@ -196,6 +196,57 @@ test('relays a Gateway permission request into the originating ChatLuna conversa
     }
 })
 
+test('preserves background mode when resolving a pending Gateway request', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let seenRequest: any
+    fixture.provider.run = async () => ({
+        state: 'permission_required',
+        remoteState: 'permission_required',
+        text: 'Allow write?',
+        artifacts: [],
+        pendingRequest: {
+            id: 'request-1',
+            kind: 'permission',
+            prompt: 'Allow write?',
+            options: [{ id: 'allow_once', name: 'Allow once' }]
+        },
+        providerState: { gatewaySessionId: 'session-1', gatewayRunId: 'run-1' }
+    })
+    fixture.provider.message = async (_agent, current, request) => {
+        seenRequest = request
+        return completed(current.providerState)
+    }
+    try {
+        await fixture.manager.start()
+        const started = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '生成文件',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(started)
+        const resolved = await fixture.manager.handle(
+            {
+                action: 'message',
+                remote: 'hermes',
+                id,
+                requestId: 'request-1',
+                optionId: 'allow_once'
+            },
+            context()
+        )
+        assert.equal(seenRequest.background, true)
+        assert.equal(seenRequest.sameTask, true)
+        assert.match(resolved, /State: completed/)
+        assert.equal((await fixture.store.get(id))?.background, true)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('exposes task progress with Koishi, Gateway Run, and Session identifiers', async () => {
     const fixture = await managerFixture()
     fixture.provider.run = async () =>
@@ -579,6 +630,60 @@ test('allows context-free background jobs and does not attempt ChatLuna delivery
     }
 })
 
+test('delivers a synchronously completed background result and its artifacts', async () => {
+    const fixture = await managerFixture()
+    let notifications = 0
+    let delivered: string[] = []
+    fixture.provider.run = async () => ({
+        ...completed({ gatewaySessionId: 'session-1' }),
+        artifacts: [
+            {
+                artifactId: 'report-1',
+                filename: 'report.pptx',
+                mediaType:
+                    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                url: 'https://files/report.pptx'
+            }
+        ]
+    })
+    fixture.manager = new DelegationManager(
+        fixture.store,
+        new DelegationProviderRegistry().register(fixture.provider),
+        async () => {
+            notifications += 1
+        },
+        {
+            pollIntervalMs: 1,
+            notifyArtifacts: async (_job, artifacts) => {
+                delivered = artifacts.map((artifact) => artifact.artifactId || '')
+            }
+        }
+    )
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '生成文件',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(output)
+        for (let attempt = 0; attempt < 100 && !delivered.length; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(notifications, 1)
+        assert.deepEqual(delivered, ['report-1'])
+        assert.deepEqual((await fixture.store.get(id))?.notifiedArtifactIds, [
+            'report-1'
+        ])
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('serializes concurrent follow-up messages for the same job', async () => {
     const fixture = await managerFixture({ pollIntervalMs: 1 })
     let releaseFirst!: () => void
@@ -677,6 +782,56 @@ test('stores structured artifacts and replaces prepared binary payloads with URL
         assert.match(output, /http:\/\/127\.0\.0\.1:5140\/temp\/result\.png/)
         assert.match(formatJob(current), /\{"answer":42\}/)
         assert.match(formatDelegationWakeup(current), /result\.png/)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('retries failed artifact delivery without repeating the wakeup', async () => {
+    const fixture = await managerFixture()
+    let notifications = 0
+    let artifactAttempts = 0
+    fixture.provider.run = async () => ({
+        ...completed({ gatewaySessionId: 'session-1' }),
+        artifacts: [
+            {
+                artifactId: 'report-1',
+                filename: 'report.pptx',
+                mediaType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                url: 'https://files/report.pptx'
+            }
+        ]
+    })
+    fixture.manager = new DelegationManager(
+        fixture.store,
+        new DelegationProviderRegistry().register(fixture.provider),
+        async () => {
+            notifications += 1
+        },
+        {
+            pollIntervalMs: 1,
+            notifyArtifacts: async () => {
+                artifactAttempts += 1
+                if (artifactAttempts === 1) throw new Error('temporary send failure')
+            }
+        }
+    )
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '生成文件',
+                background: true
+            },
+            context()
+        )
+        for (let attempt = 0; attempt < 500 && artifactAttempts < 2; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(notifications, 1)
+        assert.equal(artifactAttempts, 2)
     } finally {
         await fixture.dispose()
     }

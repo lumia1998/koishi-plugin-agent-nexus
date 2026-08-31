@@ -113,7 +113,7 @@ export function formatDelegationWakeup(
         job.error?.trim() ? `Error: ${job.error.trim()}` : undefined,
         ...job.artifacts.map((artifact) =>
             artifact.url
-                ? `${artifact.name || artifact.filename || 'file'}: ${artifact.url}`
+                ? artifactDescription(artifact)
                 : artifactContent(artifact)
         )
     ]
@@ -123,7 +123,7 @@ export function formatDelegationWakeup(
         job.state === 'input_required' || job.state === 'permission_required'
     const request = job.pendingRequest
     const instruction = interactive
-        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Use ${toolName} action=message id=${job.id}${request ? ` requestId=${request.id}` : ''} with the user's answer.`
+        ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Ask the user for an answer first; do not select an option or claim authorization on the user's behalf. After the user replies, use ${toolName} action=message id=${job.id}${request ? ` requestId=${request.id}` : ''} with that answer.`
         : job.state === 'failed'
           ? `Report the remote agent failure to the user. Retry with ${toolName} action=run id=${job.id} only when appropriate.`
           : `Use this remote agent result to answer the user. Continue the same context with ${toolName} action=run id=${job.id} if needed.`
@@ -146,6 +146,15 @@ export function formatDelegationWakeup(
         '',
         `Automatic notice: a background AgentNexus job started by this conversation has updated. ${instruction}`
     ].join('\n')
+}
+
+function artifactDescription(artifact: DelegationJob['artifacts'][number]) {
+    const name = artifact.name || artifact.filename || 'file'
+    const details = [artifact.filename, artifact.mediaType, artifact.description]
+        .filter(Boolean)
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .join(', ')
+    return `Artifact ready: ${name}${details ? ` (${details})` : ''}`
 }
 
 function artifactContent(artifact: DelegationJob['artifacts'][number]) {

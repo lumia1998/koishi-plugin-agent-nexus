@@ -55,8 +55,7 @@ export class NexusAgentDelegateTool extends NexusToolBase {
             background: z
                 .boolean()
                 .optional()
-                .default(false)
-                .describe('立即返回并在后台继续执行，不等待智能体回复。'),
+                .describe('立即返回并在后台继续执行；续接已有待处理请求时默认继承原任务模式。'),
             newTask: z
                 .boolean()
                 .optional()
@@ -130,7 +129,10 @@ export class NexusTaskTool extends NexusToolBase {
             .describe('Configured Agent id or exact name. Required when routing is ambiguous.'),
         id: z.string().optional().describe('Existing AgentNexus task id.'),
         prompt: z.string().optional().describe('Task, follow-up, or input response.'),
-        background: z.boolean().optional().default(false),
+        background: z
+            .boolean()
+            .optional()
+            .describe('立即返回并在后台继续执行；续接已有待处理请求时默认继承原任务模式。'),
         newTask: z.boolean().optional(),
         skill: z.string().optional(),
         requestId: z.string().optional(),
