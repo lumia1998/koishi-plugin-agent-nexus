@@ -39,6 +39,31 @@ test('queues a wakeup while a plugin conversation is in flight', async () => {
     assert.match(String((queued?.[1] as HumanMessage).content), /Automatic notice/)
 })
 
+test('calls the ChatLuna conversation service with its receiver intact', async () => {
+    let invoked = false
+    const conversation = {
+        expected: 'conversation-1',
+        async getConversation(id: string) {
+            assert.equal(this, conversation)
+            assert.equal(id, this.expected)
+            return { chatMode: 'chat' }
+        }
+    }
+
+    await notifyChatLunaDelegation(
+        {
+            conversation,
+            async invoke() {
+                invoked = true
+                return { ok: true }
+            }
+        },
+        wakeupJob()
+    )
+
+    assert.equal(invoked, true)
+})
+
 test('invokes ChatLuna when no plugin turn is active', async () => {
     let invocation: any
     const job = wakeupJob()

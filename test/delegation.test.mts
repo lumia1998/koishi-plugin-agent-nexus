@@ -14,6 +14,7 @@ import {
     type RemoteAgentInfo
 } from '../src/delegation/index.ts'
 import { formatDelegationWakeup } from '../src/delegation/wakeup.ts'
+import { notifyChatLunaDelegation } from '../src/delegation/wakeup.ts'
 
 test('persists only single-Gateway jobs and drops obsolete provider records', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-store-'))
@@ -115,6 +116,81 @@ test('polls background jobs and wakes ChatLuna for permission input', async () =
         assert.equal(current.provider, 'gateway')
         assert.equal(current.state, 'permission_required')
         assert.match(current.output || '', /允许一次/)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('relays a Gateway permission request into the originating ChatLuna conversation', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let resolveInvocation!: (input: any) => void
+    const invocation = new Promise<any>((resolve) => {
+        resolveInvocation = resolve
+    })
+    const conversation = {
+        async getConversation(id: string) {
+            assert.equal(this, conversation)
+            assert.equal(id, 'conversation-1')
+            return { chatMode: 'chat' }
+        }
+    }
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async (_agent, current) => ({
+        state: 'permission_required',
+        remoteState: 'permission_required',
+        text: '是否允许写入 report.svg？',
+        artifacts: [],
+        pendingRequest: {
+            id: 'permission-1',
+            kind: 'permission',
+            prompt: '是否允许写入 report.svg？',
+            options: [
+                { id: 'allow_once', name: '允许一次', kind: 'allow_once' },
+                { id: 'deny', name: '拒绝', kind: 'reject_once' }
+            ]
+        },
+        providerState: structuredClone(current.providerState)
+    })
+    fixture.manager = new DelegationManager(
+        fixture.store,
+        new DelegationProviderRegistry().register(fixture.provider),
+        async (job) =>
+            notifyChatLunaDelegation(
+                {
+                    conversation,
+                    async invoke(input) {
+                        resolveInvocation(input)
+                        return { ok: true }
+                    }
+                },
+                job
+            ),
+        { pollIntervalMs: 1 }
+    )
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: '生成报告',
+                background: true
+            },
+            context()
+        )
+        const sent = await Promise.race([
+            invocation,
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('permission relay timeout')), 1000)
+            )
+        ])
+        assert.deepEqual(sent.conversation, {
+            type: 'existing',
+            id: 'conversation-1'
+        })
+        assert.match(String(sent.message), /permission-1/)
+        assert.match(String(sent.message), /allow_once/)
+        assert.match(String(sent.message), /permission decision/)
     } finally {
         await fixture.dispose()
     }

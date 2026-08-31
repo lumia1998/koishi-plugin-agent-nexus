@@ -31,11 +31,11 @@ export async function notifyChatLunaDelegation(
         throw new Error('This background job has no ChatLuna delivery context.')
     }
     const message = wakeupMessage(job, toolName)
-    const getConversation = chatluna.conversation?.getConversation
-    const conversation = getConversation
-        ? await getConversation(job.parentConversationId)
+    const conversationService = chatluna.conversation
+    const conversation = conversationService?.getConversation
+        ? await conversationService.getConversation(job.parentConversationId)
         : undefined
-    if (getConversation && !conversation) return
+    if (conversationService?.getConversation && !conversation) return
 
     if (
         conversation?.chatMode === 'plugin' &&
