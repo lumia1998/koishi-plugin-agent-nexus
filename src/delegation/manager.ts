@@ -221,6 +221,27 @@ export class DelegationManager {
         }))
     }
 
+    async cancelJobFromConsole(id: string) {
+        const job = await this.store.get(id)
+        if (!job) throw new Error(`AgentNexus job does not exist: ${id}`)
+        if (!isActive(job.state)) {
+            throw new Error('Only running or interactive AgentNexus jobs can be interrupted.')
+        }
+        return this.stopJob(id)
+    }
+
+    async clearTerminalJobs() {
+        const ids = (await this.store.list())
+            .filter((job) => !isActive(job.state) && !job.queuedMessages?.length)
+            .map((job) => job.id)
+        for (const id of ids) {
+            this.stopMonitor(id)
+            this.clearNotifyTimer(id)
+            this.clearQueuedTurnTimer(id)
+        }
+        return this.store.remove(ids)
+    }
+
     async handle(
         input: DelegateToolInput,
         context?: DelegationContext,
@@ -670,6 +691,9 @@ export class DelegationManager {
         const jobId = job.id
         return this.withJobLock(jobId, async () => {
             job = await this.ownedJobForAgent(jobId, context, remote)
+            if (!isActive(job.state) && !job.queuedMessages?.length) {
+                return formatJob(job, this.toolNameForJob(job))
+            }
             this.stopMonitor(job.id)
             this.clearNotifyTimer(job.id)
             this.clearQueuedTurnTimer(job.id)

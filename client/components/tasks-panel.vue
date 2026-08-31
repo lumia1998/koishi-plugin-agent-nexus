@@ -6,9 +6,21 @@
                 <h2>委派任务进程</h2>
                 <p>实时查看 Koishi Job、Gateway Run 与底层 Session 的对应关系。</p>
             </div>
-            <el-button size="small" :loading="loading" @click="load(false)">
-                刷新任务
-            </el-button>
+            <div class="panel-actions">
+                <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :disabled="!clearableCount"
+                    :loading="clearing"
+                    @click="clearFinishedJobs"
+                >
+                    清空已结束记录
+                </el-button>
+                <el-button size="small" :loading="loading" @click="load(false)">
+                    刷新任务
+                </el-button>
+            </div>
         </div>
 
         <div class="task-metrics">
@@ -185,6 +197,18 @@
                         排队中的续接消息 {{ detail.queuedMessageCount }} 条
                     </span>
                 </div>
+
+                <div v-if="isActive(detail.state)" class="detail-actions">
+                    <span>会向 Gateway 发送取消请求，并停止本地的后台监听。</span>
+                    <el-button
+                        size="small"
+                        type="danger"
+                        :loading="stoppingJobId === detail.id"
+                        @click="cancelJob(detail)"
+                    >
+                        中断任务
+                    </el-button>
+                </div>
             </div>
         </el-dialog>
     </section>
@@ -193,7 +217,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
     DelegationJobView,
     DelegationState
@@ -206,6 +230,8 @@ const search = ref('')
 const stateFilter = ref('all')
 const detailVisible = ref(false)
 const detail = ref<DelegationJobView>()
+const clearing = ref(false)
+const stoppingJobId = ref<string>()
 const now = ref(Date.now())
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 let requestGeneration = 0
@@ -218,6 +244,13 @@ const counts = computed(() => ({
         job.state === 'failed' || job.state === 'canceled'
     ).length
 }))
+
+const clearableCount = computed(
+    () =>
+        jobs.value.filter(
+            (job) => !isActive(job.state) && !job.queuedMessageCount
+        ).length
+)
 
 const filteredJobs = computed(() => {
     const query = search.value.trim().toLowerCase()
@@ -260,6 +293,68 @@ function openDetail(job: DelegationJobView) {
     detailVisible.value = true
 }
 
+async function clearFinishedJobs() {
+    const count = clearableCount.value
+    if (!count) return
+    try {
+        await ElMessageBox.confirm(
+            '将清除所有已结束任务记录，并停止这些记录尚未完成的回传重试。运行中和等待授权的任务不会被影响。',
+            '清空已结束记录',
+            {
+                type: 'warning',
+                confirmButtonText: '清空记录',
+                cancelButtonText: '取消'
+            }
+        )
+    } catch {
+        return
+    }
+    clearing.value = true
+    try {
+        const removed = await send('agent-nexus/clearTerminalDelegationJobs')
+        if (
+            detail.value &&
+            !isActive(detail.value.state) &&
+            !detail.value.queuedMessageCount
+        ) {
+            detailVisible.value = false
+            detail.value = undefined
+        }
+        await load(true)
+        ElMessage.success(`已清除 ${removed} 条任务记录。`)
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        clearing.value = false
+    }
+}
+
+async function cancelJob(job: DelegationJobView) {
+    try {
+        await ElMessageBox.confirm(
+            `确定要中断 ${job.agentName} 的这个任务吗？远端 Agent 会收到取消请求。`,
+            '中断任务',
+            {
+                type: 'warning',
+                confirmButtonText: '中断任务',
+                cancelButtonText: '保留任务'
+            }
+        )
+    } catch {
+        return
+    }
+    stoppingJobId.value = job.id
+    try {
+        await send('agent-nexus/cancelDelegationJob', job.id)
+        await load(true)
+        ElMessage.success('已向 Gateway 发送中断请求。')
+    } catch (error: any) {
+        ElMessage.error(error?.message || String(error))
+    } finally {
+        stoppingJobId.value = undefined
+    }
+}
+
 function matchesState(state: DelegationState, filter: string) {
     if (filter === 'all') return true
     if (filter === 'waiting') return isWaiting(state)
@@ -269,6 +364,10 @@ function matchesState(state: DelegationState, filter: string) {
 
 function isWaiting(state: DelegationState) {
     return state === 'permission_required' || state === 'input_required'
+}
+
+function isActive(state: DelegationState) {
+    return state === 'running' || isWaiting(state)
 }
 
 function stateLabel(state: DelegationState) {
@@ -342,10 +441,12 @@ onBeforeUnmount(() => {
 }
 
 .panel-head,
+.panel-actions,
 .title-line,
 .filters,
 .detail-head,
-.delivery-box {
+.delivery-box,
+.detail-actions {
     display: flex;
     align-items: center;
 }
@@ -354,6 +455,10 @@ onBeforeUnmount(() => {
     justify-content: space-between;
     gap: 20px;
     margin-bottom: 18px;
+}
+
+.panel-actions {
+    gap: 8px;
 }
 
 .section-index {
@@ -629,8 +734,19 @@ h2 {
     color: var(--nexus-ink);
 }
 
+.detail-actions {
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 17px;
+    padding-top: 14px;
+    border-top: 1px solid var(--nexus-line);
+    color: var(--k-text-light);
+    font-size: 11px;
+}
+
 @media (max-width: 760px) {
     .panel-head,
+    .panel-actions,
     .filters {
         align-items: stretch;
         flex-direction: column;

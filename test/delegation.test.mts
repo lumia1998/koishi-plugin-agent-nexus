@@ -75,6 +75,69 @@ test('starts a fresh Gateway session for each new run', async () => {
     }
 })
 
+test('cancels an active Gateway job from the console', async () => {
+    const fixture = await managerFixture()
+    let cancels = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async () => running()
+    fixture.provider.cancel = async (_agent, current) => {
+        cancels += 1
+        return {
+            state: 'canceled',
+            remoteState: 'canceled',
+            artifacts: [],
+            providerState: structuredClone(current.providerState)
+        }
+    }
+    try {
+        await fixture.manager.start()
+        const started = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'long-running task',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(started)
+        const result = await fixture.manager.cancelJobFromConsole(id)
+        assert.match(result, /State: canceled/)
+        assert.equal(cancels, 1)
+        assert.equal((await fixture.store.get(id))?.state, 'canceled')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('clears terminal console records but retains active jobs', async () => {
+    const fixture = await managerFixture()
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            { action: 'run', remote: 'hermes', prompt: 'finished task' },
+            context()
+        )
+        fixture.provider.run = async () => running()
+        fixture.provider.status = async () => running()
+        const started = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'active task',
+                background: true
+            },
+            context()
+        )
+        const activeId = jobId(started)
+        assert.equal(await fixture.manager.clearTerminalJobs(), 1)
+        assert.equal((await fixture.store.list()).length, 1)
+        assert.equal((await fixture.store.get(activeId))?.state, 'running')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
 test('polls background jobs and wakes ChatLuna for permission input', async () => {
     const fixture = await managerFixture({ pollIntervalMs: 1 })
     let notify!: (job: DelegationJob) => void

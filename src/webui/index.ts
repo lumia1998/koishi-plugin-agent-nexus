@@ -24,6 +24,16 @@ export function apply(ctx: Context) {
         commandAuthority
     )
     ctx.console.addListener(
+        'agent-nexus/cancelDelegationJob',
+        async (id: string) => nexus().cancelDelegationJob(id),
+        commandAuthority
+    )
+    ctx.console.addListener(
+        'agent-nexus/clearTerminalDelegationJobs',
+        async () => nexus().clearTerminalDelegationJobs(),
+        commandAuthority
+    )
+    ctx.console.addListener(
         'agent-nexus/refreshGateway',
         async () => nexus().refreshRemoteStatuses(),
         commandAuthority
@@ -47,6 +57,8 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/listDelegationJobs'(
             limit?: number
         ): Promise<import('../delegation/types').DelegationJobView[]>
+        'agent-nexus/cancelDelegationJob'(id: string): Promise<string>
+        'agent-nexus/clearTerminalDelegationJobs'(): Promise<number>
         'agent-nexus/refreshGateway'(): Promise<import('../types').NexusStatus>
         'agent-nexus/saveDelegationAgent'(
             input: Partial<import('../types').DelegationAgentConfig>

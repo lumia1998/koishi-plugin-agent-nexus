@@ -156,6 +156,14 @@ export class AgentNexusService extends Service {
         return this.delegations.listJobsForConsole(limit)
     }
 
+    async cancelDelegationJob(id: string) {
+        return this.delegations.cancelJobFromConsole(id)
+    }
+
+    async clearTerminalDelegationJobs() {
+        return this.delegations.clearTerminalJobs()
+    }
+
     async collectInputAttachments(parentConfig: any) {
         const session = parentConfig?.configurable?.session
         const elements = [

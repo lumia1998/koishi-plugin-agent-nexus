@@ -64,6 +64,16 @@ export class DelegationStore {
         return job ? structuredClone(job) : undefined
     }
 
+    async remove(ids: Iterable<string>) {
+        await this.ensureInitialized()
+        let removed = 0
+        for (const id of new Set(ids)) {
+            if (this.jobs.delete(id)) removed += 1
+        }
+        if (removed) await this.persist()
+        return removed
+    }
+
     async list(parentConversationId?: string) {
         await this.ensureInitialized()
         return Array.from(this.jobs.values())
