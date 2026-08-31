@@ -138,6 +138,37 @@ test('keeps artifact URLs out of the model wakeup text', () => {
     assert.doesNotMatch(message, /10\.1\.2\.30:5140/)
 })
 
+test('does not expose artifact URLs as structured model input', async () => {
+    const job = wakeupJob()
+    job.artifacts = [
+        {
+            artifactId: 'pptx-1',
+            filename: '王俊凯生平介绍.pptx',
+            mediaType:
+                'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            url: 'file:///C:/agent-skills/ppt-master/王俊凯生平介绍.pptx'
+        }
+    ]
+    let message: unknown
+
+    await notifyChatLunaDelegation(
+        {
+            async invoke(input) {
+                message = input.message
+                return { ok: true }
+            }
+        },
+        job
+    )
+
+    assert.equal(typeof message, 'string')
+    assert.match(String(message), /王俊凯生平介绍\.pptx/)
+    assert.match(String(message), /native attachments/)
+    assert.match(String(message), /do not start another remote task/)
+    assert.doesNotMatch(String(message), /file:\/\/\/C:/)
+    assert.doesNotMatch(JSON.stringify(message), /file_url/)
+})
+
 test('sends artifacts as native Koishi resource elements', async () => {
     const artifacts = [
         {

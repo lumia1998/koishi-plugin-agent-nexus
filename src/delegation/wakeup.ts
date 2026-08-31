@@ -81,27 +81,10 @@ function wakeupMessage(
     job: DelegationJob,
     toolName: string
 ): ChatInvocationInput['message'] {
-    const media = job.artifacts
-        .filter((artifact) => artifact.url)
-        .map((artifact) => {
-            const url = artifact.url!
-            const mediaType = artifact.mediaType || ''
-            if (mediaType.startsWith('image/')) {
-                return { type: 'image_url', image_url: { url } }
-            }
-            if (mediaType.startsWith('audio/')) {
-                return { type: 'audio_url', audio_url: { url, mimeType: mediaType } }
-            }
-            if (mediaType.startsWith('video/')) {
-                return { type: 'video_url', video_url: { url, mimeType: mediaType } }
-            }
-            return { type: 'file_url', file_url: { url, mimeType: mediaType } }
-        })
-    if (!media.length) return formatDelegationWakeup(job, toolName)
-    return [
-        { type: 'text', text: formatDelegationWakeup(job, toolName) },
-        ...media
-    ] as ChatInvocationInput['message']
+    // Artifacts are delivered separately through the Koishi adapter. Keeping
+    // their URLs out of the model context prevents the model from issuing a
+    // needless follow-up Gateway turn just to locate or re-fetch a file.
+    return formatDelegationWakeup(job, toolName)
 }
 
 export function formatDelegationWakeup(
@@ -122,10 +105,13 @@ export function formatDelegationWakeup(
     const interactive =
         job.state === 'input_required' || job.state === 'permission_required'
     const request = job.pendingRequest
+    const hasDeliveredArtifacts = job.artifacts.some((artifact) => artifact.url)
     const instruction = interactive
         ? `The remote agent is waiting for ${job.state === 'permission_required' ? 'a permission decision' : 'input'}. Ask the user for an answer first; do not select an option or claim authorization on the user's behalf. After the user replies, use ${toolName} action=message id=${job.id}${request ? ` requestId=${request.id}` : ''} with that answer.`
         : job.state === 'failed'
           ? `Report the remote agent failure to the user. Retry with ${toolName} action=run id=${job.id} only when appropriate.`
+          : hasDeliveredArtifacts
+            ? 'Use this remote agent result to answer the user. The listed artifacts are delivered separately to the original Koishi channel as native attachments; do not start another remote task to locate, download, or publish them.'
           : `Use this remote agent result to answer the user. Continue the same context with ${toolName} action=run id=${job.id} if needed.`
     return [
         `<delegation_job_result job_id="${escapeXml(job.id)}" agent="${escapeXml(job.agentName)}" state="${job.state}">`,
