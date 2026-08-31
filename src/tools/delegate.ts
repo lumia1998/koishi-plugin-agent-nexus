@@ -59,7 +59,7 @@ export class NexusAgentDelegateTool extends NexusToolBase {
             newTask: z
                 .boolean()
                 .optional()
-                .describe('不复用该智能体之前的远程任务上下文，创建新任务。'),
+                .describe('对已有任务 ID 丢弃其远程上下文并创建新任务；不带 ID 的 run 始终创建新任务。'),
             skill: z
                 .string()
                 .optional()

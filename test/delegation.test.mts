@@ -37,7 +37,7 @@ test('persists only single-Gateway jobs and drops obsolete provider records', as
     }
 })
 
-test('runs through Gateway and reuses completed session state', async () => {
+test('starts a fresh Gateway session for each new run', async () => {
     const fixture = await managerFixture()
     const seen: Array<Record<string, unknown>> = []
     fixture.provider.run = async (_agent, current) => {
@@ -68,7 +68,7 @@ test('runs through Gateway and reuses completed session state', async () => {
         assert.match(second, /Tool: nexus_hermes/)
         assert.deepEqual(seen, [
             {},
-            { gatewaySessionId: 'session-1', protocol: 'acp' }
+            {}
         ])
     } finally {
         await fixture.dispose()

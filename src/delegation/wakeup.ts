@@ -1,4 +1,3 @@
-import { HumanMessage } from '@langchain/core/messages'
 import type { ChatInvocationInput } from 'koishi-plugin-chatluna'
 import type { DelegationJob } from './types'
 import { delegationToolNameForJob } from './tool-name'
@@ -9,13 +8,6 @@ interface ChatLunaWakeupService {
         getConversation?: (
             conversationId: string
         ) => Promise<{ chatMode?: string } | null | undefined>
-    }
-    conversationRuntime?: {
-        appendPendingMessage?: (
-            conversationId: string,
-            message: HumanMessage,
-            chatMode?: string
-        ) => Promise<boolean>
     }
 }
 
@@ -37,17 +29,12 @@ export async function notifyChatLunaDelegation(
         : undefined
     if (conversationService?.getConversation && !conversation) return
 
-    if (
-        conversation?.chatMode === 'plugin' &&
-        chatluna.conversationRuntime?.appendPendingMessage
-    ) {
-        const queued = await chatluna.conversationRuntime.appendPendingMessage(
-            job.parentConversationId,
-            new HumanMessage({ content: message, name: 'delegation_job' }),
-            conversation.chatMode
-        )
-        if (queued) return
-    }
+    // A terminal Gateway event may arrive while the originating plugin-mode
+    // agent is producing its final answer. ChatLuna's pending-message queue
+    // accepts that event, but the current round can then end without another
+    // model pass. The event is silently drained and no channel reply is sent.
+    // Invoke instead: ChatLuna serializes it behind the current conversation
+    // lock, so every terminal update gets its own reliable user-facing turn.
 
     const invocation: ChatInvocationInput = {
         routing: job.routing,

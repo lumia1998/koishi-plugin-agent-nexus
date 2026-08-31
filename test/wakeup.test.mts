@@ -1,4 +1,3 @@
-import { HumanMessage } from '@langchain/core/messages'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -11,9 +10,9 @@ import {
     sendDelegationArtifacts
 } from '../src/delegation/media.ts'
 
-test('queues a wakeup while a plugin conversation is in flight', async () => {
+test('invokes a terminal wakeup instead of using the lossy plugin queue', async () => {
     let invoked = false
-    let queued: unknown[] | undefined
+    let queued = false
     const job = wakeupJob()
 
     await notifyChatLunaDelegation(
@@ -24,8 +23,8 @@ test('queues a wakeup while a plugin conversation is in flight', async () => {
                 }
             },
             conversationRuntime: {
-                async appendPendingMessage(...args) {
-                    queued = args
+                async appendPendingMessage() {
+                    queued = true
                     return true
                 }
             },
@@ -33,15 +32,12 @@ test('queues a wakeup while a plugin conversation is in flight', async () => {
                 invoked = true
                 return { ok: true }
             }
-        },
+        } as any,
         job
     )
 
-    assert.equal(invoked, false)
-    assert.equal(queued?.[0], job.parentConversationId)
-    assert.ok(queued?.[1] instanceof HumanMessage)
-    assert.equal(queued?.[2], 'plugin')
-    assert.match(String((queued?.[1] as HumanMessage).content), /Automatic notice/)
+    assert.equal(invoked, true)
+    assert.equal(queued, false)
 })
 
 test('calls the ChatLuna conversation service with its receiver intact', async () => {
@@ -69,7 +65,7 @@ test('calls the ChatLuna conversation service with its receiver intact', async (
     assert.equal(invoked, true)
 })
 
-test('invokes ChatLuna when no plugin turn is active', async () => {
+test('invokes ChatLuna even when a plugin turn is active', async () => {
     let invocation: any
     const job = wakeupJob()
 
@@ -78,11 +74,6 @@ test('invokes ChatLuna when no plugin turn is active', async () => {
             conversation: {
                 async getConversation() {
                     return { chatMode: 'plugin' }
-                }
-            },
-            conversationRuntime: {
-                async appendPendingMessage() {
-                    return false
                 }
             },
             async invoke(input) {

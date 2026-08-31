@@ -266,9 +266,6 @@ export class DelegationManager {
             if (running) return formatRunning(running, this.toolNameForJob(running))
         }
 
-        const previous = input.newTask || jobs[0]?.state === 'canceled'
-            ? undefined
-            : jobs.find((job) => canReuseProviderState(job, agent))
         const now = this.now()
         const job: DelegationJob = {
             schemaVersion: 2,
@@ -287,9 +284,10 @@ export class DelegationManager {
             background: input.background === true,
             prompt: clip(prompt, MAX_STORED_PROMPT_CHARS),
             skill: clean(input.skill),
-            providerState: previous
-                ? structuredClone(previous.providerState)
-                : {},
+            // A run without an explicit task id is a new user request. Never
+            // inherit a completed job's Gateway session here: Gateway restarts
+            // invalidate that session and turn a new request into a 404.
+            providerState: {},
             artifacts: [],
             createdAt: now,
             updatedAt: now,
@@ -1436,21 +1434,6 @@ function agentMatchesSkill(agent: RemoteAgentInfo, value: string) {
     )
 }
 
-function canReuseProviderState(job: DelegationJob, agent: RemoteAgentInfo) {
-    if (job.state === 'canceled') return false
-    if (job.provider !== agent.provider || job.remoteId !== agent.remoteId) {
-        return false
-    }
-    if ((job.providerAgentId || agent.agentId) && job.providerAgentId !== agent.agentId) {
-        return false
-    }
-    if (job.provider === 'gateway') {
-        const workspace = stateString(job.providerState.workspace)
-        if (workspace && workspace !== agent.workspace) return false
-    }
-    return true
-}
-
 function formatRunning(
     job: DelegationJob,
     toolName = delegationToolNameForJob(job)
@@ -1465,7 +1448,7 @@ function formatRunning(
     if (job.background) {
         lines.push(
             job.parentConversationId && job.routing
-                ? 'The result will be delivered back to this ChatLuna conversation automatically. Do not poll; continue other work or finish the reply.'
+                ? 'The Gateway accepted this submission, but the remote agent has not yet confirmed that it started or will finish. Do not claim the agent is working, accepted, or complete; wait for its terminal callback. Do not poll; continue other work or finish the reply.'
                 : `No conversation delivery context is available. Check this task later with ${toolName} action=status id=${job.id}.`
         )
         lines.push(
