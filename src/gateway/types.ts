@@ -46,6 +46,16 @@ export interface GatewayArtifactView {
     data?: unknown
     bytesBase64?: string
     metadata?: Record<string, unknown>
+    /** Present on persisted run views; omitted by the live Session API. */
+    size?: number
+    downloadable?: boolean
+    storageStatus?:
+        | 'pending'
+        | 'available'
+        | 'metadata_only'
+        | 'expired'
+        | 'evicted'
+        | 'failed'
 }
 
 export interface GatewayTurnCompletion {
@@ -75,10 +85,14 @@ export interface GatewaySessionView {
     output?: string
     error?: string
     artifacts: GatewayArtifactView[]
+    inputAttachments?: GatewayAttachmentView[]
     pendingRequest?: {
         id: string
         kind: 'permission' | 'input'
         prompt: string
+        step?: string
+        inputType?: 'text' | 'choice' | 'confirmation' | 'payment' | 'unknown'
+        metadata?: Record<string, unknown>
         options?: Array<{
             id: string
             name: string
@@ -98,24 +112,52 @@ export interface GatewayPendingResponse {
     attachments?: string[]
 }
 
-export interface GatewayEvent {
+export interface GatewayArtifactDownload {
+    bytes: Uint8Array
+    filename?: string
+    mediaType?: string
+}
+
+export type GatewayEventType =
+    | 'session_state'
+    | 'assistant_chunk'
+    | 'thought_chunk'
+    | 'plan'
+    | 'tool_call'
+    | 'tool_update'
+    | 'terminal_output'
+    | 'file_activity'
+    | 'artifact'
+    | 'permission_required'
+    | 'input_required'
+    | 'completed'
+    | 'failed'
+    | 'canceled'
+    | 'reset'
+
+export type GatewaySseResetReason = 'invalid' | 'ahead' | 'expired' | string
+
+/** Control data sent when the requested event cursor cannot be replayed. */
+export interface GatewaySseReset {
+    reason: GatewaySseResetReason
+    requestedAfter: string | null
+    earliestId: string | null
+    latestId: string
+    snapshotUrl: string
+}
+
+export interface GatewayEventBase {
     id: string
     sessionId: string
-    type:
-        | 'session_state'
-        | 'assistant_chunk'
-        | 'thought_chunk'
-        | 'plan'
-        | 'tool_call'
-        | 'tool_update'
-        | 'terminal_output'
-        | 'file_activity'
-        | 'artifact'
-        | 'permission_required'
-        | 'input_required'
-        | 'completed'
-        | 'failed'
-        | 'canceled'
     timestamp: number
     data?: unknown
 }
+
+export type GatewayEvent =
+    | (GatewayEventBase & {
+          type: Exclude<GatewayEventType, 'reset'>
+      })
+    | (Omit<GatewayEventBase, 'data'> & {
+          type: 'reset'
+          data: GatewaySseReset
+      })

@@ -36,7 +36,7 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 
 ## 安装
 
-要求 Node.js 20、Nexus Gateway 0.2.0 或更高版本，并已安装 ChatLuna 与
+要求 Node.js 20、Nexus Gateway 0.3.0 或更高版本，并已安装 ChatLuna 与
 `koishi-plugin-chatluna-storage-service`。
 
 ```bash
@@ -50,9 +50,19 @@ npm install koishi-plugin-agent-nexus
 | `gatewayUrl` | `http://127.0.0.1:8787` | Nexus Gateway 的数据面地址 |
 | `gatewayKey` | 空 | Gateway“API 密钥”页面生成的 API Key |
 | `commandAuthority` | `4` | Console 写操作所需权限等级 |
-| `maxResponseBytes` | `33554432` | 单个 Gateway HTTP/SSE 响应读取上限 |
+| `maxResponseBytes` | `33554432` | 单个 HTTP 响应或 SSE 事件帧读取上限；不是整条长期事件流的累计上限 |
 
 `gatewayKey` 是数据面 API Key，不是 Gateway 控制台登录密码。
+
+### 新版 Gateway 兼容性
+
+本插件使用数据面 Session API，不读取管理员运行列表，所以不依赖旧版列表中的 `task` 字段，也不需要管理员 Cookie。通用 `stdio` Agent 与其他 ACP Agent 一样自动发现；命令、参数、环境变量和权限策略仍在 Gateway 配置。
+
+新版 Gateway 默认按 Key 限制 Session、同时运行任务、SSE 和上传字节数。出现 `429` 时应检查该 Key 当前资源占用或调整 Gateway 的 `quotas`。创建任务、发送消息、授权和上传都可能产生外部效果，插件不会因为限流或断线自动重复提交这些写操作。
+
+收到 SSE `reset` 时，插件重新读取固定的 Session 快照并更新游标，避免输出重复；这只能恢复当前状态，不能找回 Gateway 已淘汰的中间事件。Key 被停用、删除或收缩权限后，`401/403` 会停止对应任务的监控并显示鉴权失败；这不代表远端执行已取消。Session 已不存在时，`404` 会结束本地监控。
+
+历史与产物受 Gateway 的保留期和磁盘预算约束。需要长期保存的文件应及时转存到 ChatLuna 存储；历史清理不等于聊天附件的长期备份。Gateway 控制台跨 Key 的取消/重试等管理接口不向插件开放，插件继续使用原 API Key 的归属和 Agent scope。
 
 ### 图片与文件闭环
 
@@ -123,6 +133,14 @@ npm test
 npm run build
 npm pack --dry-run --json
 ```
+
+与本地新版 Gateway 做真实协议联测（先在 Gateway 项目执行 `npm run build`）：
+
+```bash
+npm run test:gateway -- ../nexus-gateway
+```
+
+联测只启动临时配置、临时端口和测试 ACP 进程，覆盖完成证明、配额错误、SSE 缺口重置、会话关闭后的持久化下载及 Key 撤销，不使用运行中的 Gateway 或用户密钥。
 
 ## License
 

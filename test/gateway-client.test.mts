@@ -3,6 +3,7 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
 import {
+    GatewayHttpError,
     NexusGatewayClient,
     SESSION_START_TIMEOUT_MS
 } from '../src/gateway/client.ts'
@@ -196,6 +197,207 @@ test('parses replayable SSE events including artifacts', async () => {
         assert.deepEqual(events.map((event) => event.type), ['artifact', 'completed'])
     } finally {
         await close(server)
+    }
+})
+
+test('parses Gateway SSE reset control frames into typed events', async () => {
+    const server = http.createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        response.end(
+            'id: 9\nevent: reset\ndata: {"reason":"expired","requestedAfter":"0","earliestId":"8","latestId":"9","snapshotUrl":"/v1/sessions/session-1"}\n\n'
+        )
+    })
+    await listen(server)
+    const client = new NexusGatewayClient()
+    try {
+        const events = []
+        for await (const event of client.events(gatewayRemote(server), 'session-1', '0')) {
+            events.push(event)
+        }
+        assert.equal(events.length, 1)
+        assert.equal(events[0].type, 'reset')
+        assert.equal(events[0].id, '9')
+        assert.deepEqual(events[0].data, {
+            reason: 'expired',
+            requestedAfter: '0',
+            earliestId: '8',
+            latestId: '9',
+            snapshotUrl: '/v1/sessions/session-1'
+        })
+        assert.equal(events[0].sessionId, 'session-1')
+    } finally {
+        await close(server)
+    }
+})
+
+test('bounds each SSE frame instead of the complete long-lived stream', async () => {
+    const frame = (id: number) =>
+        `id: ${id}\nevent: assistant_chunk\ndata: ${JSON.stringify({
+            id: String(id),
+            sessionId: 'session-1',
+            type: 'assistant_chunk',
+            timestamp: id,
+            data: { text: '012345678901234567890123456789' }
+        })}\n\n`
+    const server = http.createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        response.end([1, 2, 3].map(frame).join(''))
+    })
+    await listen(server)
+    const client = new NexusGatewayClient(256)
+    try {
+        const events = []
+        for await (const event of client.events(gatewayRemote(server), 'session-1')) {
+            events.push(event)
+        }
+        assert.deepEqual(events.map((event) => event.id), ['1', '2', '3'])
+    } finally {
+        await close(server)
+    }
+})
+
+test('rejects an individual oversized SSE frame', async () => {
+    const server = http.createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        response.end(
+            `id: 1\nevent: assistant_chunk\ndata: ${JSON.stringify({
+                id: '1',
+                sessionId: 'session-1',
+                type: 'assistant_chunk',
+                timestamp: 1,
+                data: { text: '01234567890123456789' }
+            })}\n\n`
+        )
+    })
+    await listen(server)
+    const client = new NexusGatewayClient(32)
+    try {
+        await assert.rejects(
+            (async () => {
+                for await (const _event of client.events(gatewayRemote(server), 'session-1')) {
+                    // The frame is rejected before it can be yielded.
+                }
+            })(),
+            /SSE frame exceeded size limit/
+        )
+    } finally {
+        await close(server)
+    }
+})
+
+test('surfaces typed quota and Retry-After details from HTTP errors', async () => {
+    const server = http.createServer((_request, response) => {
+        response.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': '7',
+            'X-Quota-Type': 'sse'
+        })
+        response.end(
+            JSON.stringify({
+                error: 'Quota exceeded',
+                quota: 'sse',
+                limit: 8,
+                current: 8,
+                retryAfterMs: 1000,
+                requestId: 'request-1'
+            })
+        )
+    })
+    await listen(server)
+    const client = new NexusGatewayClient()
+    try {
+        await assert.rejects(
+            client.listAgents(gatewayRemote(server)),
+            (error: unknown) => {
+                assert.ok(error instanceof GatewayHttpError)
+                assert.equal(error.status, 429)
+                assert.equal(error.quota, 'sse')
+                assert.equal(error.limit, 8)
+                assert.equal(error.current, 8)
+                assert.equal(error.retryAfterMs, 1000)
+                assert.equal(error.retryAfter, 1000)
+                assert.equal(error.requestId, 'request-1')
+                return true
+            }
+        )
+    } finally {
+        await close(server)
+    }
+})
+
+test('downloads persisted artifacts through the Gateway origin with a byte limit', async () => {
+    const requests: Array<{ path: string; auth?: string }> = []
+    const server = http.createServer((request, response) => {
+        requests.push({ path: request.url || '', auth: request.headers.authorization })
+        if (request.url === '/v1/runs/run%2F1/artifacts/artifact%3F1') {
+            const body = Buffer.from('artifact bytes')
+            response.writeHead(200, {
+                'Content-Type': 'text/plain; charset=utf-8',
+                'Content-Length': body.length,
+                'Content-Disposition': "attachment; filename*=UTF-8''report%20%E6%8A%A5.txt"
+            })
+            response.end(body)
+            return
+        }
+        if (request.url === '/v1/runs/too-big/artifacts/artifact') {
+            response.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': '5'
+            })
+            response.end('12345')
+            return
+        }
+        response.writeHead(404).end()
+    })
+    await listen(server)
+    try {
+        const client = new NexusGatewayClient(1024)
+        const downloaded = await client.downloadArtifact(
+            gatewayRemote(server),
+            'run/1',
+            'artifact?1'
+        )
+        assert.deepEqual([...downloaded.bytes], [...Buffer.from('artifact bytes')])
+        assert.equal(downloaded.filename, 'report 报.txt')
+        assert.equal(downloaded.mediaType, 'text/plain')
+        assert.equal(requests[0].path, '/v1/runs/run%2F1/artifacts/artifact%3F1')
+        assert.equal(requests[0].auth, 'Bearer TOKEN')
+
+        await assert.rejects(
+            new NexusGatewayClient(4).downloadArtifact(
+                gatewayRemote(server),
+                'too-big',
+                'artifact'
+            ),
+            /response exceeded size limit/
+        )
+    } finally {
+        await close(server)
+    }
+})
+
+test('does not follow redirects with Gateway credentials', async () => {
+    let redirectedRequests = 0
+    const target = http.createServer((_request, response) => {
+        redirectedRequests += 1
+        response.writeHead(200, { 'Content-Type': 'application/json' }).end('{}')
+    })
+    await listen(target)
+    const redirect = http.createServer((_request, response) => {
+        response.writeHead(302, {
+            Location: `http://127.0.0.1:${(target.address() as AddressInfo).port}/v1/agents`
+        }).end()
+    })
+    await listen(redirect)
+    try {
+        await assert.rejects(
+            new NexusGatewayClient().listAgents(gatewayRemote(redirect)),
+            /fetch failed|redirect/i
+        )
+        assert.equal(redirectedRequests, 0)
+    } finally {
+        await close(redirect)
+        await close(target)
     }
 })
 

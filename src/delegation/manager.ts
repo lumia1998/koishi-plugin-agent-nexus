@@ -38,12 +38,18 @@ interface ActiveMonitor {
     promise: Promise<void>
 }
 
+interface MonitorEventsResult {
+    done: boolean
+    retryAfterMs?: number
+}
+
 const DEFAULT_ACTIVE_TTL = 24 * 60 * 60 * 1000
 const DEFAULT_RETENTION = 7 * 24 * 60 * 60 * 1000
 const MAX_STORED_PROMPT_CHARS = 64 * 1024
 const MAX_STORED_OUTPUT_CHARS = 256 * 1024
 const MAX_STORED_ARTIFACTS = 64
 const MAX_QUEUED_MESSAGES = 16
+const MAX_TIMER_DELAY_MS = 2_147_000_000
 
 export class DelegationManager {
     private readonly pollIntervalMs: number
@@ -576,6 +582,21 @@ export class DelegationManager {
                     value: formatJob(lost, this.toolNameForJob(lost))
                 }
             }
+            if (isGatewayAccessError(error)) {
+                const failed = failGatewayAccess(
+                    latest,
+                    error,
+                    this.now(),
+                    this.retentionMs
+                )
+                if (!failed.background) failed.notifiedRunId = failed.activeRunId
+                await this.store.save(failed)
+                if (failed.background) void this.notifyJob(failed.id)
+                return {
+                    kind: 'output',
+                    value: formatJob(failed, this.toolNameForJob(failed))
+                }
+            }
             if (
                 original.activeRunId &&
                 (original.state === 'running' || isInteractive(original.state))
@@ -657,6 +678,16 @@ export class DelegationManager {
                 }
                 if (isRemoteSessionMissing(error)) {
                     job = failLostSession(current, this.now(), this.retentionMs)
+                    job.notifiedRunId = job.activeRunId
+                    this.stopMonitor(job.id)
+                    await this.store.save(job)
+                } else if (isGatewayAccessError(error)) {
+                    job = failGatewayAccess(
+                        current,
+                        error,
+                        this.now(),
+                        this.retentionMs
+                    )
                     job.notifiedRunId = job.activeRunId
                     this.stopMonitor(job.id)
                     await this.store.save(job)
@@ -938,7 +969,14 @@ export class DelegationManager {
     }
 
     private async waitForForeground(id: string, signal?: AbortSignal) {
-        await delay(this.pollIntervalMs, signal)
+        const initial = await this.store.get(id)
+        await delay(
+            Math.max(
+                this.pollIntervalMs,
+                artifactRetryAfterMs(initial?.providerState)
+            ),
+            signal
+        )
         while (!this.stopped) {
             const job = await this.store.get(id)
             if (!job) throw new Error(`AgentNexus job no longer exists: ${id}`)
@@ -995,7 +1033,12 @@ export class DelegationManager {
                     this.now(),
                     this.retentionMs
                 )
-                updated.pollError = undefined
+                const artifactRetry = artifactRetryAfterMs(
+                    updated.providerState
+                )
+                updated.pollError = artifactRetry
+                    ? 'Gateway artifact download is pending; retrying the read-only download.'
+                    : undefined
                 await this.store.save(updated)
                 if (updated.state !== 'running') return updated
             } catch (error) {
@@ -1017,11 +1060,34 @@ export class DelegationManager {
                     await this.store.save(lost)
                     return lost
                 }
+                if (isGatewayAccessError(error)) {
+                    const failed = failGatewayAccess(
+                        current,
+                        error,
+                        this.now(),
+                        this.retentionMs
+                    )
+                    failed.notifiedRunId = failed.activeRunId
+                    await this.store.save(failed)
+                    return failed
+                }
                 current.pollError = clip(errorMessage(error), 32 * 1024)
                 current.updatedAt = this.now()
                 await this.store.save(current)
+                await delay(
+                    Math.max(this.pollIntervalMs, gatewayRetryAfterMs(error)),
+                    signal
+                )
+                continue
             }
-            await delay(this.pollIntervalMs, signal)
+            const current = await this.store.get(id)
+            await delay(
+                Math.max(
+                    this.pollIntervalMs,
+                    artifactRetryAfterMs(current?.providerState)
+                ),
+                signal
+            )
         }
         throw new Error(`AgentNexus stopped while waiting for job ${id}.`)
     }
@@ -1076,9 +1142,24 @@ export class DelegationManager {
     }
 
     private async monitor(id: string, signal: AbortSignal) {
-        await delay(this.pollIntervalMs, signal)
-        if (await this.monitorEvents(id, signal)) return
+        const initial = await this.store.get(id)
+        await delay(
+            Math.max(
+                this.pollIntervalMs,
+                artifactRetryAfterMs(initial?.providerState)
+            ),
+            signal
+        )
         while (!this.stopped && !signal.aborted) {
+            const events = await this.monitorEvents(id, signal)
+            if (events.done) return
+            if (events.retryAfterMs) {
+                await delay(
+                    Math.max(this.pollIntervalMs, events.retryAfterMs),
+                    signal
+                )
+                if (signal.aborted) return
+            }
             const job = await this.store.get(id)
             if (signal.aborted) return
             if (!job || job.state !== 'running') return
@@ -1092,6 +1173,7 @@ export class DelegationManager {
                 await this.notifyJob(job.id)
                 return
             }
+            let retryAfter = events.retryAfterMs || 0
             try {
                 const runId = job.activeRunId
                 const agent = this.agentForJob(job)
@@ -1115,7 +1197,13 @@ export class DelegationManager {
                     this.now(),
                     this.retentionMs
                 )
-                updated.pollError = undefined
+                const artifactRetry = artifactRetryAfterMs(
+                    updated.providerState
+                )
+                retryAfter = Math.max(retryAfter, artifactRetry)
+                updated.pollError = artifactRetry
+                    ? 'Gateway artifact download is pending; retrying the read-only download.'
+                    : undefined
                 await this.store.save(updated)
                 if (updated.state !== 'running') {
                     if (
@@ -1148,23 +1236,38 @@ export class DelegationManager {
                     await this.notifyJob(lost.id)
                     return
                 }
+                if (isGatewayAccessError(error)) {
+                    const failed = failGatewayAccess(
+                        current,
+                        error,
+                        this.now(),
+                        this.retentionMs
+                    )
+                    await this.store.save(failed)
+                    await this.notifyJob(failed.id)
+                    return
+                }
+                retryAfter = Math.max(retryAfter, gatewayRetryAfterMs(error))
                 current.pollError = clip(errorMessage(error), 32 * 1024)
                 current.updatedAt = this.now()
                 await this.store.save(current)
             }
-            await delay(this.pollIntervalMs, signal)
+            await delay(Math.max(this.pollIntervalMs, retryAfter), signal)
         }
     }
 
-    private async monitorEvents(id: string, signal: AbortSignal) {
+    private async monitorEvents(
+        id: string,
+        signal: AbortSignal
+    ): Promise<MonitorEventsResult> {
         const job = await this.store.get(id)
-        if (!job || job.state !== 'running' || signal.aborted) return true
+        if (!job || job.state !== 'running' || signal.aborted) return { done: true }
         const agent = this.agentForJob(job)
         const provider = this.providers.providerFor(agent)
-        if (!provider.watch) return false
+        if (!provider.watch) return { done: false }
         try {
             for await (let result of provider.watch(agent, job, signal)) {
-                if (signal.aborted || this.stopped) return true
+                if (signal.aborted || this.stopped) return { done: true }
                 result = await this.prepareResultArtifacts(job, result)
                 const current = await this.store.get(id)
                 if (
@@ -1172,7 +1275,7 @@ export class DelegationManager {
                     current.state !== 'running' ||
                     current.activeRunId !== job.activeRunId
                 ) {
-                    return true
+                    return { done: true }
                 }
                 const updated = applyResult(
                     current,
@@ -1180,30 +1283,38 @@ export class DelegationManager {
                     this.now(),
                     this.retentionMs
                 )
-                updated.pollError = undefined
+                const artifactRetry = artifactRetryAfterMs(
+                    updated.providerState
+                )
+                updated.pollError = artifactRetry
+                    ? 'Gateway artifact download is pending; retrying the read-only download.'
+                    : undefined
                 await this.store.save(updated)
+                if (updated.state === 'running' && artifactRetry) {
+                    return { done: false, retryAfterMs: artifactRetry }
+                }
                 if (updated.state !== 'running') {
                     if (
                         updated.state === 'completed' &&
                         updated.queuedMessages?.length
                     ) {
                         this.scheduleQueuedTurn(updated.id)
-                        return true
+                        return { done: true }
                     }
                     await this.notifyJob(updated.id)
-                    return true
+                    return { done: true }
                 }
             }
-            return signal.aborted || this.stopped
+            return { done: signal.aborted || this.stopped }
         } catch (error) {
-            if (signal.aborted || this.stopped) return true
+            if (signal.aborted || this.stopped) return { done: true }
             const current = await this.store.get(id)
             if (
                 !current ||
                 current.state !== 'running' ||
                 current.activeRunId !== job.activeRunId
             ) {
-                return true
+                return { done: true }
             }
             if (isRemoteSessionMissing(error)) {
                 const lost = failLostSession(
@@ -1213,12 +1324,26 @@ export class DelegationManager {
                 )
                 await this.store.save(lost)
                 await this.notifyJob(lost.id)
-                return true
+                return { done: true }
+            }
+            if (isGatewayAccessError(error)) {
+                const failed = failGatewayAccess(
+                    current,
+                    error,
+                    this.now(),
+                    this.retentionMs
+                )
+                await this.store.save(failed)
+                await this.notifyJob(failed.id)
+                return { done: true }
             }
             current.pollError = `Gateway event stream failed; polling fallback active: ${clip(errorMessage(error), 32 * 1024)}`
             current.updatedAt = this.now()
             await this.store.save(current)
-            return false
+            return {
+                done: false,
+                retryAfterMs: gatewayRetryAfterMs(error)
+            }
         }
     }
 
@@ -1572,6 +1697,62 @@ function isRemoteSessionMissing(error: unknown) {
     )
 }
 
+function gatewayStatus(error: unknown) {
+    if (!error || typeof error !== 'object') return undefined
+    const status = (error as { status?: unknown }).status
+    return typeof status === 'number' && Number.isFinite(status)
+        ? status
+        : undefined
+}
+
+function isGatewayAccessError(error: unknown) {
+    const status = gatewayStatus(error)
+    return status === 401 || status === 403
+}
+
+function gatewayRetryAfterMs(error: unknown) {
+    if (!error || typeof error !== 'object') return 0
+    const value = (error as {
+        retryAfterMs?: unknown
+        retryAfter?: unknown
+        metadata?: { retryAfterMs?: unknown }
+    }).retryAfterMs ??
+        (error as { retryAfter?: unknown }).retryAfter ??
+        (error as { metadata?: { retryAfterMs?: unknown } }).metadata
+            ?.retryAfterMs
+    const delayMs = Number(value)
+    return Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 0
+}
+
+function artifactRetryAfterMs(providerState: Record<string, unknown> | undefined) {
+    if (!providerState?.gatewayArtifactDownloadPending) return 0
+    const delayMs = Number(providerState.gatewayArtifactRetryAfterMs)
+    return Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 0
+}
+
+function failGatewayAccess(
+    job: DelegationJob,
+    error: unknown,
+    now: number,
+    retentionMs: number
+): DelegationJob {
+    const status = gatewayStatus(error)
+    const message = errorMessage(error)
+    return {
+        ...job,
+        state: 'failed',
+        remoteState: status ? `gateway_http_${status}` : 'gateway_access_denied',
+        pendingRequest: undefined,
+        error: status
+            ? `Nexus Gateway request was rejected (${status}). ${message}`
+            : message,
+        pollError: undefined,
+        endedAt: now,
+        updatedAt: now,
+        expiresAt: now + retentionMs
+    }
+}
+
 function failLostSession(
     job: DelegationJob,
     now: number,
@@ -1730,15 +1911,22 @@ function deliveryState(
 
 function delay(ms: number, signal?: AbortSignal) {
     if (signal?.aborted) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-        const finish = () => {
-            clearTimeout(timer)
-            signal?.removeEventListener('abort', finish)
-            resolve()
+    let remaining = Math.max(0, ms)
+    return (async () => {
+        while (remaining > 0 && !signal?.aborted) {
+            const slice = Math.min(remaining, MAX_TIMER_DELAY_MS)
+            await new Promise<void>((resolve) => {
+                const finish = () => {
+                    clearTimeout(timer)
+                    signal?.removeEventListener('abort', finish)
+                    resolve()
+                }
+                const timer = setTimeout(finish, slice)
+                signal?.addEventListener('abort', finish, { once: true })
+            })
+            remaining -= slice
         }
-        const timer = setTimeout(finish, ms)
-        signal?.addEventListener('abort', finish, { once: true })
-    })
+    })()
 }
 
 export type {

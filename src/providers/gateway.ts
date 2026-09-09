@@ -21,6 +21,11 @@ export interface NexusGatewayProviderOptions {
     client: GatewayClient
 }
 
+interface HydratedGatewaySession {
+    session: GatewaySessionView
+    artifactRetryAfterMs?: number
+}
+
 export class NexusGatewayProvider implements DelegationProvider {
     readonly type = 'gateway' as const
     private inventoryStatus?: GatewayRemoteStatus
@@ -134,6 +139,18 @@ export class NexusGatewayProvider implements DelegationProvider {
         let sessionId = stateString(job, 'gatewaySessionId')
         let session: GatewaySessionView
         if (!sessionId || request.newTask) {
+            if (
+                sessionId &&
+                request.newTask &&
+                typeof this.options.client.closeSession === 'function'
+            ) {
+                try {
+                    await this.options.client.closeSession(remote, sessionId)
+                } catch (error) {
+                    if (statusOf(error) !== 404) throw error
+                }
+                sessionId = undefined
+            }
             if (!agent.agentId) {
                 throw new Error(`Gateway agent id is missing for ${agent.name}`)
             }
@@ -162,7 +179,7 @@ export class NexusGatewayProvider implements DelegationProvider {
             request.prompt,
             attachmentIds
         )
-        return fromGatewaySession(session, job.providerState)
+        return this.sessionResult(remote, session, job)
     }
 
     async message(
@@ -185,7 +202,7 @@ export class NexusGatewayProvider implements DelegationProvider {
                     ...(request.decision ? { action: request.decision } : {})
                 }
             )
-            return fromGatewaySession(session, job.providerState)
+            return this.sessionResult(this.requireRemote(), session, job)
         }
         return this.run(agent, job, { ...request, sameTask: true })
     }
@@ -204,15 +221,45 @@ export class NexusGatewayProvider implements DelegationProvider {
             after,
             signal
         )) {
-            after = event.id || after
-            const session = await this.options.client.getSession(
+            // A reset event means the event ring no longer covers `after`.
+            // Recover from the fixed same-origin Session route rather than
+            // following the server-advertised URL (which must never carry an
+            // API key into a chat platform).
+            if (event.type !== 'reset' && event.id && cursorAtOrBefore(event.id, after)) {
+                continue
+            }
+            let session: GatewaySessionView
+            if (event.type === 'reset' && isGatewaySessionView(event.data)) {
+                session = event.data
+            } else {
+                session = await this.options.client.getSession(
+                    this.requireRemote(),
+                    sessionId
+                )
+            }
+            const snapshotCursor = session.lastEventId || event.id || after
+            if (event.type === 'reset') {
+                // A reset is authoritative even when the requested cursor was
+                // ahead of the current Gateway sequence. The replacement
+                // snapshot may therefore move the cursor backwards.
+                after = snapshotCursor
+                session = after && session.lastEventId !== after
+                    ? { ...session, lastEventId: after }
+                    : session
+            } else {
+                if (snapshotCursor && cursorAtOrBefore(snapshotCursor, after)) {
+                    continue
+                }
+                after = maxCursor(after, snapshotCursor)
+                session = after && session.lastEventId !== after
+                    ? { ...session, lastEventId: after }
+                    : session
+            }
+            const result = await this.sessionResult(
                 this.requireRemote(),
-                sessionId
+                session,
+                job
             )
-            const result = fromGatewaySession(session, {
-                ...job.providerState,
-                ...(after ? { lastEventId: after } : {})
-            })
             yield result
             if (result.state !== 'running') return
         }
@@ -232,7 +279,7 @@ export class NexusGatewayProvider implements DelegationProvider {
             sessionId,
             path
         )
-        return fromGatewaySession(session, job.providerState)
+        return this.sessionResult(this.requireRemote(), session, job)
     }
 
     async status(_agent: RemoteAgentInfo, job: DelegationJob) {
@@ -242,7 +289,7 @@ export class NexusGatewayProvider implements DelegationProvider {
             this.requireRemote(),
             sessionId
         )
-        return fromGatewaySession(session, job.providerState)
+        return this.sessionResult(this.requireRemote(), session, job)
     }
 
     async cancel(_agent: RemoteAgentInfo, job: DelegationJob) {
@@ -255,11 +302,144 @@ export class NexusGatewayProvider implements DelegationProvider {
                 providerState: structuredClone(job.providerState)
             } satisfies DelegationProviderResult
         }
+        const remote = this.requireRemote()
         const session = await this.options.client.cancelSession(
-            this.requireRemote(),
+            remote,
             sessionId
         )
-        return fromGatewaySession(session, job.providerState)
+        // Gateway cancellation leaves the terminal Session retained until it
+        // is explicitly closed. Release that server-side resource after the
+        // cancel has been accepted. Older clients may not expose closeSession;
+        // keep the cancellation path compatible with them.
+        if (typeof this.options.client.closeSession === 'function') {
+            await this.options.client.closeSession(remote, sessionId)
+        }
+        return this.sessionResult(remote, session, job)
+    }
+
+    private async sessionResult(
+        remote: GatewayRemoteConfig,
+        session: GatewaySessionView,
+        job: DelegationJob
+    ) {
+        const hydrated = await this.hydrateArtifacts(
+            remote,
+            session,
+            job.artifacts
+        )
+        const previousState = structuredClone(job.providerState)
+        delete previousState.gatewayArtifactDownloadPending
+        delete previousState.gatewayArtifactRetryAfterMs
+        const result = fromGatewaySession(hydrated.session, previousState)
+        if (
+            hydrated.artifactRetryAfterMs !== undefined &&
+            (result.state === 'running' || result.state === 'completed')
+        ) {
+            // The turn has already been accepted. Keep it logically active
+            // while a read-only artifact download is retried; this prevents a
+            // transient storage failure from replaying the user's prompt.
+            result.state = 'running'
+            result.remoteState = hydrated.session.state
+            result.error = undefined
+            result.providerState = {
+                ...result.providerState,
+                gatewayArtifactDownloadPending: true,
+                gatewayArtifactRetryAfterMs: hydrated.artifactRetryAfterMs
+            }
+        }
+        return result
+    }
+
+    private async hydrateArtifacts(
+        remote: GatewayRemoteConfig,
+        session: GatewaySessionView,
+        previous: DelegationJob['artifacts']
+    ): Promise<HydratedGatewaySession> {
+        const client = this.options.client as GatewayClient & {
+            downloadArtifact?: GatewayClient['downloadArtifact']
+        }
+        const downloadArtifact = client.downloadArtifact
+        if (!session.runId || typeof downloadArtifact !== 'function') {
+            return { session: stripUnsafeArtifactUrls(session, remote) }
+        }
+        if (!session.artifacts?.length) return { session }
+
+        let artifactRetryPending = false
+        let artifactRetryAfterMs = 0
+        const artifacts = await Promise.all(
+            session.artifacts.map(async (artifact) => {
+                const unsafeUrl = artifact.url
+                    ? isUnsafeArtifactUrl(artifact.url, remote)
+                    : false
+                const existing = artifact.id
+                    ? previous.find((item) => item.artifactId === artifact.id)
+                    : undefined
+                if (hasInlineArtifact(artifact)) {
+                    return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                }
+                if (existing?.bytesBase64) {
+                    return {
+                        ...artifact,
+                        url: undefined,
+                        bytesBase64: existing.bytesBase64,
+                        filename: artifact.filename || existing.filename,
+                        mediaType: artifact.mediaType || existing.mediaType
+                    }
+                }
+                if (existing?.url && !isUnsafeArtifactUrl(existing.url, remote)) {
+                    return { ...artifact, url: existing.url }
+                }
+                if (artifact.url && !unsafeUrl) return artifact
+                if (!artifact.id) {
+                    return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                }
+                if (terminalArtifactStorageStatus(artifact)) {
+                    return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                }
+                try {
+                    const downloaded = await downloadArtifact.call(
+                        client,
+                        remote,
+                        session.runId!,
+                        artifact.id
+                    )
+                    const bytes = Buffer.from(downloaded.bytes)
+                    if (!bytes.length) {
+                        return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                    }
+                    return {
+                        ...artifact,
+                        url: undefined,
+                        bytesBase64: bytes.toString('base64'),
+                        filename: artifact.filename || downloaded.filename,
+                        mediaType: artifact.mediaType || downloaded.mediaType
+                    }
+                } catch (error) {
+                    // Metadata-only/expired artifacts are still useful to the
+                    // user as a structured result. Keep them without exposing
+                    // an authenticated Gateway URL. Other old Gateway URLs
+                    // remain compatible when they are not credentials.
+                    if (statusOf(error) === 404) {
+                        return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                    }
+                    if (statusOf(error) === 401 || statusOf(error) === 403) {
+                        throw error
+                    }
+                    artifactRetryPending = true
+                    artifactRetryAfterMs = Math.max(
+                        artifactRetryAfterMs,
+                        retryAfterMsOf(error)
+                    )
+                    return unsafeUrl ? { ...artifact, url: undefined } : artifact
+                }
+            })
+        )
+        return {
+            session: { ...session, artifacts },
+            ...(artifactRetryPending
+                ? { artifactRetryAfterMs }
+                : {})
+        }
     }
 
     private agentInfo(
@@ -338,6 +518,113 @@ function mapGatewayAgent(agent: GatewayAgentSummary): GatewayAgentSummary {
         checkedAt: agent.checkedAt,
         responseMs: agent.responseMs
     }
+}
+
+function hasInlineArtifact(artifact: GatewaySessionView['artifacts'][number]) {
+    return (
+        typeof artifact.bytesBase64 === 'string' ||
+        artifact.data !== undefined ||
+        typeof artifact.text === 'string'
+    )
+}
+
+function isUnsafeArtifactUrl(value: string, remote: GatewayRemoteConfig) {
+    let url: URL
+    try {
+        url = new URL(value)
+    } catch {
+        return false
+    }
+    let base: URL
+    try {
+        base = new URL(remote.baseUrl)
+    } catch {
+        return true
+    }
+    if (url.origin === base.origin && url.pathname.startsWith('/v1/')) {
+        return true
+    }
+    for (const key of url.searchParams.keys()) {
+        if (/^(?:api[_-]?key|access[_-]?token|auth(?:orization)?|key|sig(?:nature)?|token)$/i.test(key)) {
+            return true
+        }
+    }
+    return false
+}
+
+function stripUnsafeArtifactUrls(
+    session: GatewaySessionView,
+    remote: GatewayRemoteConfig
+): GatewaySessionView {
+    if (!session.artifacts?.length) return session
+    const artifacts = session.artifacts.map((artifact) =>
+        artifact.url && isUnsafeArtifactUrl(artifact.url, remote)
+            ? { ...artifact, url: undefined }
+            : artifact
+    )
+    return { ...session, artifacts }
+}
+
+function isGatewaySessionView(value: unknown): value is GatewaySessionView {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const item = value as Partial<GatewaySessionView>
+    return (
+        typeof item.id === 'string' &&
+        typeof item.agentId === 'string' &&
+        typeof item.protocol === 'string' &&
+        typeof item.state === 'string' &&
+        Array.isArray(item.artifacts)
+    )
+}
+
+function cursorAtOrBefore(value: string | undefined, current: string | undefined) {
+    if (!value || !current) return false
+    if (/^\d+$/.test(value) && /^\d+$/.test(current)) {
+        return BigInt(value) <= BigInt(current)
+    }
+    return value === current
+}
+
+function maxCursor(left: string | undefined, right: string | undefined) {
+    if (!left) return right
+    if (!right) return left
+    if (/^\d+$/.test(left) && /^\d+$/.test(right)) {
+        return BigInt(right) > BigInt(left) ? right : left
+    }
+    return right === left ? left : right
+}
+
+function statusOf(error: unknown) {
+    if (!error || typeof error !== 'object') return undefined
+    const value = (error as { status?: unknown }).status
+    return typeof value === 'number' ? value : undefined
+}
+
+function retryAfterMsOf(error: unknown) {
+    if (!error || typeof error !== 'object') return 0
+    const value = (error as {
+        retryAfterMs?: unknown
+        retryAfter?: unknown
+        metadata?: { retryAfterMs?: unknown }
+    }).retryAfterMs ??
+        (error as { retryAfter?: unknown }).retryAfter ??
+        (error as { metadata?: { retryAfterMs?: unknown } }).metadata
+            ?.retryAfterMs
+    const delayMs = Number(value)
+    return Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 0
+}
+
+function terminalArtifactStorageStatus(
+    artifact: GatewaySessionView['artifacts'][number]
+) {
+    return (
+        artifact.storageStatus === 'metadata_only' ||
+        artifact.storageStatus === 'expired' ||
+        artifact.storageStatus === 'evicted' ||
+        artifact.metadata?.storageStatus === 'metadata_only' ||
+        artifact.metadata?.storageStatus === 'expired' ||
+        artifact.metadata?.storageStatus === 'evicted'
+    )
 }
 
 export function fromGatewaySession(

@@ -15,6 +15,8 @@ import {
 } from '../src/delegation/index.ts'
 import { formatDelegationWakeup } from '../src/delegation/wakeup.ts'
 import { notifyChatLunaDelegation } from '../src/delegation/wakeup.ts'
+import { NexusGatewayProvider } from '../src/providers/gateway.ts'
+import { PRIMARY_GATEWAY_ID } from '../src/types.ts'
 
 test('persists only single-Gateway jobs and drops obsolete provider records', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-store-'))
@@ -900,6 +902,465 @@ test('retries failed artifact delivery without repeating the wakeup', async () =
     }
 })
 
+test('reconnects the event monitor after a transient stream failure', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let watchCalls = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async (_agent, current) => runningWithState(current.providerState)
+    fixture.provider.watch = async function* (_agent, current) {
+        watchCalls += 1
+        if (watchCalls === 1) throw new Error('event stream disconnected')
+        yield completed(current.providerState)
+    }
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'reconnect me',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(output)
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+            if ((await fixture.store.get(id))?.state === 'completed') break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(watchCalls, 2)
+        assert.equal((await fixture.store.get(id))?.state, 'completed')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('honors event-stream Retry-After before reconnecting without replaying the turn', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let watchCalls = 0
+    let runCalls = 0
+    let secondWatchAt = 0
+    let firstWatchAt = 0
+    fixture.provider.run = async () => {
+        runCalls += 1
+        return running()
+    }
+    fixture.provider.status = async (_agent, current) => runningWithState(current.providerState)
+    fixture.provider.watch = async function* (_agent, current) {
+        watchCalls += 1
+        if (watchCalls === 1) {
+            firstWatchAt = Date.now()
+            const error = Object.assign(new Error('quota'), {
+                status: 429,
+                retryAfterMs: 25
+            })
+            throw error
+        }
+        secondWatchAt = Date.now()
+        yield completed(current.providerState)
+    }
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'respect retry after',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(output)
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+            if ((await fixture.store.get(id))?.state === 'completed') break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        assert.equal(runCalls, 1)
+        assert.equal(watchCalls, 2)
+        assert.ok(secondWatchAt - firstWatchAt >= 20)
+        assert.equal((await fixture.store.get(id))?.state, 'completed')
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('does not turn an oversized Retry-After into a reconnect storm', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let watchCalls = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async (_agent, current) => runningWithState(current.providerState)
+    fixture.provider.watch = async function* () {
+        watchCalls += 1
+        throw Object.assign(new Error('quota'), {
+            status: 429,
+            retryAfterMs: Number.MAX_SAFE_INTEGER
+        })
+    }
+    try {
+        await fixture.manager.start()
+        await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'respect a very large retry after',
+                background: true
+            },
+            context()
+        )
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        assert.equal(watchCalls, 1)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('stops event reconnect after an authorization failure with a clear task error', async () => {
+    const fixture = await managerFixture({ pollIntervalMs: 1 })
+    let watchCalls = 0
+    let statusCalls = 0
+    fixture.provider.run = async () => running()
+    fixture.provider.status = async () => {
+        statusCalls += 1
+        return running()
+    }
+    fixture.provider.watch = async function* () {
+        watchCalls += 1
+        throw Object.assign(new Error('token rejected'), { status: 401 })
+    }
+    try {
+        await fixture.manager.start()
+        const output = await fixture.manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'auth failure',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(output)
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+            if ((await fixture.store.get(id))?.state === 'failed') break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        const current = await fixture.store.get(id)
+        assert.equal(watchCalls, 1)
+        assert.equal(statusCalls, 0)
+        assert.equal(current?.state, 'failed')
+        assert.match(current?.error || '', /401/)
+        assert.match(current?.error || '', /token rejected/)
+    } finally {
+        await fixture.dispose()
+    }
+})
+
+test('recovers a reset snapshot once and deduplicates the reset cursor', async () => {
+    const remote = {
+        id: PRIMARY_GATEWAY_ID,
+        name: 'Nexus Gateway',
+        baseUrl: 'http://127.0.0.1:8787',
+        authToken: 'TOKEN',
+        enabled: true
+    }
+    let snapshots = 0
+    const client = {
+        async *events() {
+            yield {
+                id: '9',
+                sessionId: 'session-1',
+                type: 'reset' as const,
+                timestamp: 1,
+                data: {
+                    reason: 'expired',
+                    requestedAfter: '0',
+                    earliestId: '8',
+                    latestId: '9',
+                    snapshotUrl: '/v1/sessions/session-1'
+                }
+            }
+            yield {
+                id: '9',
+                sessionId: 'session-1',
+                type: 'completed' as const,
+                timestamp: 2
+            }
+        },
+        async getSession() {
+            snapshots += 1
+            return {
+                id: 'session-1',
+                lastEventId: '9',
+                runId: 'run-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'running' as const,
+                artifacts: [],
+                createdAt: 1,
+                updatedAt: 2
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => ({ delegation: { agents: [] } }),
+        remote,
+        client
+    })
+    const resetJob = providerJob()
+    resetJob.providerState.lastEventId = '999999'
+    const results = []
+    for await (const result of provider.watch(agent(), resetJob, new AbortController().signal)) {
+        results.push(result)
+    }
+    assert.equal(snapshots, 1)
+    assert.equal(results.length, 1)
+    assert.equal(results[0].state, 'running')
+    assert.equal(results[0].providerState.lastEventId, '9')
+})
+
+test('downloads persisted Gateway artifacts without exposing an authenticated URL', async () => {
+    const remote = {
+        id: PRIMARY_GATEWAY_ID,
+        name: 'Nexus Gateway',
+        baseUrl: 'http://127.0.0.1:8787',
+        authToken: 'TOKEN',
+        enabled: true
+    }
+    let downloads = 0
+    const client = {
+        async createSession() {
+            return {
+                id: 'session-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'created' as const,
+                artifacts: [],
+                createdAt: 1,
+                updatedAt: 1
+            }
+        },
+        async sendMessage() {
+            return {
+                id: 'session-1',
+                runId: 'run-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'completed' as const,
+                output: 'done',
+                artifacts: [
+                    {
+                        id: 'artifact-1',
+                        name: 'report.txt',
+                        url: 'http://127.0.0.1:8787/v1/runs/run-1/artifacts/artifact-1?apiKey=SECRET'
+                    }
+                ],
+                createdAt: 1,
+                updatedAt: 2,
+                completion: {
+                    protocol: 'acp' as const,
+                    source: 'acp_prompt_response' as const,
+                    stopReason: 'end_turn',
+                    verified: true as const,
+                    outputPresent: true,
+                    artifactCount: 1,
+                    completedAt: 2
+                }
+            }
+        },
+        async downloadArtifact() {
+            downloads += 1
+            return {
+                bytes: new Uint8Array(Buffer.from('persisted bytes')),
+                filename: 'report.txt',
+                mediaType: 'text/plain'
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => ({ delegation: { agents: [] } }),
+        remote,
+        client
+    })
+    const result = await provider.run(agent(), providerJob(), {
+        prompt: 'download',
+        background: false,
+        newTask: false,
+        sameTask: false
+    })
+    assert.equal(downloads, 1)
+    assert.equal(result.artifacts[0].url, undefined)
+    assert.equal(result.artifacts[0].bytesBase64, Buffer.from('persisted bytes').toString('base64'))
+    assert.doesNotMatch(JSON.stringify(result), /SECRET/)
+})
+
+test('retries a transient artifact download without replaying the Gateway turn', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-artifact-retry-'))
+    const store = new DelegationStore(path.join(directory, 'jobs.json'), 8)
+    const remote = {
+        id: PRIMARY_GATEWAY_ID,
+        name: 'Nexus Gateway',
+        baseUrl: 'http://127.0.0.1:8787',
+        authToken: 'TOKEN',
+        enabled: true
+    }
+    let sends = 0
+    let downloads = 0
+    const completedSession = () => ({
+        id: 'session-1',
+        runId: 'run-1',
+        protocol: 'acp' as const,
+        agentId: 'hermes',
+        state: 'completed' as const,
+        output: 'done',
+        artifacts: [
+            {
+                id: 'artifact-1',
+                name: 'report.txt',
+                storageStatus: 'available' as const
+            }
+        ],
+        createdAt: 1,
+        updatedAt: 2,
+        completion: {
+            runId: 'run-1',
+            protocol: 'acp' as const,
+            source: 'acp_prompt_response' as const,
+            stopReason: 'end_turn',
+            verified: true as const,
+            outputPresent: true,
+            artifactCount: 1,
+            completedAt: 2
+        }
+    })
+    const client = {
+        async createSession() {
+            return {
+                id: 'session-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'created' as const,
+                artifacts: [],
+                createdAt: 1,
+                updatedAt: 1
+            }
+        },
+        async sendMessage() {
+            sends += 1
+            return completedSession()
+        },
+        async getSession() {
+            return completedSession()
+        },
+        async *events() {
+            throw Object.assign(new Error('temporary event outage'), {
+                status: 503
+            })
+        },
+        async downloadArtifact() {
+            downloads += 1
+            if (downloads === 1) {
+                throw Object.assign(new Error('artifact storage unavailable'), {
+                    status: 503
+                })
+            }
+            return {
+                bytes: new Uint8Array(Buffer.from('recovered bytes')),
+                filename: 'report.txt',
+                mediaType: 'text/plain'
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => ({
+            delegation: {
+                agents: [{ agentId: 'hermes', name: 'Hermes', enabled: true }]
+            }
+        }),
+        remote,
+        client
+    })
+    const manager = new DelegationManager(
+        store,
+        new DelegationProviderRegistry().register(provider),
+        async () => undefined,
+        { pollIntervalMs: 1 }
+    )
+    try {
+        await manager.start()
+        const output = await manager.handle(
+            {
+                action: 'run',
+                remote: 'hermes',
+                prompt: 'download after retry',
+                background: true
+            },
+            context()
+        )
+        const id = jobId(output)
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+            if ((await store.get(id))?.state === 'completed') break
+            await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+        const current = await store.get(id)
+        assert.equal(current?.state, 'completed', JSON.stringify(current))
+        assert.equal(sends, 1)
+        assert.equal(downloads, 2)
+        assert.equal(
+            current?.artifacts?.[0]?.bytesBase64,
+            Buffer.from('recovered bytes').toString('base64')
+        )
+        assert.equal(current?.providerState.gatewayArtifactDownloadPending, undefined)
+    } finally {
+        await manager.stop()
+        await rm(directory, { recursive: true, force: true })
+    }
+})
+
+test('cancellation closes the retained Gateway Session after stopping it', async () => {
+    let canceled = 0
+    let closed = 0
+    const client = {
+        async cancelSession() {
+            canceled += 1
+            return {
+                id: 'session-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'canceled' as const,
+                artifacts: [],
+                createdAt: 1,
+                updatedAt: 2
+            }
+        },
+        async closeSession() {
+            closed += 1
+            return {
+                id: 'session-1',
+                protocol: 'acp' as const,
+                agentId: 'hermes',
+                state: 'canceled' as const,
+                artifacts: [],
+                createdAt: 1,
+                updatedAt: 2
+            }
+        }
+    } as any
+    const provider = new NexusGatewayProvider({
+        getConfig: () => ({ delegation: { agents: [] } }),
+        remote: {
+            id: PRIMARY_GATEWAY_ID,
+            name: 'Nexus Gateway',
+            baseUrl: 'http://127.0.0.1:8787',
+            authToken: 'TOKEN',
+            enabled: true
+        },
+        client
+    })
+    const result = await provider.cancel(agent(), providerJob())
+    assert.equal(result.state, 'canceled')
+    assert.equal(canceled, 1)
+    assert.equal(closed, 1)
+})
+
 async function managerFixture(options: any = {}) {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agent-nexus-manager-'))
     const store = new DelegationStore(path.join(directory, 'jobs.json'), 8)
@@ -970,6 +1431,15 @@ function running() {
     }
 }
 
+function runningWithState(providerState: Record<string, unknown>) {
+    return {
+        state: 'running' as const,
+        remoteState: 'running',
+        artifacts: [],
+        providerState: structuredClone(providerState)
+    }
+}
+
 function agent(): RemoteAgentInfo {
     return {
         id: 'hermes',
@@ -983,6 +1453,37 @@ function agent(): RemoteAgentInfo {
         enabled: true,
         state: 'ready',
         skills: []
+    }
+}
+
+function providerJob(): DelegationJob {
+    const now = Date.now()
+    return {
+        schemaVersion: 2,
+        id: 'job-1',
+        provider: 'gateway',
+        agentId: 'hermes',
+        agentName: 'Hermes',
+        remoteId: PRIMARY_GATEWAY_ID,
+        remoteName: 'Nexus Gateway',
+        providerAgentId: 'hermes',
+        parentConversationId: 'conversation-1',
+        source: 'chatluna',
+        routing: {
+            platform: 'test',
+            selfId: 'bot',
+            userId: 'user',
+            isDirect: true
+        },
+        state: 'running',
+        background: true,
+        prompt: 'work',
+        providerState: { gatewaySessionId: 'session-1' },
+        artifacts: [],
+        createdAt: now,
+        updatedAt: now,
+        startedAt: now,
+        expiresAt: now + 60_000
     }
 }
 

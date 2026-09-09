@@ -33,7 +33,7 @@ export const Config: Schema<Config> = Schema.object({
         .min(1048576)
         .max(268435456)
         .default(32 * 1024 * 1024)
-        .description('单个 Gateway HTTP 或 SSE 响应允许读取的最大字节数')
+        .description('单个 Gateway HTTP 响应或 SSE 事件帧允许读取的最大字节数')
 })
 
 export function createDefaultNexusConfig(): NexusConfig {
