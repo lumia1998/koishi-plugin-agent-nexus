@@ -36,7 +36,7 @@ AgentNexus 是 [Nexus Gateway](https://github.com/lumia1998/nexus-gateway) 的 K
 
 ## 安装
 
-要求 Node.js 20、Nexus Gateway 0.3.0 或更高版本，并已安装 ChatLuna 与
+要求 Node.js 20、Nexus Gateway 0.3.0 或更高版本（已针对 0.4.0 验证），并已安装 ChatLuna 与
 `koishi-plugin-chatluna-storage-service`。
 
 ```bash

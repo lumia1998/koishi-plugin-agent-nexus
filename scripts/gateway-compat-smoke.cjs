@@ -83,13 +83,41 @@ async function main() {
         } finally { clearTimeout(recoveryTimeout); recoveryController.abort() }
         store.recordArtifacts(started.runId, [{ id: 'report', filename: 'report.txt', mediaType: 'text/plain', text: 'persisted output' }])
         await store.flush()
+        // 0.4.0: mediaTypeForPath classifies media and source files instead of
+        // falling back to octet-stream, which decides the chat element the
+        // plugin builds for an artifact.
+        for (const [name, expected] of [['shot.png', 'image/png'], ['clip.mp4', 'video/mp4'],
+            ['voice.mp3', 'audio/mpeg'], ['notes.md', 'text/plain'], ['data.yaml', 'text/yaml']]) {
+            const file = path.join(temporary, name)
+            await fs.writeFile(file, 'x')
+            const published = await client.publishArtifact(remote, created.id, file)
+            const publishedArtifact = published.artifacts.find((item) => (item.filename || item.name) === name)
+            assert.equal(publishedArtifact?.mediaType, expected, `${name} mediaType`)
+        }
         await client.closeSession(remote, created.id)
         const artifact = await client.downloadArtifact(remote, started.runId, 'report')
         assert.equal(Buffer.from(artifact.bytes).toString(), 'persisted output')
         assert.equal(artifact.filename, 'report.txt')
+        // 0.4.0: a run keeps at most 32 artifacts and trims the oldest ones.
+        // Drivers report incrementally, so the newest survive and a trimmed id
+        // must reach the plugin as a typed 404 it degrades on, not as a crash.
+        for (let index = 0; index < 40; index++) {
+            const id = `trim-${String(index).padStart(2, '0')}`
+            store.recordArtifacts(started.runId, [{ id, filename: `${id}.txt`, mediaType: 'text/plain', text: `payload ${index}` }])
+            await new Promise((resolve) => setTimeout(resolve, 2))
+        }
+        await store.flush()
+        const trimmedArtifacts = store.get(started.runId).artifacts
+        assert.equal(trimmedArtifacts.length, 32)
+        assert.ok(trimmedArtifacts.some((item) => item.id === 'trim-39'), 'newest artifact must survive')
+        assert.ok(!trimmedArtifacts.some((item) => item.id === 'trim-00'), 'oldest artifact must be trimmed')
+        await assert.rejects(() => client.downloadArtifact(remote, started.runId, 'trim-00'),
+            (error) => error.status === 404 && error.name === 'GatewayHttpError')
+        const newest = await client.downloadArtifact(remote, started.runId, 'trim-39')
+        assert.equal(Buffer.from(newest.bytes).toString(), 'payload 39')
         config.apiKeys[0].enabled = false
         await assert.rejects(() => client.listAgents(remote), (error) => error.status === 401 || error.status === 403)
-        console.log('Gateway compatibility smoke passed: ACP completion, quota, SSE reset, persisted artifact and revoked key.')
+        console.log('Gateway compatibility smoke passed: ACP completion, quota, SSE reset, persisted artifact, artifact trimming, mediaType mapping and revoked key.')
     } finally {
         if (server) await closeServer(server)
         if (sessions) await sessions.shutdown()

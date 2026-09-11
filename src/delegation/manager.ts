@@ -62,6 +62,10 @@ export class DelegationManager {
     private jobLocks = new Map<string, Promise<void>>()
     private notifyTimers = new Map<string, ReturnType<typeof setTimeout>>()
     private queuedTurnTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    // Work started by a timer that has already fired. `clearTimeout` cannot
+    // reach it and it writes to the store, so `stop()` has to drain it before
+    // a caller tears the store down.
+    private pendingTasks = new Set<Promise<void>>()
     private stopped = true
 
     constructor(
@@ -104,7 +108,29 @@ export class DelegationManager {
         this.notifyTimers.clear()
         for (const timer of this.queuedTurnTimers.values()) clearTimeout(timer)
         this.queuedTurnTimers.clear()
+        // A timer that fired before the loop above is running detached, and it
+        // saves to the store on the way out. Let those finish first: `stopped`
+        // keeps them from scheduling any further work.
+        while (this.pendingTasks.size) {
+            await Promise.allSettled(Array.from(this.pendingTasks))
+        }
         await this.store.flush()
+    }
+
+    /**
+     * Runs detached work that `stop()` must still wait for. Timers are cleared
+     * on stop, but one that already fired keeps writing to the store.
+     */
+    private track(task: Promise<unknown>) {
+        const entry = task.then(
+            () => {
+                this.pendingTasks.delete(entry)
+            },
+            () => {
+                this.pendingTasks.delete(entry)
+            }
+        )
+        this.pendingTasks.add(entry)
     }
 
     async cancelConversation(parentConversationId: string) {
@@ -553,7 +579,7 @@ export class DelegationManager {
             }
             if (!job.background) job.notifiedRunId = job.activeRunId
             await this.store.save(job)
-            if (job.background) void this.notifyJob(job.id)
+            if (job.background) this.track(this.notifyJob(job.id))
             return {
                 kind: 'output',
                 value: formatJob(job, this.toolNameForJob(job))
@@ -576,7 +602,7 @@ export class DelegationManager {
                 const lost = failLostSession(latest, this.now(), this.retentionMs)
                 if (!lost.background) lost.notifiedRunId = lost.activeRunId
                 await this.store.save(lost)
-                if (lost.background) void this.notifyJob(lost.id)
+                if (lost.background) this.track(this.notifyJob(lost.id))
                 return {
                     kind: 'output',
                     value: formatJob(lost, this.toolNameForJob(lost))
@@ -591,7 +617,7 @@ export class DelegationManager {
                 )
                 if (!failed.background) failed.notifiedRunId = failed.activeRunId
                 await this.store.save(failed)
-                if (failed.background) void this.notifyJob(failed.id)
+                if (failed.background) this.track(this.notifyJob(failed.id))
                 return {
                     kind: 'output',
                     value: formatJob(failed, this.toolNameForJob(failed))
@@ -619,7 +645,7 @@ export class DelegationManager {
             job.expiresAt = job.endedAt + this.retentionMs
             if (!job.background) job.notifiedRunId = job.activeRunId
             await this.store.save(job)
-            if (job.background) void this.notifyJob(job.id)
+            if (job.background) this.track(this.notifyJob(job.id))
             throw error
         }
     }
@@ -1432,7 +1458,7 @@ export class DelegationManager {
         if (this.stopped || this.notifyTimers.has(id)) return
         const timer = setTimeout(() => {
             this.notifyTimers.delete(id)
-            void this.notifyJob(id)
+            this.track(this.notifyJob(id))
         }, Math.max(0, delayMs))
         timer.unref?.()
         this.notifyTimers.set(id, timer)
@@ -1442,9 +1468,9 @@ export class DelegationManager {
         if (this.stopped || this.queuedTurnTimers.has(id)) return
         const timer = setTimeout(() => {
             this.queuedTurnTimers.delete(id)
-            void this.runQueuedTurn(id).catch((error) => {
-                void this.recordQueuedTurnFailure(id, error).catch(() => undefined)
-            })
+            this.track(this.runQueuedTurn(id).catch((error) => {
+                return this.recordQueuedTurnFailure(id, error).catch(() => undefined)
+            }))
         }, 0)
         timer.unref?.()
         this.queuedTurnTimers.set(id, timer)
