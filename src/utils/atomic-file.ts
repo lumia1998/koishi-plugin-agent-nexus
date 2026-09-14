@@ -24,6 +24,18 @@ export async function writeTextFileAtomic(
     }
 }
 
+export async function writeFileAtomic(filePath: string, content: Uint8Array) {
+    await mkdir(path.dirname(filePath), { recursive: true })
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+    try {
+        await writeFile(tempPath, content)
+        await renameWithRetry(tempPath, filePath)
+    } catch (error) {
+        await unlink(tempPath).catch(() => undefined)
+        throw error
+    }
+}
+
 export async function moveCorruptFileAside(filePath: string) {
     const backupPath = `${filePath}.corrupt-${new Date()
         .toISOString()

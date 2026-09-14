@@ -6,13 +6,9 @@
                 <div class="title-row">
                     <h1>Agent 中枢</h1>
                     <span class="gateway-pill" :class="status.gateway.state">
-                        <i />{{ gatewayStateLabel }}
+                        <i />{{ gatewayStateLabel(status.gateway.state, gatewayKeyConfigured) }}
                     </span>
                 </div>
-                <p>
-                    Nexus Gateway 负责接入 ACP 与 A2A Agent；本插件只负责把可用
-                    Agent 发布为 ChatLuna 工具，并维护委派任务上下文。
-                </p>
             </div>
             <el-button
                 class="refresh-button"
@@ -23,70 +19,106 @@
             </el-button>
         </header>
 
-        <section class="metrics" aria-label="运行概览">
-            <article>
-                <span>Gateway</span>
-                <strong>{{ status.gateway.state === 'ready' ? '在线' : '离线' }}</strong>
-                <small>{{ status.gateway.baseUrl }}</small>
-            </article>
-            <article>
-                <span>发现 Agent</span>
-                <strong>{{ status.gateway.agents.length }}</strong>
-                <small>由 Gateway 统一提供</small>
-            </article>
-            <article>
-                <span>可用 Agent</span>
-                <strong>{{ readyCount }}</strong>
-                <small>通过健康检查</small>
-            </article>
-            <article>
-                <span>ChatLuna 工具</span>
-                <strong>{{ toolCount }}</strong>
-                <small>已自动注册</small>
-            </article>
-        </section>
+        <nav class="tabs" role="tablist">
+            <button
+                v-for="item in tabs"
+                :key="item.name"
+                class="tab"
+                :class="{ active: activeTab === item.name }"
+                type="button"
+                role="tab"
+                :aria-selected="activeTab === item.name"
+                @click="selectTab(item.name)"
+            >
+                {{ item.label }}
+                <span v-if="item.badge" class="tab-badge" :class="item.tone">
+                    {{ item.badge }}
+                </span>
+            </button>
+        </nav>
 
-        <section v-if="!gatewayKeyConfigured" class="setup-notice">
-            <span class="notice-index">需要配置</span>
-            <div>
-                <strong>请在 Koishi 插件设置中填写 Gateway API Key</strong>
-                <p>
-                    Key 在 Nexus Gateway 的“API 密钥”页面生成；这里需要的是 API
-                    Key，不是 Gateway 控制台登录密码。
-                </p>
-            </div>
-        </section>
-
-        <main class="control-surface" v-loading="loading">
-            <div class="surface-title">
-                <div>
-                    <span>单一连接 · 自动发现</span>
-                    <h2>Gateway Agent 清单</h2>
-                </div>
-                <code>URL + API KEY → AGENTS → TOOLS</code>
-            </div>
-            <gateway-panel
+        <main v-loading="loading" class="tab-surface">
+            <overview-tab
+                v-if="activeTab === 'overview'"
+                :status="status"
+                :gateway-key-configured="gatewayKeyConfigured"
+                :jobs="jobs"
+                :jobs-loaded="jobsLoaded"
+                @goto="selectTab"
+            />
+            <agents-tab
+                v-else-if="activeTab === 'agents'"
                 :config="config"
                 :status="status"
                 :gateway-key-configured="gatewayKeyConfigured"
                 @updated="applyConsoleData"
             />
+            <tasks-tab
+                v-else-if="activeTab === 'tasks'"
+                :jobs="jobs"
+                :loading="jobsLoading"
+                :loaded="jobsLoaded"
+                :error="jobsError"
+                @refresh="reloadJobs(false)"
+                @cleared="reloadJobs(false)"
+            />
+            <artifacts-tab
+                v-else-if="activeTab === 'artifacts'"
+                :jobs="jobs"
+                :jobs-loaded="jobsLoaded"
+            />
+            <settings-tab
+                v-else
+                :config="config"
+                :status="status"
+                :settings="settings"
+                @updated="applyConsoleData"
+                @goto="selectTab"
+            />
         </main>
-        <tasks-panel />
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage } from 'element-plus'
-import GatewayPanel from './components/gateway-panel.vue'
-import TasksPanel from './components/tasks-panel.vue'
-import type { NexusConfig, NexusConsoleData, NexusStatus } from '../src/types'
+import OverviewTab from './components/overview-tab.vue'
+import AgentsTab from './components/agents-tab.vue'
+import TasksTab from './components/tasks-tab.vue'
+import ArtifactsTab from './components/artifacts-tab.vue'
+import SettingsTab from './components/settings-tab.vue'
+import { activeJobCount, attentionAgents, gatewayStateLabel } from './shared'
+import type {
+    NexusConfig,
+    NexusConsoleData,
+    NexusPluginSettings,
+    NexusStatus
+} from '../src/types'
+import type { DelegationJobView } from '../src/delegation/types'
 
+type TabName = 'overview' | 'agents' | 'tasks' | 'artifacts' | 'settings'
+
+const TAB_STORAGE_KEY = 'agent-nexus-tab'
+const JOBS_POLL_MS = 5000
+
+const activeTab = ref<TabName>(readStoredTab())
 const loading = ref(false)
+const jobsLoading = ref(false)
+const jobsLoaded = ref(false)
+const jobsError = ref('')
+const jobs = ref<DelegationJobView[]>([])
+const now = ref(Date.now())
 let generation = 0
+let jobsGeneration = 0
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
 const config = ref<NexusConfig>({ delegation: { agents: [] } })
+const settings = ref<NexusPluginSettings>({
+    commandAuthority: 0,
+    maxResponseBytes: 0,
+    gatewayKeyLength: 0
+})
 const status = ref<NexusStatus>({
     gateway: {
         id: 'primary-gateway',
@@ -100,22 +132,39 @@ const status = ref<NexusStatus>({
 })
 const gatewayKeyConfigured = ref(false)
 
-const readyCount = computed(
-    () => status.value.gateway.agents.filter((agent) => agent.ready).length
-)
-const toolCount = computed(
+const tabJobs = computed(
     () =>
-        status.value.delegation.agents.filter(
-            (agent) => agent.enabled && agent.toolName
-        ).length
+        activeTab.value === 'overview' ||
+        activeTab.value === 'tasks' ||
+        activeTab.value === 'artifacts'
 )
-const gatewayStateLabel = computed(() => {
-    if (!gatewayKeyConfigured.value) return '等待 API Key'
-    if (status.value.gateway.state === 'ready') return 'Gateway 在线'
-    if (status.value.gateway.state === 'checking') return '正在检查'
-    if (status.value.gateway.state === 'error') return '连接异常'
-    return '尚未检查'
-})
+
+const artifactCount = computed(() =>
+    jobs.value.reduce((total, job) => total + job.artifacts.length, 0)
+)
+
+const tabs = computed(() => [
+    { name: 'overview' as const, label: '概览' },
+    { name: 'agents' as const, label: '智能体' },
+    {
+        name: 'tasks' as const,
+        label: '任务',
+        badge: activeJobCount(jobs.value) || undefined,
+        tone: 'active'
+    },
+    {
+        name: 'artifacts' as const,
+        label: '产物',
+        badge: artifactCount.value || undefined,
+        tone: 'plain'
+    },
+    {
+        name: 'settings' as const,
+        label: '设置',
+        badge: attentionAgents(status.value).length || undefined,
+        tone: 'warn'
+    }
+])
 
 async function reload(discover = false) {
     const current = ++generation
@@ -137,10 +186,82 @@ async function reload(discover = false) {
 function applyConsoleData(data: NexusConsoleData) {
     config.value = data.config
     status.value = data.status
+    settings.value = data.settings
     gatewayKeyConfigured.value = data.gatewayKeyConfigured
 }
 
-onMounted(() => reload(true))
+async function reloadJobs(silent = true) {
+    const current = ++jobsGeneration
+    if (!silent) jobsLoading.value = true
+    try {
+        const result = await send('agent-nexus/listDelegationJobs', 100)
+        if (current !== jobsGeneration) return
+        jobs.value = result
+        jobsLoaded.value = true
+        jobsError.value = ''
+    } catch (error: any) {
+        if (current !== jobsGeneration) return
+        jobsError.value = error?.message || String(error)
+        if (!silent || !jobsLoaded.value) {
+            ElMessage.error(jobsError.value)
+        }
+    } finally {
+        if (current === jobsGeneration) jobsLoading.value = false
+    }
+}
+
+function selectTab(name: TabName) {
+    activeTab.value = name
+    try {
+        localStorage.setItem(TAB_STORAGE_KEY, name)
+    } catch {
+        /* storage may be unavailable in private modes */
+    }
+    if (tabJobs.value) void reloadJobs(true)
+}
+
+function tick() {
+    now.value = Date.now()
+    if (!tabJobs.value || document.visibilityState !== 'visible') return
+    void reloadJobs(true)
+}
+
+function restartPolling() {
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = setInterval(tick, JOBS_POLL_MS)
+}
+
+watch(tabJobs, (wanted) => {
+    if (wanted && !jobsLoaded.value) void reloadJobs(false)
+})
+
+onMounted(() => {
+    void reload(true)
+    void reloadJobs(false)
+    restartPolling()
+})
+
+onBeforeUnmount(() => {
+    if (pollTimer) clearInterval(pollTimer)
+})
+
+function readStoredTab(): TabName {
+    try {
+        const value = localStorage.getItem(TAB_STORAGE_KEY)
+        if (
+            value === 'overview' ||
+            value === 'agents' ||
+            value === 'tasks' ||
+            value === 'artifacts' ||
+            value === 'settings'
+        ) {
+            return value
+        }
+    } catch {
+        /* ignore */
+    }
+    return 'overview'
+}
 </script>
 
 <style scoped>
@@ -155,12 +276,11 @@ onMounted(() => reload(true))
         calc(var(--activity-width, 0px) + clamp(18px, 4vw, 58px));
     box-sizing: border-box;
     flex-direction: column;
-    gap: 22px;
+    gap: 20px;
 }
 
 .hero,
-.title-row,
-.surface-title {
+.title-row {
     display: flex;
     align-items: center;
 }
@@ -169,14 +289,14 @@ onMounted(() => reload(true))
     position: relative;
     justify-content: space-between;
     gap: 28px;
-    padding: 6px 0 24px 18px;
+    padding: 6px 0 20px 18px;
     border-bottom: 1px solid var(--nexus-line);
 }
 
 .hero::before {
     position: absolute;
     top: 8px;
-    bottom: 26px;
+    bottom: 22px;
     left: 0;
     width: 3px;
     background: var(--k-color-primary);
@@ -187,20 +307,12 @@ onMounted(() => reload(true))
     min-width: 0;
 }
 
-.eyebrow,
-.surface-title span,
-.surface-title code,
-.metrics span,
-.notice-index {
+.eyebrow {
+    color: var(--k-color-primary);
     font-family: 'Cascadia Mono', 'Microsoft YaHei UI', monospace;
+    font-size: 10px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-}
-
-.eyebrow,
-.surface-title span {
-    color: var(--k-color-primary);
-    font-size: 10px;
 }
 
 .title-row {
@@ -208,28 +320,14 @@ onMounted(() => reload(true))
     margin-top: 7px;
 }
 
-h1,
-h2,
-.hero p,
-.setup-notice p {
-    margin: 0;
-}
-
 h1 {
+    margin: 0;
     color: var(--nexus-ink);
     font-family: 'Microsoft YaHei UI', 'Noto Sans SC', sans-serif;
     font-size: clamp(30px, 4vw, 48px);
     font-weight: 760;
     line-height: 1;
     letter-spacing: -0.05em;
-}
-
-.hero p {
-    max-width: 760px;
-    margin-top: 12px;
-    color: var(--k-text-light);
-    font-size: 13px;
-    line-height: 1.7;
 }
 
 .gateway-pill {
@@ -260,98 +358,60 @@ h1 {
     background: #d65757;
 }
 
-.metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 1px;
-    overflow: hidden;
-    border: 1px solid var(--nexus-line);
-    background: var(--nexus-line);
+.tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--nexus-line);
 }
 
-.metrics article {
-    display: grid;
-    min-width: 0;
-    padding: 16px 18px;
-    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 30%);
-}
-
-.metrics span {
+.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 16px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
     color: var(--k-text-light);
-    font-size: 9px;
-}
-
-.metrics strong {
-    margin-top: 9px;
-    color: var(--nexus-ink);
-    font-size: 27px;
-    line-height: 1;
-}
-
-.metrics small {
-    margin-top: 8px;
-    overflow: hidden;
-    color: var(--k-text-light);
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.setup-notice {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 18px;
-    align-items: start;
-    padding: 16px 18px;
-    border: 1px solid color-mix(in srgb, #d99b2b, transparent 52%);
-    background: color-mix(in srgb, #d99b2b, transparent 93%);
-}
-
-.notice-index {
-    color: #b7790c;
-    font-size: 10px;
-}
-
-.setup-notice strong {
-    color: var(--nexus-ink);
+    font-family: inherit;
     font-size: 13px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.setup-notice p {
-    margin-top: 5px;
-    color: var(--k-text-light);
-    font-size: 12px;
-    line-height: 1.6;
-}
-
-.control-surface {
-    min-width: 0;
-    padding: 21px;
-    border: 1px solid var(--nexus-line);
-    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 38%);
-}
-
-.surface-title {
-    justify-content: space-between;
-    gap: 20px;
-    margin-bottom: 22px;
-}
-
-.surface-title h2 {
-    margin: 5px 0 0;
+.tab:hover {
     color: var(--nexus-ink);
-    font-size: 19px;
 }
 
-.surface-title code {
+.tab.active {
+    border-bottom-color: var(--k-color-primary);
+    color: var(--nexus-ink);
+    font-weight: 600;
+}
+
+.tab-badge {
+    min-width: 18px;
+    padding: 1px 5px;
+    background: var(--k-color-primary);
+    color: #fff;
+    font-family: 'Cascadia Mono', monospace;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+}
+
+.tab-badge.warn {
+    background: #d99b2b;
+}
+
+.tab-badge.plain {
+    background: color-mix(in srgb, var(--k-color-divider), transparent 20%);
     color: var(--k-text-light);
-    font-size: 9px;
 }
 
-@media (max-width: 900px) {
-    .metrics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+.tab-surface {
+    min-width: 0;
+    min-height: 320px;
 }
 
 @media (max-width: 680px) {
@@ -359,23 +419,23 @@ h1 {
         padding: 17px 13px 32px calc(var(--activity-width, 0px) + 13px);
     }
 
-    .hero,
-    .surface-title {
+    .hero {
         align-items: flex-start;
         flex-direction: column;
+        gap: 14px;
     }
 
     .refresh-button {
         width: 100%;
     }
 
-    .setup-notice {
-        grid-template-columns: 1fr;
-        gap: 8px;
+    .tabs {
+        overflow-x: auto;
     }
 
-    .control-surface {
-        padding: 16px 13px;
+    .tab {
+        padding: 10px 12px;
+        white-space: nowrap;
     }
 }
 </style>

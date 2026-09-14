@@ -9,11 +9,18 @@ import { validateGatewayUrl } from './gateway/client'
 
 export const name = 'agent-nexus'
 
+export interface ArtifactCacheConfig {
+    enabled: boolean
+    ttlHours: number
+    maxTotalBytes: number
+}
+
 export interface Config {
     gatewayUrl: string
     gatewayKey: string
     commandAuthority: number
     maxResponseBytes: number
+    artifactCache: ArtifactCacheConfig
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -33,7 +40,22 @@ export const Config: Schema<Config> = Schema.object({
         .min(1048576)
         .max(268435456)
         .default(32 * 1024 * 1024)
-        .description('单个 Gateway HTTP 响应或 SSE 事件帧允许读取的最大字节数')
+        .description('单个 Gateway HTTP 响应或 SSE 事件帧允许读取的最大字节数'),
+    artifactCache: Schema.object({
+        enabled: Schema.boolean()
+            .default(true)
+            .description('把产物缓存到本地磁盘，控制台直接从本地读取；关闭后每次预览都会回源 Gateway'),
+        ttlHours: Schema.number()
+            .min(1)
+            .max(24 * 365)
+            .default(72)
+            .description('产物缓存保留时长（小时），按最后访问时间计算'),
+        maxTotalBytes: Schema.number()
+            .min(16 * 1024 * 1024)
+            .max(1024 * 1024 * 1024 * 1024)
+            .default(2 * 1024 * 1024 * 1024)
+            .description('产物缓存目录总容量上限（字节），超出后按最久未访问淘汰')
+    }).description('产物本地缓存与清理策略')
 })
 
 export function createDefaultNexusConfig(): NexusConfig {

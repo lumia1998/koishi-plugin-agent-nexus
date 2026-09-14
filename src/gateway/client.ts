@@ -58,16 +58,76 @@ export interface GatewayClient {
         runId: string,
         artifactId: string
     ): Promise<GatewayArtifactDownload>
+    /** Optional for legacy injected clients; streams without buffering the body. */
+    streamArtifact?(
+        remote: GatewayRemoteConfig,
+        runId: string,
+        artifactId: string
+    ): Promise<GatewayArtifactStream>
     events(
         remote: GatewayRemoteConfig,
         sessionId: string,
         after?: string,
         signal?: AbortSignal
     ): AsyncGenerator<GatewayEvent>
+    /** Optional for legacy injected clients; NexusGatewayClient always provides it. */
+    readonly maxResponseBytes?: number
+}
+
+/** An opened artifact download whose body has not been read yet. */
+export interface GatewayArtifactStream {
+    body: ReadableStream<Uint8Array>
+    filename?: string
+    mediaType?: string
 }
 
 export class NexusGatewayClient {
-    constructor(private readonly maxResponseBytes = 32 * 1024 * 1024) {}
+    constructor(readonly maxResponseBytes = 32 * 1024 * 1024) {}
+
+    /**
+     * Opens an artifact download without buffering the response body. Callers
+     * can pipe it straight to disk, which is how artifacts larger than
+     * `maxResponseBytes` stay downloadable: the in-memory ceiling applies to
+     * `downloadArtifact`, not to the size of the file itself.
+     *
+     * The connect timeout is cleared once headers arrive, so a slow but
+     * progressing transfer is not cut off; the consumer enforces its own
+     * byte ceiling while streaming.
+     */
+    async streamArtifact(
+        remote: GatewayRemoteConfig,
+        runId: string,
+        artifactId: string
+    ): Promise<GatewayArtifactStream> {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+        try {
+            const response = await fetch(
+                gatewayUrl(
+                    remote,
+                    `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`
+                ),
+                {
+                    headers: gatewayHeaders(remote),
+                    redirect: 'error',
+                    signal: controller.signal
+                }
+            )
+            if (!response.ok) throw await gatewayHttpError(response)
+            if (!response.body) {
+                throw new Error('Nexus Gateway returned an empty artifact body.')
+            }
+            return {
+                body: response.body,
+                filename: parseContentDispositionFilename(
+                    response.headers.get('content-disposition')
+                ),
+                mediaType: responseMediaType(response.headers.get('content-type'))
+            }
+        } finally {
+            clearTimeout(timer)
+        }
+    }
 
     async listAgents(remote: GatewayRemoteConfig) {
         return this.request<GatewayAgentsResponse>(remote, '/v1/agents')
@@ -408,7 +468,7 @@ async function readJsonLimited(response: Response, maxBytes: number) {
     const declared = Number(response.headers.get('content-length'))
     if (Number.isFinite(declared) && declared > maxBytes) {
         void response.body?.cancel().catch(() => undefined)
-        throw new Error('Nexus Gateway response exceeded size limit')
+        throw new GatewayPayloadTooLargeError(maxBytes)
     }
     if (!response.body) return undefined
     const reader = response.body.getReader()
@@ -420,7 +480,7 @@ async function readJsonLimited(response: Response, maxBytes: number) {
             if (done) break
             total += value.byteLength
             if (total > maxBytes) {
-                throw new Error('Nexus Gateway response exceeded size limit')
+                throw new GatewayPayloadTooLargeError(maxBytes)
             }
             chunks.push(value)
         }
@@ -442,7 +502,7 @@ async function readBytesLimited(response: Response, maxBytes: number) {
     const declared = Number(response.headers.get('content-length'))
     if (Number.isFinite(declared) && declared > maxBytes) {
         void response.body?.cancel().catch(() => undefined)
-        throw new Error('Nexus Gateway response exceeded size limit')
+        throw new GatewayPayloadTooLargeError(maxBytes)
     }
     if (!response.body) return new Uint8Array()
     const reader = response.body.getReader()
@@ -454,7 +514,7 @@ async function readBytesLimited(response: Response, maxBytes: number) {
             if (done) break
             total += value.byteLength
             if (total > maxBytes) {
-                throw new Error('Nexus Gateway response exceeded size limit')
+                throw new GatewayPayloadTooLargeError(maxBytes)
             }
             chunks.push(value)
         }
@@ -469,6 +529,18 @@ async function readBytesLimited(response: Response, maxBytes: number) {
         offset += chunk.byteLength
     }
     return merged
+}
+
+/**
+ * Raised when a response body exceeds `maxResponseBytes`. Retrying cannot help:
+ * the artifact is simply larger than the configured ceiling, so callers should
+ * degrade it to a metadata-only entry instead of polling forever.
+ */
+export class GatewayPayloadTooLargeError extends Error {
+    constructor(readonly limitBytes?: number) {
+        super('Nexus Gateway response exceeded size limit')
+        this.name = 'GatewayPayloadTooLargeError'
+    }
 }
 
 export class GatewayHttpError extends Error {

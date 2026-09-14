@@ -1,5 +1,5 @@
 <template>
-    <div class="gateway-panel">
+    <div class="agents">
         <section class="gateway-strip" :class="status.gateway.state">
             <div class="gateway-identity">
                 <span class="state-light" />
@@ -14,146 +14,102 @@
             </div>
             <div class="gateway-meta">
                 <span>最近检查</span>
-                <strong>{{ checkedAtLabel }}</strong>
+                <strong>{{ formatDate(status.gateway.lastCheckedAt) }}</strong>
             </div>
             <div v-if="status.gateway.error" class="gateway-error">
                 {{ status.gateway.error }}
             </div>
         </section>
 
-        <section class="agent-section">
-            <div class="section-head">
-                <div>
-                    <h3>已发现的 Agent</h3>
-                    <p>默认自动生成工具；只有需要改名、停用或覆盖工作区时才保存覆盖项。</p>
-                </div>
+        <div class="section-head">
+            <h2>已发现的 Agent</h2>
+            <div class="section-actions">
+                <span class="count">{{ overriddenCount }} 个覆盖项</span>
                 <el-button size="small" plain @click="openNewOverride">
                     添加覆盖项
                 </el-button>
             </div>
+        </div>
 
-            <div v-if="!rows.length" class="empty-state">
-                <strong>{{ emptyTitle }}</strong>
-                <span>{{ emptyHint }}</span>
+        <div v-if="!rows.length" class="empty-state">
+            <strong>{{ emptyTitle }}</strong>
+            <span>{{ emptyHint }}</span>
+        </div>
+
+        <div v-else class="agent-table">
+            <div class="table-head">
+                <span>Agent</span>
+                <span>协议 / 驱动</span>
+                <span>工作区</span>
+                <span>ChatLuna 工具</span>
+                <span>状态</span>
+                <span>操作</span>
             </div>
-
-            <div v-else class="agent-table">
-                <div class="table-head">
-                    <span>Agent</span>
-                    <span>协议 / 驱动</span>
-                    <span>工作区</span>
-                    <span>ChatLuna 工具</span>
-                    <span>状态</span>
-                    <span>操作</span>
+            <article v-for="row in rows" :key="row.agentId" class="agent-row">
+                <div class="agent-copy" data-label="Agent">
+                    <strong>{{ row.name }}</strong>
+                    <code>{{ row.agentId }}</code>
+                    <small v-if="row.description">{{ row.description }}</small>
                 </div>
-                <article v-for="row in rows" :key="row.agentId" class="agent-row">
-                    <div class="agent-copy" data-label="Agent">
-                        <strong>{{ row.name }}</strong>
-                        <code>{{ row.agentId }}</code>
-                        <small v-if="row.description">{{ row.description }}</small>
-                    </div>
-                    <div data-label="协议 / 驱动">
-                        <span class="protocol-badge">{{ protocolLabel(row.protocol) }}</span>
-                        <small>{{ row.driver || '—' }}</small>
-                    </div>
-                    <code class="workspace" data-label="工作区">
-                        {{ row.workspace || 'Gateway 默认值' }}
-                    </code>
-                    <code class="tool-name" data-label="ChatLuna 工具">
-                        {{ row.toolName || '未注册' }}
-                    </code>
-                    <div class="state-cell" data-label="状态">
-                        <span class="state-dot" :class="row.state" />
-                        <span>{{ agentStateLabel(row) }}</span>
-                        <small v-if="row.responseMs !== undefined">
-                            {{ row.responseMs }} ms
-                        </small>
-                    </div>
-                    <div class="row-actions" data-label="操作">
-                        <el-button size="small" text @click="openEdit(row)">
-                            {{ row.overridden ? '编辑覆盖' : '设置覆盖' }}
-                        </el-button>
-                        <el-button
-                            v-if="row.overridden"
-                            size="small"
-                            text
-                            type="danger"
-                            @click="removeOverride(row)"
-                        >
-                            恢复自动
-                        </el-button>
-                    </div>
-                    <p v-if="row.error" class="row-error">{{ row.error }}</p>
-                </article>
-            </div>
-        </section>
+                <div data-label="协议 / 驱动">
+                    <span class="protocol-badge">{{ protocolLabel(row.protocol) }}</span>
+                    <small>{{ row.driver || '—' }}</small>
+                </div>
+                <code class="workspace" data-label="工作区">
+                    {{ row.workspace || 'Gateway 默认值' }}
+                </code>
+                <code class="tool-name" data-label="ChatLuna 工具">
+                    {{ row.toolName || '未注册' }}
+                </code>
+                <div class="state-cell" data-label="状态">
+                    <span class="state-dot" :class="row.state" />
+                    <span>{{ agentStateLabel(row) }}</span>
+                    <small v-if="row.responseMs !== undefined">
+                        {{ row.responseMs }} ms
+                    </small>
+                </div>
+                <div class="row-actions" data-label="操作">
+                    <el-button size="small" text @click="openEdit(row)">
+                        {{ row.overridden ? '编辑覆盖' : '设置覆盖' }}
+                    </el-button>
+                    <el-button
+                        v-if="row.overridden"
+                        size="small"
+                        text
+                        type="danger"
+                        @click="removeOverride(row)"
+                    >
+                        恢复自动
+                    </el-button>
+                </div>
+                <p v-if="row.error" class="row-error">{{ row.error }}</p>
+            </article>
+        </div>
 
-        <el-dialog
+        <agent-override-dialog
             v-model="dialogVisible"
-            title="Agent 工具覆盖"
-            width="min(92vw, 560px)"
-            destroy-on-close
-        >
-            <div class="form-grid">
-                <label class="setting wide">
-                    <span>Gateway Agent ID</span>
-                    <el-input
-                        v-model="form.agentId"
-                        :disabled="Boolean(editingAgentId)"
-                        placeholder="例如 hermes"
-                    />
-                </label>
-                <label class="setting">
-                    <span>工具显示名称</span>
-                    <el-input v-model="form.name" placeholder="留空则使用 Agent 名称" />
-                </label>
-                <label class="setting toggle">
-                    <span>发布为 ChatLuna 工具</span>
-                    <el-switch v-model="form.enabled" />
-                </label>
-                <label class="setting wide">
-                    <span>工作区覆盖</span>
-                    <el-input
-                        v-model="form.workspace"
-                        placeholder="留空使用 Gateway 中的默认工作区"
-                    />
-                </label>
-                <label class="setting wide">
-                    <span>工具描述覆盖</span>
-                    <el-input
-                        v-model="form.description"
-                        type="textarea"
-                        :rows="3"
-                        placeholder="留空使用 Gateway 返回的描述"
-                    />
-                </label>
-                <label class="setting wide">
-                    <span>技能标签</span>
-                    <el-input
-                        v-model="form.skills"
-                        placeholder="用逗号分隔，例如 coding, research"
-                    />
-                </label>
-            </div>
-            <template #footer>
-                <el-button @click="dialogVisible = false">取消</el-button>
-                <el-button type="primary" :loading="saving" @click="saveOverride">
-                    保存覆盖
-                </el-button>
-            </template>
-        </el-dialog>
+            :agent-id="editingAgentId"
+            :name="form.name"
+            :enabled="form.enabled"
+            :workspace="form.workspace"
+            :description="form.description"
+            :skills="form.skills"
+            :saving="saving"
+            @submit="saveOverride"
+        />
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import AgentOverrideDialog from './agent-override-dialog.vue'
+import { agentStateLabel, formatDate, protocolLabel } from '../shared'
 import type {
     DelegationAgentConfig,
     DelegationAgentStatus,
     GatewayAgentSummary,
-    GatewayProtocol,
     NexusConfig,
     NexusConsoleData,
     NexusStatus
@@ -164,6 +120,7 @@ const props = defineProps<{
     status: NexusStatus
     gatewayKeyConfigured: boolean
 }>()
+
 const emit = defineEmits<{
     (event: 'updated', data: NexusConsoleData): void
 }>()
@@ -177,8 +134,7 @@ interface AgentRow extends DelegationAgentStatus {
 const dialogVisible = ref(false)
 const saving = ref(false)
 const editingAgentId = ref('')
-const form = reactive({
-    agentId: '',
+const form = ref({
     name: '',
     enabled: true,
     workspace: '',
@@ -204,29 +160,26 @@ const rows = computed<AgentRow[]>(() => {
     })
 })
 
-const checkedAtLabel = computed(() => {
-    const value = props.status.gateway.lastCheckedAt
-    return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未检查'
-})
+const overriddenCount = computed(() => props.config.delegation.agents.length)
+
 const emptyTitle = computed(() =>
-    props.gatewayKeyConfigured ? 'Gateway 暂未返回 Agent' : '等待 Gateway API Key'
+    props.gatewayKeyConfigured ? 'Gateway 未返回 Agent' : '等待 Gateway API Key'
 )
 const emptyHint = computed(() =>
     props.gatewayKeyConfigured
-        ? '请先在 Gateway 管理页添加并启用 Agent，然后重新检查。'
-        : '在 Koishi 插件设置中填写 API Key 后会自动发现 Agent。'
+        ? '在 Gateway 管理页添加并启用 Agent 后重新检查。'
+        : '在 Koishi 插件设置中填写 API Key。'
 )
 
 function openNewOverride() {
     editingAgentId.value = ''
-    Object.assign(form, {
-        agentId: '',
+    form.value = {
         name: '',
         enabled: true,
         workspace: '',
         description: '',
         skills: ''
-    })
+    }
     dialogVisible.value = true
 }
 
@@ -235,40 +188,46 @@ function openEdit(row: AgentRow) {
         (agent) => agent.agentId === row.agentId
     )
     editingAgentId.value = row.agentId
-    Object.assign(form, {
-        agentId: row.agentId,
+    form.value = {
         name: override?.name || row.name,
         enabled: override?.enabled ?? row.enabled,
         workspace: override?.workspace || '',
         description: override?.description || '',
         skills: (override?.skills || []).join(', ')
-    })
+    }
     dialogVisible.value = true
 }
 
-async function saveOverride() {
-    const agentId = form.agentId.trim()
+async function saveOverride(input: {
+    agentId: string
+    name: string
+    enabled: boolean
+    workspace: string
+    description: string
+    skills: string
+}) {
+    const agentId = input.agentId.trim()
     if (!agentId) {
         ElMessage.warning('请填写 Gateway Agent ID')
         return
     }
-    const input: DelegationAgentConfig = {
+    const payload: DelegationAgentConfig = {
         agentId,
-        name: form.name.trim() || agentId,
-        enabled: form.enabled,
-        workspace: form.workspace.trim() || undefined,
-        description: form.description.trim() || undefined,
-        skills: form.skills
+        name: input.name.trim() || agentId,
+        enabled: input.enabled,
+        workspace: input.workspace.trim() || undefined,
+        description: input.description.trim() || undefined,
+        skills: input.skills
             .split(/[,，]/)
             .map((value) => value.trim())
             .filter(Boolean)
     }
     saving.value = true
     try {
-        const result = await send('agent-nexus/saveDelegationAgent', input)
+        const result = await send('agent-nexus/saveDelegationAgent', payload)
         emit('updated', result.data)
         dialogVisible.value = false
-        ElMessage.success('Agent 覆盖项已保存')
+        ElMessage.success('覆盖项已保存')
     } catch (error: any) {
         ElMessage.error(error?.message || String(error))
     } finally {
@@ -295,28 +254,14 @@ async function removeOverride(row: AgentRow) {
         ElMessage.error(error?.message || String(error))
     }
 }
-
-function protocolLabel(protocol?: GatewayProtocol) {
-    if (protocol === 'a2a') return 'A2A'
-    if (protocol === 'acp') return 'ACP'
-    return '未知'
-}
-
-function agentStateLabel(row: AgentRow) {
-    if (!row.enabled) return '已停用'
-    if (row.state === 'ready') return '可用'
-    if (row.state === 'checking') return '检查中'
-    if (row.state === 'error') return '异常'
-    return '尚未检查'
-}
 </script>
 
 <style scoped>
-.gateway-panel {
+.agents {
     display: flex;
     min-width: 0;
     flex-direction: column;
-    gap: 24px;
+    gap: 20px;
 }
 
 .gateway-strip {
@@ -418,31 +363,31 @@ function agentStateLabel(row: AgentRow) {
     border-top: 1px solid color-mix(in srgb, #d65757, transparent 72%);
     color: #d65757;
     font-size: 12px;
+    overflow-wrap: anywhere;
 }
 
 .section-head {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
     gap: 18px;
-    margin-bottom: 15px;
 }
 
-.section-head h3,
-.section-head p {
+.section-head h2 {
     margin: 0;
-}
-
-.section-head h3 {
     color: var(--k-text-dark);
     font-size: 15px;
 }
 
-.section-head p {
-    margin-top: 5px;
+.section-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.count {
     color: var(--k-text-light);
     font-size: 12px;
-    line-height: 1.5;
 }
 
 .empty-state {
@@ -568,33 +513,7 @@ function agentStateLabel(row: AgentRow) {
     border-top: 1px dashed color-mix(in srgb, #d65757, transparent 68%);
     color: #d65757;
     font-size: 11px;
-}
-
-.form-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-}
-
-.setting {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 7px;
-}
-
-.setting > span {
-    color: var(--k-text-light);
-    font-size: 12px;
-    font-weight: 600;
-}
-
-.setting.wide {
-    grid-column: 1 / -1;
-}
-
-.setting.toggle {
-    justify-content: space-between;
+    overflow-wrap: anywhere;
 }
 
 @media (max-width: 1040px) {
@@ -623,18 +542,14 @@ function agentStateLabel(row: AgentRow) {
 
 @media (max-width: 680px) {
     .gateway-strip,
-    .agent-row,
-    .form-grid {
+    .agent-row {
         grid-template-columns: 1fr;
     }
 
     .section-head {
         align-items: stretch;
         flex-direction: column;
-    }
-
-    .setting.wide {
-        grid-column: auto;
+        gap: 10px;
     }
 }
 </style>

@@ -1,4 +1,4 @@
-import { createHash } from 'crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { Context, Service } from 'koishi'
 import path from 'path'
 import { Readable } from 'stream'
@@ -36,10 +36,12 @@ import {
 import { sendDelegationArtifacts } from './delegation/media'
 import { NexusGatewayProvider } from './providers'
 import { NexusGatewayClient } from './gateway'
+import { ArtifactCache, type CachedArtifact } from './artifacts/cache'
 
 export class AgentNexusService extends Service {
     static readonly inject = ['chatluna', 'chatluna_storage']
 
+    private readonly artifactTicketSecret = randomBytes(32)
     private readonly gatewayRemote: GatewayRemoteConfig
     private readonly gatewayClient: NexusGatewayClient
     private readonly gatewayProvider: NexusGatewayProvider
@@ -48,9 +50,12 @@ export class AgentNexusService extends Service {
     private readonly delegationProviders: DelegationProviderRegistry
     private toolDispose: (() => void)[] = []
     private remoteRefreshTimer?: NodeJS.Timeout
+    private artifactPruneTimer?: NodeJS.Timeout
     private running = false
     private nexusConfig: NexusConfig
     private readonly dataPath: string
+    private readonly artifactCache: ArtifactCache
+    private readonly artifactCacheRelative: string
 
     constructor(
         ctx: Context,
@@ -60,6 +65,18 @@ export class AgentNexusService extends Service {
         this.gatewayRemote = createGatewayConnection(pluginConfig)
         this.gatewayClient = new NexusGatewayClient(pluginConfig.maxResponseBytes)
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
+        this.artifactCache = new ArtifactCache({
+            root: path.join(this.dataPath, 'artifacts'),
+            enabled: pluginConfig.artifactCache?.enabled !== false,
+            ttlMs: Math.max(1, pluginConfig.artifactCache?.ttlHours || 72) * 3600_000,
+            maxTotalBytes:
+                pluginConfig.artifactCache?.maxTotalBytes || 2 * 1024 * 1024 * 1024
+        })
+        // Shown in the Console as a path relative to the Koishi base directory:
+        // portable across Windows/Linux/container and no absolute host path.
+        this.artifactCacheRelative =
+            path.relative(ctx.baseDir, this.artifactCache.root).split(path.sep).join('/') ||
+            'data/agent-nexus/artifacts'
         this.nexusConfig = createDefaultNexusConfig()
 
         this.gatewayProvider = new NexusGatewayProvider({
@@ -125,6 +142,7 @@ export class AgentNexusService extends Service {
             })
         }, 60_000)
         this.remoteRefreshTimer.unref?.()
+        await this.startArtifactCache()
     }
 
     async stop() {
@@ -134,6 +152,45 @@ export class AgentNexusService extends Service {
         this.toolDispose = []
         if (this.remoteRefreshTimer) clearInterval(this.remoteRefreshTimer)
         this.remoteRefreshTimer = undefined
+        if (this.artifactPruneTimer) clearInterval(this.artifactPruneTimer)
+        this.artifactPruneTimer = undefined
+    }
+
+    private async startArtifactCache() {
+        if (!this.artifactCache.enabled) return
+        try {
+            await this.artifactCache.init()
+            await this.pruneArtifactCache('startup')
+        } catch (error) {
+            this.ctx.logger.warn(
+                `[agent-nexus] artifact cache unavailable at ${this.artifactCache.root}: ${getErrorMessage(error)}`
+            )
+        }
+        this.artifactPruneTimer = setInterval(() => {
+            void this.pruneArtifactCache('scheduled')
+        }, 3600_000)
+        this.artifactPruneTimer.unref?.()
+    }
+
+    private async pruneArtifactCache(reason: string) {
+        if (!this.artifactCache.enabled) return
+        try {
+            const stats = await this.artifactCache.prune()
+            if (stats.removed) {
+                this.ctx.logger.info(
+                    `[agent-nexus] artifact cache pruned (${reason}): removed ${stats.removed} file(s), freed ${stats.freedBytes} bytes, ${stats.remainingEntries} kept (${stats.remainingBytes} bytes)`
+                )
+            }
+        } catch (error) {
+            this.ctx.logger.warn(
+                `[agent-nexus] artifact cache prune failed: ${getErrorMessage(error)}`
+            )
+        }
+    }
+
+    /** Drops every cached artifact. Exposed for the Console maintenance action. */
+    async clearArtifactCache() {
+        return this.artifactCache.clear()
     }
 
     get commandAuthority() {
@@ -162,6 +219,137 @@ export class AgentNexusService extends Service {
 
     async clearTerminalDelegationJobs() {
         return this.delegations.clearTerminalJobs()
+    }
+
+    /**
+     * Mints a short-lived ticket for one artifact. The console hands the returned
+     * URL to the browser, which fetches it from this plugin instead of the
+     * Gateway, so the API key never leaves the server.
+     */
+    async createArtifactTicket(jobId: string, artifactId: string) {
+        const { artifact, gatewayRunId } =
+            await this.delegations.artifactDownloadTargetForConsole(
+                jobId,
+                artifactId
+            )
+        if (!artifact.bytesBase64 && !gatewayRunId) {
+            throw new Error('该产物没有可下载的内容。')
+        }
+        const expiresAt = Date.now() + ARTIFACT_TICKET_TTL_MS
+        return {
+            url: `/agent-nexus/artifacts/${encodeURIComponent(jobId)}/${encodeURIComponent(artifactId)}?ticket=${this.signArtifactTicket(jobId, artifactId, expiresAt)}`,
+            name: artifact.filename || artifact.name || 'artifact',
+            mediaType: artifact.mediaType,
+            expiresAt
+        }
+    }
+
+    /**
+     * Resolves one artifact for a ticket that {@link createArtifactTicket}
+     * issued. The local cache is consulted first, so a repeat preview or a
+     * Range request never goes back to the Gateway.
+     */
+    async readDelegationArtifact(
+        jobId: string,
+        artifactId: string,
+        ticket: string
+    ): Promise<DelegationArtifactContent> {
+        if (!this.verifyArtifactTicket(jobId, artifactId, ticket)) {
+            throw new Error('下载链接已失效，请重新发起下载。')
+        }
+        const cached = await this.artifactCache
+            .lookup(jobId, artifactId)
+            .catch(() => undefined)
+        if (cached) {
+            return {
+                kind: 'file',
+                path: cached.path,
+                size: cached.size,
+                name: cached.name,
+                mediaType: cached.mediaType
+            }
+        }
+        const { artifact, gatewayRunId } =
+            await this.delegations.artifactDownloadTargetForConsole(
+                jobId,
+                artifactId
+            )
+        const name = artifact.filename || artifact.name || 'artifact'
+
+        // Bytes that already ship inline with the session view.
+        if (artifact.bytesBase64) {
+            const bytes = new Uint8Array(
+                Buffer.from(artifact.bytesBase64, 'base64')
+            )
+            const stored = await this.artifactCache
+                .store(jobId, artifactId, bytes, {
+                    name,
+                    mediaType: artifact.mediaType
+                })
+                .catch(() => undefined)
+            return stored
+                ? cachedFileContent(stored)
+                : { kind: 'bytes', bytes, name, mediaType: artifact.mediaType }
+        }
+
+        // Stream straight into the cache. Nothing is buffered, so the ceiling
+        // here is the disk budget rather than maxResponseBytes — this is what
+        // keeps artifacts larger than a single response downloadable.
+        if (this.artifactCache.enabled && gatewayRunId) {
+            const stream = await this.gatewayClient.streamArtifact(
+                this.gatewayRemote,
+                gatewayRunId,
+                artifactId
+            )
+            const stored = await this.artifactCache.storeStream(
+                jobId,
+                artifactId,
+                Readable.fromWeb(stream.body as never),
+                {
+                    name: stream.filename || name,
+                    mediaType: artifact.mediaType || stream.mediaType
+                },
+                this.artifactCache.maxTotalBytes
+            )
+            void this.pruneArtifactCache('stream')
+            return cachedFileContent(stored)
+        }
+
+        const download = await this.gatewayClient.downloadArtifact(
+            this.gatewayRemote,
+            gatewayRunId!,
+            artifactId
+        )
+        return {
+            kind: 'bytes',
+            bytes: download.bytes,
+            name,
+            mediaType: artifact.mediaType
+        }
+    }
+
+    private signArtifactTicket(jobId: string, artifactId: string, expiresAt: number) {
+        const signature = createHmac('sha256', this.artifactTicketSecret)
+            .update(`${jobId}\n${artifactId}\n${expiresAt}`)
+            .digest('base64url')
+        return `${expiresAt}.${signature}`
+    }
+
+    private verifyArtifactTicket(
+        jobId: string,
+        artifactId: string,
+        ticket: string
+    ) {
+        const [expires, signature] = String(ticket || '').split('.')
+        const expiresAt = Number(expires)
+        if (!Number.isSafeInteger(expiresAt) || expiresAt < Date.now()) return false
+        if (!signature) return false
+        // Compare the whole ticket, not just the signature segment: signArtifactTicket
+        // returns `${expiresAt}.${signature}`, so comparing against `signature` alone
+        // never matches and every download would be rejected.
+        const left = Buffer.from(String(ticket || ''))
+        const right = Buffer.from(this.signArtifactTicket(jobId, artifactId, expiresAt))
+        return left.length === right.length && timingSafeEqual(left, right)
     }
 
     async collectInputAttachments(parentConfig: any) {
@@ -297,6 +485,21 @@ export class AgentNexusService extends Service {
         return {
             config: redactNexusConfig(this.nexusConfig),
             status: this.getStatus(),
+            settings: {
+                commandAuthority: this.pluginConfig.commandAuthority,
+                maxResponseBytes: this.pluginConfig.maxResponseBytes,
+                gatewayKeyLength: this.gatewayRemote.authToken?.length || 0,
+                artifactCache: {
+                    enabled: this.artifactCache.enabled,
+                    directory: this.artifactCacheRelative,
+                    ttlHours: Math.round(
+                        (this.pluginConfig.artifactCache?.ttlHours || 72) * 10
+                    ) / 10,
+                    maxTotalBytes:
+                        this.pluginConfig.artifactCache?.maxTotalBytes ||
+                        2 * 1024 * 1024 * 1024
+                }
+            },
             gatewayKeyConfigured: this.gatewayRemote.enabled
         }
     }
@@ -368,6 +571,17 @@ export class AgentNexusService extends Service {
                     }
                 }
                 const filename = delegationArtifactFilename(artifact, sha256)
+                // Cache under the Gateway artifact id, which is the only key
+                // the Console can request later. Artifacts that lack one are
+                // still delivered to ChatLuna but stay out of the cache.
+                if (artifact.artifactId) {
+                    await this.artifactCache
+                        .store(job.id, artifact.artifactId, bytes, {
+                            name: artifact.filename || artifact.name || filename,
+                            mediaType: artifact.mediaType
+                        })
+                        .catch(() => undefined)
+                }
                 const file =
                     await this.ctx.chatluna_storage.createTempFileFromStream(
                         Readable.from([bytes]),
@@ -465,6 +679,8 @@ export class AgentNexusService extends Service {
     }
 }
 
+/** How long a console artifact download link stays valid. */
+const ARTIFACT_TICKET_TTL_MS = 5 * 60 * 1000
 const MAX_DELEGATION_ARTIFACT_BYTES = 32 * 1024 * 1024
 const MAX_DELEGATION_INPUT_ATTACHMENT_BYTES = 16 * 1024 * 1024
 const MAX_DELEGATION_INPUT_BYTES = 32 * 1024 * 1024
@@ -480,6 +696,35 @@ interface InputAttachment {
     mediaType?: string
     bytes: Uint8Array
 }
+
+function cachedFileContent(cached: CachedArtifact): DelegationArtifactContent {
+    return {
+        kind: 'file',
+        path: cached.path,
+        size: cached.size,
+        name: cached.name,
+        mediaType: cached.mediaType
+    }
+}
+
+/**
+ * Resolved artifact payload. `file` points at the local cache and is streamed
+ * by the route; `bytes` is the in-memory fallback used when caching is off.
+ */
+export type DelegationArtifactContent =
+    | {
+          kind: 'file'
+          path: string
+          size: number
+          name: string
+          mediaType?: string
+      }
+    | {
+          kind: 'bytes'
+          bytes: Uint8Array
+          name: string
+          mediaType?: string
+      }
 
 function decodeArtifactBase64(value: string) {
     const normalized = value.replace(/\s/g, '')

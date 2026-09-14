@@ -163,6 +163,8 @@ export interface DelegationJobView {
         url?: string
         filename?: string
         mediaType?: string
+        /** Set when the bytes could not be fetched; explains a metadata-only row. */
+        downloadError?: string
     }>
     queuedMessageCount: number
     conversationBound: boolean

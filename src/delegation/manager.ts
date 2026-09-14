@@ -234,7 +234,11 @@ export class DelegationManager {
                     'Artifact',
                 url: artifact.url,
                 filename: artifact.filename,
-                mediaType: artifact.mediaType
+                mediaType: artifact.mediaType,
+                downloadError:
+                    typeof artifact.metadata?.downloadError === 'string'
+                        ? artifact.metadata.downloadError
+                        : undefined
             })),
             queuedMessageCount: job.queuedMessages?.length || 0,
             conversationBound: Boolean(job.parentConversationId && job.routing),
@@ -260,6 +264,19 @@ export class DelegationManager {
             throw new Error('Only running or interactive AgentNexus jobs can be interrupted.')
         }
         return this.stopJob(id)
+    }
+
+    async artifactDownloadTargetForConsole(jobId: string, artifactId: string) {
+        const job = await this.store.get(String(jobId || '').trim())
+        if (!job) throw new Error('任务不存在或已被清理。')
+        const artifact = job.artifacts.find(
+            (item) => item.artifactId === artifactId
+        )
+        if (!artifact) throw new Error('该任务中没有这个产物。')
+        return {
+            artifact,
+            gatewayRunId: stateString(job.providerState.gatewayRunId)
+        }
     }
 
     async clearTerminalJobs() {

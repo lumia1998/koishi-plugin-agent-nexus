@@ -1,10 +1,23 @@
 <template>
-    <section class="tasks-panel">
+    <section class="tasks">
         <div class="panel-head">
-            <div>
-                <span class="section-index">TASK RUNTIME</span>
-                <h2>委派任务进程</h2>
-                <p>实时查看 Koishi Job、Gateway Run 与底层 Session 的对应关系。</p>
+            <div class="task-metrics">
+                <article>
+                    <span>当前运行</span>
+                    <strong>{{ counts.active }}</strong>
+                </article>
+                <article>
+                    <span>等待交互</span>
+                    <strong>{{ counts.waiting }}</strong>
+                </article>
+                <article>
+                    <span>已完成</span>
+                    <strong>{{ counts.completed }}</strong>
+                </article>
+                <article>
+                    <span>失败 / 取消</span>
+                    <strong>{{ counts.failed }}</strong>
+                </article>
             </div>
             <div class="panel-actions">
                 <el-button
@@ -17,29 +30,10 @@
                 >
                     清空已结束记录
                 </el-button>
-                <el-button size="small" :loading="loading" @click="load(false)">
+                <el-button size="small" :loading="loading" @click="emit('refresh')">
                     刷新任务
                 </el-button>
             </div>
-        </div>
-
-        <div class="task-metrics">
-            <article>
-                <span>当前运行</span>
-                <strong>{{ counts.active }}</strong>
-            </article>
-            <article>
-                <span>等待交互</span>
-                <strong>{{ counts.waiting }}</strong>
-            </article>
-            <article>
-                <span>已完成</span>
-                <strong>{{ counts.completed }}</strong>
-            </article>
-            <article>
-                <span>失败 / 取消</span>
-                <strong>{{ counts.failed }}</strong>
-            </article>
         </div>
 
         <div class="filters">
@@ -57,7 +51,13 @@
             </el-select>
         </div>
 
-        <div v-loading="loading && !loaded" class="task-list">
+        <div v-if="error && !loaded" class="load-error">
+            <strong>任务列表读取失败</strong>
+            <span>{{ error }}</span>
+            <el-button size="small" @click="emit('refresh')">重试</el-button>
+        </div>
+
+        <div v-else v-loading="loading && !loaded" class="task-list">
             <button
                 v-for="job in filteredJobs"
                 :key="job.id"
@@ -65,11 +65,11 @@
                 type="button"
                 @click="openDetail(job)"
             >
-                <div class="task-main">
-                    <div class="title-line">
+                <span class="task-main">
+                    <span class="title-line">
                         <strong>{{ job.agentName }}</strong>
                         <el-tag size="small" effect="plain" :type="stateType(job.state)">
-                            {{ stateLabel(job.state) }}
+                            {{ STATE_LABEL[job.state] }}
                         </el-tag>
                         <el-tag size="small" effect="plain">
                             {{ job.background ? '后台' : '前台' }}
@@ -82,27 +82,29 @@
                         >
                             回传重试中
                         </el-tag>
-                    </div>
-                    <p class="prompt">{{ job.prompt || '（无任务内容）' }}</p>
-                    <p v-if="job.pendingRequest" class="pending">
+                    </span>
+                    <span class="prompt">{{ job.prompt || '（无任务内容）' }}</span>
+                    <span v-if="job.pendingRequest" class="pending">
                         {{ job.pendingRequest.kind === 'permission' ? '等待授权：' : '等待输入：' }}
                         {{ job.pendingRequest.prompt }}
-                    </p>
-                    <p v-else-if="job.pollError" class="error-line">{{ job.pollError }}</p>
-                    <p v-else-if="job.output" class="progress">{{ outputPreview(job.output) }}</p>
-                    <div class="id-line">
+                    </span>
+                    <span v-else-if="job.pollError" class="error-line">{{ job.pollError }}</span>
+                    <span v-else-if="job.output" class="progress">
+                        {{ singleLine(job.output, 180, true) }}
+                    </span>
+                    <span class="id-line">
                         <code>JOB {{ shortId(job.id) }}</code>
                         <code v-if="job.gatewayRunId">RUN {{ shortId(job.gatewayRunId) }}</code>
                         <code v-if="job.gatewaySessionId">
                             SESSION {{ shortId(job.gatewaySessionId) }}
                         </code>
-                    </div>
-                </div>
-                <div class="task-meta">
-                    <span>{{ elapsed(job) }}</span>
+                    </span>
+                </span>
+                <span class="task-meta">
+                    <span>{{ elapsed(job, now) }}</span>
                     <span>{{ formatDate(job.updatedAt) }}</span>
-                    <span>{{ deliveryLabel(job.deliveryState) }}</span>
-                </div>
+                    <span>{{ DELIVERY_LABEL[job.deliveryState] }}</span>
+                </span>
             </button>
 
             <div v-if="loaded && !filteredJobs.length" class="empty">
@@ -119,11 +121,11 @@
             <div v-if="detail" class="detail">
                 <div class="detail-head">
                     <el-tag size="small" effect="plain" :type="stateType(detail.state)">
-                        {{ stateLabel(detail.state) }}
+                        {{ STATE_LABEL[detail.state] }}
                     </el-tag>
                     <span>{{ detail.background ? '后台任务' : '前台任务' }}</span>
                     <span>{{ detail.protocol?.toUpperCase() || 'Gateway' }}</span>
-                    <span>{{ elapsed(detail) }}</span>
+                    <span>{{ elapsed(detail, now) }}</span>
                 </div>
 
                 <div class="id-grid">
@@ -176,7 +178,12 @@
                     <h3>产物</h3>
                     <ul class="artifacts">
                         <li v-for="artifact in detail.artifacts" :key="artifact.id || artifact.name">
-                            <a v-if="artifact.url" :href="artifact.url" target="_blank">
+                            <a
+                                v-if="artifact.url"
+                                :href="artifact.url"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >
                                 {{ artifact.name }}
                             </a>
                             <span v-else>{{ artifact.name }}</span>
@@ -186,7 +193,7 @@
                 </section>
 
                 <div class="delivery-box">
-                    <strong>主动回传：{{ deliveryLabel(detail.deliveryState) }}</strong>
+                    <strong>主动回传：{{ DELIVERY_LABEL[detail.deliveryState] }}</strong>
                     <span v-if="detail.notificationAttempts">
                         已重试 {{ detail.notificationAttempts }} 次
                     </span>
@@ -199,7 +206,6 @@
                 </div>
 
                 <div v-if="isActive(detail.state)" class="detail-actions">
-                    <span>会向 Gateway 发送取消请求，并停止本地的后台监听。</span>
                     <el-button
                         size="small"
                         type="danger"
@@ -215,46 +221,65 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { send } from '@koishijs/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type {
-    DelegationJobView,
-    DelegationState
-} from '../../src/delegation/types'
+import {
+    DELIVERY_LABEL,
+    STATE_LABEL,
+    elapsed,
+    formatDate,
+    isActive,
+    isWaiting,
+    shortId,
+    singleLine,
+    stateType
+} from '../shared'
+import type { DelegationJobView, DelegationState } from '../../src/delegation/types'
 
-const jobs = ref<DelegationJobView[]>([])
-const loading = ref(false)
-const loaded = ref(false)
+const props = defineProps<{
+    jobs: DelegationJobView[]
+    loading: boolean
+    loaded: boolean
+    error?: string
+}>()
+
+const emit = defineEmits<{
+    (event: 'refresh'): void
+    (event: 'cleared'): void
+}>()
+
 const search = ref('')
 const stateFilter = ref('all')
 const detailVisible = ref(false)
-const detail = ref<DelegationJobView>()
+const detailId = ref<string>()
 const clearing = ref(false)
 const stoppingJobId = ref<string>()
 const now = ref(Date.now())
-let refreshTimer: ReturnType<typeof setInterval> | undefined
-let requestGeneration = 0
+let clockTimer: ReturnType<typeof setInterval> | undefined
+
+const detail = computed(() =>
+    props.jobs.find((job) => job.id === detailId.value)
+)
 
 const counts = computed(() => ({
-    active: jobs.value.filter((job) => job.state === 'running').length,
-    waiting: jobs.value.filter((job) => isWaiting(job.state)).length,
-    completed: jobs.value.filter((job) => job.state === 'completed').length,
-    failed: jobs.value.filter((job) =>
-        job.state === 'failed' || job.state === 'canceled'
+    active: props.jobs.filter((job) => job.state === 'running').length,
+    waiting: props.jobs.filter((job) => isWaiting(job.state)).length,
+    completed: props.jobs.filter((job) => job.state === 'completed').length,
+    failed: props.jobs.filter(
+        (job) => job.state === 'failed' || job.state === 'canceled'
     ).length
 }))
 
 const clearableCount = computed(
     () =>
-        jobs.value.filter(
-            (job) => !isActive(job.state) && !job.queuedMessageCount
-        ).length
+        props.jobs.filter((job) => !isActive(job.state) && !job.queuedMessageCount)
+            .length
 )
 
 const filteredJobs = computed(() => {
     const query = search.value.trim().toLowerCase()
-    return jobs.value.filter((job) => {
+    return props.jobs.filter((job) => {
         if (!matchesState(job.state, stateFilter.value)) return false
         if (!query) return true
         return [
@@ -270,35 +295,16 @@ const filteredJobs = computed(() => {
     })
 })
 
-async function load(silent = true) {
-    const generation = ++requestGeneration
-    if (!silent) loading.value = true
-    try {
-        const result = await send('agent-nexus/listDelegationJobs', 100)
-        if (generation !== requestGeneration) return
-        jobs.value = result
-        loaded.value = true
-        if (detail.value) {
-            detail.value = result.find((job) => job.id === detail.value?.id) || detail.value
-        }
-    } catch (error: any) {
-        if (!silent || !loaded.value) ElMessage.error(error?.message || String(error))
-    } finally {
-        if (generation === requestGeneration) loading.value = false
-    }
-}
-
 function openDetail(job: DelegationJobView) {
-    detail.value = job
+    detailId.value = job.id
     detailVisible.value = true
 }
 
 async function clearFinishedJobs() {
-    const count = clearableCount.value
-    if (!count) return
+    if (!clearableCount.value) return
     try {
         await ElMessageBox.confirm(
-            '将清除所有已结束任务记录，并停止这些记录尚未完成的回传重试。运行中和等待授权的任务不会被影响。',
+            '将清除所有已结束的任务记录，运行中和等待授权的任务不受影响。',
             '清空已结束记录',
             {
                 type: 'warning',
@@ -312,15 +318,9 @@ async function clearFinishedJobs() {
     clearing.value = true
     try {
         const removed = await send('agent-nexus/clearTerminalDelegationJobs')
-        if (
-            detail.value &&
-            !isActive(detail.value.state) &&
-            !detail.value.queuedMessageCount
-        ) {
-            detailVisible.value = false
-            detail.value = undefined
-        }
-        await load(true)
+        detailVisible.value = false
+        detailId.value = undefined
+        emit('cleared')
         ElMessage.success(`已清除 ${removed} 条任务记录。`)
     } catch (error: any) {
         ElMessage.error(error?.message || String(error))
@@ -332,7 +332,7 @@ async function clearFinishedJobs() {
 async function cancelJob(job: DelegationJobView) {
     try {
         await ElMessageBox.confirm(
-            `确定要中断 ${job.agentName} 的这个任务吗？远端 Agent 会收到取消请求。`,
+            `确定要中断 ${job.agentName} 的这个任务吗？`,
             '中断任务',
             {
                 type: 'warning',
@@ -346,7 +346,7 @@ async function cancelJob(job: DelegationJobView) {
     stoppingJobId.value = job.id
     try {
         await send('agent-nexus/cancelDelegationJob', job.id)
-        await load(true)
+        emit('refresh')
         ElMessage.success('已向 Gateway 发送中断请求。')
     } catch (error: any) {
         ElMessage.error(error?.message || String(error))
@@ -362,82 +362,33 @@ function matchesState(state: DelegationState, filter: string) {
     return state === filter
 }
 
-function isWaiting(state: DelegationState) {
-    return state === 'permission_required' || state === 'input_required'
-}
-
-function isActive(state: DelegationState) {
-    return state === 'running' || isWaiting(state)
-}
-
-function stateLabel(state: DelegationState) {
-    return {
-        running: '执行中',
-        input_required: '等待输入',
-        permission_required: '等待授权',
-        completed: '已完成',
-        failed: '失败',
-        canceled: '已取消'
-    }[state]
-}
-
-function stateType(state: DelegationState) {
-    if (state === 'completed') return 'success'
-    if (state === 'failed' || state === 'canceled') return 'danger'
-    if (isWaiting(state)) return 'warning'
-    return 'primary'
-}
-
-function deliveryLabel(state: DelegationJobView['deliveryState']) {
-    return {
-        not_required: '无需主动回传',
-        waiting: '等待主动回传',
-        delivered: '已回传 ChatLuna',
-        retrying: '主动回传重试中'
-    }[state]
-}
-
-function outputPreview(value: string) {
-    const normalized = value.replace(/\s+/g, ' ').trim()
-    return normalized.length > 180 ? `${normalized.slice(-180)}…` : normalized
-}
-
-function shortId(value: string) {
-    return value.length > 12 ? value.slice(0, 8) : value
-}
-
-function formatDate(value?: number) {
-    return value ? new Date(value).toLocaleString() : '—'
-}
-
-function elapsed(job: DelegationJobView) {
-    const end = job.endedAt || now.value
-    const seconds = Math.max(0, Math.floor((end - job.startedAt) / 1000))
-    if (seconds < 60) return `${seconds} 秒`
-    const minutes = Math.floor(seconds / 60)
-    if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
-    return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
-}
+watch(
+    () => props.jobs,
+    (jobs) => {
+        if (detailId.value && !jobs.some((job) => job.id === detailId.value)) {
+            detailVisible.value = false
+            detailId.value = undefined
+        }
+    }
+)
 
 onMounted(() => {
-    void load(false)
-    refreshTimer = setInterval(() => {
+    clockTimer = setInterval(() => {
         now.value = Date.now()
-        void load(true)
-    }, 3000)
+    }, 1000)
 })
 
 onBeforeUnmount(() => {
-    if (refreshTimer) clearInterval(refreshTimer)
+    if (clockTimer) clearInterval(clockTimer)
 })
 </script>
 
 <style scoped>
-.tasks-panel {
+.tasks {
+    display: flex;
     min-width: 0;
-    padding: 21px;
-    border: 1px solid var(--nexus-line);
-    background: color-mix(in srgb, var(--k-side-bg), var(--k-page-bg) 38%);
+    flex-direction: column;
+    gap: 12px;
 }
 
 .panel-head,
@@ -454,42 +405,16 @@ onBeforeUnmount(() => {
 .panel-head {
     justify-content: space-between;
     gap: 20px;
-    margin-bottom: 18px;
 }
 
 .panel-actions {
     gap: 8px;
 }
 
-.section-index {
-    color: var(--k-color-primary);
-    font-family: 'Cascadia Mono', monospace;
-    font-size: 10px;
-    letter-spacing: 0.1em;
-}
-
-h2,
-h3,
-.panel-head p {
-    margin: 0;
-}
-
-h2 {
-    margin-top: 5px;
-    color: var(--nexus-ink);
-    font-size: 19px;
-}
-
-.panel-head p {
-    margin-top: 5px;
-    color: var(--k-text-light);
-    font-size: 12px;
-}
-
 .task-metrics {
     display: grid;
+    flex: 1;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    margin-bottom: 16px;
     border: 1px solid var(--nexus-line);
 }
 
@@ -516,7 +441,6 @@ h2 {
 
 .filters {
     gap: 10px;
-    margin-bottom: 12px;
 }
 
 .filters :deep(.el-input) {
@@ -525,6 +449,30 @@ h2 {
 
 .filters :deep(.el-select) {
     width: 160px;
+}
+
+.load-error {
+    display: flex;
+    min-height: 180px;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+    border: 1px solid color-mix(in srgb, #d65757, transparent 60%);
+    color: var(--k-text-light);
+    font-size: 12px;
+    text-align: center;
+    padding: 20px;
+}
+
+.load-error strong {
+    color: #c84f4f;
+    font-size: 13px;
+}
+
+.load-error span {
+    max-width: 640px;
+    overflow-wrap: anywhere;
 }
 
 .task-list {
@@ -543,6 +491,7 @@ h2 {
     border-bottom: 1px solid var(--nexus-line);
     background: transparent;
     color: inherit;
+    font-family: inherit;
     text-align: left;
     cursor: pointer;
 }
@@ -555,11 +504,8 @@ h2 {
     background: color-mix(in srgb, var(--k-color-primary), transparent 95%);
 }
 
-.task-main,
-.prompt,
-.progress,
-.pending,
-.error-line {
+.task-main {
+    display: block;
     min-width: 0;
 }
 
@@ -673,7 +619,7 @@ h2 {
 }
 
 .detail-section h3 {
-    margin-bottom: 7px;
+    margin: 0 0 7px;
     color: var(--nexus-ink);
     font-size: 12px;
 }

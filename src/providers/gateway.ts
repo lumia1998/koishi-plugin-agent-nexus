@@ -6,6 +6,7 @@ import type {
     NexusConfig
 } from '../types'
 import type { GatewayClient } from '../gateway/client'
+import { GatewayPayloadTooLargeError } from '../gateway/client'
 import type { GatewaySessionView } from '../gateway/types'
 import type {
     DelegationJob,
@@ -24,6 +25,68 @@ export interface NexusGatewayProviderOptions {
 interface HydratedGatewaySession {
     session: GatewaySessionView
     artifactRetryAfterMs?: number
+}
+
+/**
+ * Total download attempts allowed for one artifact, counting the first try.
+ * Without a ceiling the job stays `running` until the 24h active TTL expires,
+ * which also blocks a foreground tool call for the whole window.
+ */
+const MAX_ARTIFACT_DOWNLOAD_ATTEMPTS = 3
+
+const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+interface ArtifactHydrationPolicy {
+    /** When false a failed download degrades the artifact instead of retrying. */
+    allowRetry: boolean
+    /** Response ceiling; artifacts already known to exceed it are never fetched. */
+    maxBytes: number
+}
+
+function artifactDownloadAttempts(providerState: Record<string, unknown> | undefined) {
+    const value = Number(providerState?.gatewayArtifactDownloadAttempts)
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+}
+
+/**
+ * A failure is worth retrying only when it can plausibly clear on its own.
+ * "Too large" and other 4xx rejections describe the artifact itself, so
+ * retrying them just delays the turn's terminal state.
+ */
+function isRetryableArtifactError(error: unknown) {
+    if (error instanceof GatewayPayloadTooLargeError) return false
+    const status = statusOf(error)
+    if (status === undefined) return true
+    if (status === 429) return true
+    return status >= 500
+}
+
+function artifactFailureReason(error: unknown) {
+    if (error instanceof GatewayPayloadTooLargeError) {
+        // Same situation as the size pre-check: the bytes are too large to
+        // ride along with the chat message, but the Console streams them
+        // from the Gateway, so point the user there.
+        const limit = error.limitBytes ? ` ${error.limitBytes} 字节` : ''
+        return `产物超过随消息回传的上限${limit}；可在控制台产物页下载`
+    }
+    const status = statusOf(error)
+    return status ? `Gateway 返回 ${status}` : errorMessage(error)
+}
+
+/**
+ * Keeps the artifact's metadata but marks why its bytes are unavailable, so
+ * the Console can explain the entry instead of showing a bare "仅记录".
+ */
+function degradeArtifact(
+    artifact: GatewaySessionView['artifacts'][number],
+    unsafeUrl: boolean,
+    reason: string
+) {
+    return {
+        ...artifact,
+        ...(unsafeUrl ? { url: undefined } : {}),
+        metadata: { ...artifact.metadata, downloadError: reason }
+    }
 }
 
 export class NexusGatewayProvider implements DelegationProvider {
@@ -322,14 +385,24 @@ export class NexusGatewayProvider implements DelegationProvider {
         session: GatewaySessionView,
         job: DelegationJob
     ) {
+        const attempts = artifactDownloadAttempts(job.providerState)
         const hydrated = await this.hydrateArtifacts(
             remote,
             session,
-            job.artifacts
+            job.artifacts,
+            {
+                // `attempts` counts completed retries, so the first try is
+                // still allowed when attempts === MAX - 1.
+                allowRetry: attempts + 1 < MAX_ARTIFACT_DOWNLOAD_ATTEMPTS,
+                maxBytes:
+                    this.options.client.maxResponseBytes ||
+                    DEFAULT_MAX_RESPONSE_BYTES
+            }
         )
         const previousState = structuredClone(job.providerState)
         delete previousState.gatewayArtifactDownloadPending
         delete previousState.gatewayArtifactRetryAfterMs
+        delete previousState.gatewayArtifactDownloadAttempts
         const result = fromGatewaySession(hydrated.session, previousState)
         if (
             hydrated.artifactRetryAfterMs !== undefined &&
@@ -338,13 +411,16 @@ export class NexusGatewayProvider implements DelegationProvider {
             // The turn has already been accepted. Keep it logically active
             // while a read-only artifact download is retried; this prevents a
             // transient storage failure from replaying the user's prompt.
+            // The attempt counter bounds that window so the job cannot stay
+            // running until the active TTL expires.
             result.state = 'running'
             result.remoteState = hydrated.session.state
             result.error = undefined
             result.providerState = {
                 ...result.providerState,
                 gatewayArtifactDownloadPending: true,
-                gatewayArtifactRetryAfterMs: hydrated.artifactRetryAfterMs
+                gatewayArtifactRetryAfterMs: hydrated.artifactRetryAfterMs,
+                gatewayArtifactDownloadAttempts: attempts + 1
             }
         }
         return result
@@ -353,7 +429,8 @@ export class NexusGatewayProvider implements DelegationProvider {
     private async hydrateArtifacts(
         remote: GatewayRemoteConfig,
         session: GatewaySessionView,
-        previous: DelegationJob['artifacts']
+        previous: DelegationJob['artifacts'],
+        policy: ArtifactHydrationPolicy
     ): Promise<HydratedGatewaySession> {
         const client = this.options.client as GatewayClient & {
             downloadArtifact?: GatewayClient['downloadArtifact']
@@ -396,6 +473,22 @@ export class NexusGatewayProvider implements DelegationProvider {
                 if (terminalArtifactStorageStatus(artifact)) {
                     return unsafeUrl ? { ...artifact, url: undefined } : artifact
                 }
+                // The persisted run view reports the size up front, so an
+                // artifact that cannot fit the response ceiling is never
+                // downloaded at all.
+                if (
+                    typeof artifact.size === 'number' &&
+                    artifact.size > policy.maxBytes
+                ) {
+                    // Only the chat delivery is capped here: these bytes have
+                    // to be base64'd into the job record. The Console streams
+                    // from the Gateway instead, so it can still fetch this.
+                    return degradeArtifact(
+                        artifact,
+                        unsafeUrl,
+                        `产物大小 ${artifact.size} 字节，超过随消息回传的上限 ${policy.maxBytes} 字节；可在控制台产物页下载`
+                    )
+                }
                 try {
                     const downloaded = await downloadArtifact.call(
                         client,
@@ -424,6 +517,19 @@ export class NexusGatewayProvider implements DelegationProvider {
                     }
                     if (statusOf(error) === 401 || statusOf(error) === 403) {
                         throw error
+                    }
+                    // Permanent failures degrade immediately; transient ones
+                    // may hold the turn open, but only until the attempt
+                    // ceiling is reached.
+                    if (!isRetryableArtifactError(error) || !policy.allowRetry) {
+                        const reason = artifactFailureReason(error)
+                        return degradeArtifact(
+                            artifact,
+                            unsafeUrl,
+                            isRetryableArtifactError(error)
+                                ? `${reason}（已尝试 ${MAX_ARTIFACT_DOWNLOAD_ATTEMPTS} 次后放弃）`
+                                : reason
+                        )
                     }
                     artifactRetryPending = true
                     artifactRetryAfterMs = Math.max(

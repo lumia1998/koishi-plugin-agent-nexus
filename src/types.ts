@@ -80,8 +80,30 @@ export interface NexusStatus {
     delegation: DelegationStatus
 }
 
+/**
+ * Local artifact cache settings. `directory` is reported relative to the
+ * Koishi base directory so the Console shows a portable path instead of
+ * leaking the host's absolute layout.
+ */
+export interface NexusArtifactCacheSettings {
+    enabled: boolean
+    directory: string
+    ttlHours: number
+    maxTotalBytes: number
+}
+
+/** Read-only snapshot of the connection settings owned by Koishi plugin config. */
+export interface NexusPluginSettings {
+    commandAuthority: number
+    maxResponseBytes: number
+    /** Length of the configured Gateway API key. The key itself is never exposed. */
+    gatewayKeyLength: number
+    artifactCache: NexusArtifactCacheSettings
+}
+
 export interface NexusConsoleData {
     config: NexusConfig
     status: NexusStatus
+    settings: NexusPluginSettings
     gatewayKeyConfigured: boolean
 }
