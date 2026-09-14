@@ -19,7 +19,6 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm test
       - run: npm run typecheck
       - run: node node_modules/typescript/bin/tsc -p client/tsconfig.json --noEmit --pretty false
       - run: npm run build

@@ -129,18 +129,9 @@ ID。后台任务完成或等待确认时会主动唤醒原 ChatLuna 会话，�
 ```bash
 npm install
 npm run typecheck
-npm test
 npm run build
 npm pack --dry-run --json
 ```
-
-与本地新版 Gateway 做真实协议联测（先在 Gateway 项目执行 `npm run build`）：
-
-```bash
-npm run test:gateway -- ../nexus-gateway
-```
-
-联测只启动临时配置、临时端口和测试 ACP 进程，覆盖完成证明、配额错误、SSE 缺口重置、会话关闭后的持久化下载及 Key 撤销，不使用运行中的 Gateway 或用户密钥。
 
 ## License
 

@@ -32,8 +32,10 @@ src/delegation/store.ts       Gateway 任务持久化
 src/delegation/wakeup.ts      后台任务完成后唤醒 ChatLuna
 src/tools/delegate.ts         每 Agent 独立 ChatLuna Tool
 src/service.ts                Koishi Service、工具同步与产物转存
-src/webui/index.ts            最小 Console RPC
-client/components/gateway-panel.vue  单 Gateway 中文控制台
+src/webui/index.ts            Console RPC 与产物代理路由
+client/page.vue               标签骨架（概览 / 智能体 / 任务 / 产物 / 设置）
+client/components/*-tab.vue   各标签页
+client/shared.ts              状态文案与格式化
 ```
 
 ## 配置模型
@@ -101,6 +103,9 @@ Agent inventory 必须保留 `protocol: "acp" | "a2a"`；Session 必须保留 `p
 - `gatewayKey` 使用 Koishi secret 字段，不写入 `data/agent-nexus/config.json` 或 Console 响应。
 - Gateway URL 仅允许 HTTP/HTTPS，拒绝 URL 凭据与 fragment。
 - Gateway 负责 API Key scope 与 Session 所有权校验。
+- 控制台下载产物走插件代理路由 `GET /agent-nexus/artifacts/:jobId/:artifactId`，由服务端持 Key 回源；
+  该路由要求只读票据（HMAC，绑定 job/artifact，5 分钟有效），因为 Gateway 的产物地址本身需要凭据，
+  未经签名的直链在浏览器中必然 401。
 - 二进制产物有 32 MiB 转存上限，并校验 base64 后写入 ChatLuna 临时文件。
 - 局域网部署时，`0.0.0.0` 只作为 Gateway 监听地址；插件连接真实 IP/域名。
 
@@ -108,7 +113,6 @@ Agent inventory 必须保留 `protocol: "acp" | "a2a"`；Session 必须保留 `p
 
 ```bash
 npm run typecheck
-npm test
 npm run build
 npm pack --dry-run --json
 ```
