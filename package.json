@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
   "description": "Nexus Gateway agent delegation for ChatLuna",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -27,8 +27,6 @@
     "build": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
     "build:client": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build-client.cjs'))\"",
     "typecheck": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
-    "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
-    "test:gateway": "node scripts/gateway-compat-smoke.cjs",
     "prepack": "npm run build"
   },
   "koishi": {
@@ -82,7 +80,7 @@
   "overrides": {
     "langsmith": "^0.6.3",
     "esbuild": "$esbuild",
-    "js-yaml": "4.3.1",
+    "js-yaml": "4.3.2",
     "ip-address": "10.5.0",
     "nanoid": "3.3.18",
     "postcss": "8.5.26",
