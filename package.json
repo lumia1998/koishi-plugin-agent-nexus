@@ -84,7 +84,7 @@
     "ip-address": "10.5.0",
     "nanoid": "3.3.18",
     "postcss": "8.5.26",
-    "undici": "6.28.0",
+    "undici": "6.28.1",
     "vite": "6.4.3",
     "@koishijs/client": {
       "element-plus": "2.14.3"
