@@ -2,6 +2,15 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.4.1] - 2026-10-12
+
+- 工具短名归一：`deepseek*` 与单独的 `dsh` 统一映射为 `dsh`，`grok*` 统一映射为 `grok`。DeepSeek Harness
+  与 Grok Build 因此稳定注册为 `nexus_dsh` 与 `nexus_grok`，不再随网关侧的 Agent 命名漂移；别名匹配优先于
+  原有驱动名列表，只有同时提到两个驱动名的 id 会受影响（例如 `deepseek-claude` 现在归为 `dsh`）。
+- 依赖审计：`overrides.undici` 由 6.28.0 提升到 6.28.1，覆盖三条 GHSA 公告的修复边界，CI 的
+  `npm audit --audit-level=high` 门槛恢复通过；版本仍留在 `@cordisjs/plugin-proxy-agent` 与
+  `koishi-plugin-chatluna` 声明的 6.x 区间内。
+
 ## [0.4.0] - 2026-09-14
 
 - 控制台「Agent 中枢」重构为标签页：概览、智能体、任务、产物、设置，并新增单个 Agent 的覆盖项编辑对话框。
