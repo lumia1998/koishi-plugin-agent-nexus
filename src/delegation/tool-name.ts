@@ -55,15 +55,15 @@ export function delegationToolNameForJob(
 }
 
 export function toolNameSegment(value: string) {
-    const known = value
-        .normalize('NFKD')
-        .toLowerCase()
-        .match(/(?:openclaw|opencode|hermes|claude|codex|pi)/)
+    const normalized = value.normalize('NFKD').toLowerCase()
+    // The product names are longer than the CLI shorthand users expect as tool
+    // names: DeepSeek Harness is `dsh`, Grok Build is `grok`.
+    if (normalized.includes('deepseek') || /\bdsh\b/.test(normalized)) return 'dsh'
+    if (normalized.includes('grok')) return 'grok'
+    const known = normalized.match(/(?:openclaw|opencode|hermes|claude|codex|pi)/)
     if (known) return known[0]
-    const normalized = value
-        .normalize('NFKD')
-        .toLowerCase()
+    const slug = normalized
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '')
-    return normalized || 'agent'
+    return slug || 'agent'
 }

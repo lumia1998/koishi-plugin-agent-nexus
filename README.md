@@ -113,7 +113,7 @@ Console 的“Agent 中枢”页面默认展示 Gateway 返回的全部 Agent。
 ## ChatLuna 调用方式
 
 推荐使用统一的 `nexus_task`。每个 Agent 仍会得到独立兼容工具，例如 `nexus_hermes`、
-`nexus_claude` 或 `nexus_opencode`。`action=run` 默认以前台方式运行：插件原样传递用户 `prompt`，Gateway
+`nexus_claude`、`nexus_dsh` 或 `nexus_opencode`。`action=run` 默认以前台方式运行：插件原样传递用户 `prompt`，Gateway
 会另外附加协议级完成约束，并持续等待 Agent 完成、失败、请求输入或请求授权。只有明确设置
 `background=true` 时才立即返回任务
 ID。后台任务完成或等待确认时会主动唤醒原 ChatLuna 会话，不需要轮询。后台任务仍在执行时，
