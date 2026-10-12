@@ -51,6 +51,8 @@ npm install koishi-plugin-agent-nexus
 | `gatewayKey` | 空 | Gateway“API 密钥”页面生成的 API Key |
 | `commandAuthority` | `4` | Console 写操作所需权限等级 |
 | `maxResponseBytes` | `33554432` | 单个 HTTP 响应或 SSE 事件帧读取上限；不是整条长期事件流的累计上限 |
+| `inputAttachments.localRoots` | `[]` | 允许读取本地附件的专用目录；相对路径基于 Koishi 工作目录，目录必须已存在 |
+| `inputAttachments.privateOrigins` | `[]` | 允许访问内网附件服务的准确 HTTP(S) origin，例如 `http://127.0.0.1:3000` |
 
 `gatewayKey` 是数据面 API Key，不是 Gateway 控制台登录密码。
 
@@ -78,6 +80,20 @@ Gateway 的 Session 附件接口。Gateway 会在对应 Session 中临时保存�
 
 附件只跟随当前任务发送，不会拼接成历史对话；ChatLuna 清空或删除会话时，插件会关闭关联的
 Gateway Session 并清理临时附件。停止生成时会取消关联的活动任务。
+
+默认只读取 `data:` 附件及公开 HTTP/HTTPS 地址。HTTP 地址不得包含用户名、密码或 fragment；域名的
+全部解析结果和每次重定向目标都必须是公开地址，连接使用已校验的 DNS 结果。最多跟随 5 次重定向，
+整个网络读取限时 30 秒；压缩响应也受解压后大小限制。
+
+本地适配器返回 `file://` 附件时，需要在 `inputAttachments.localRoots` 添加其专用附件缓存目录。
+目录必须由管理员控制，不能允许不可信本地用户修改，也不要添加 Koishi 工作目录、配置目录或整个磁盘。
+允许目录内的所有文件都可能作为聊天附件读取，因此该目录不能保存不应向聊天用户开放的文件。
+允许目录在插件启动时固定为 realpath；目录外文件、UNC 地址、目录与符号链接逃逸会被拒绝，普通文件
+在读取前和读取中均检查大小。升级后应按实际适配器设置这些允许目录。
+
+内网附件 HTTP 服务需要在 `inputAttachments.privateOrigins` 添加准确的协议、主机和端口，不含路径或
+尾斜杠。例如本机适配器文件服务可添加 `http://127.0.0.1:3000`。只添加专用且可信的附件服务；该项
+允许其访问内网 IP，但不会信任它重定向到的其他 origin。插件不会自动把 Gateway 地址加入允许列表。
 
 ## 局域网配置
 

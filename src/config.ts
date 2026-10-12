@@ -15,12 +15,18 @@ export interface ArtifactCacheConfig {
     maxTotalBytes: number
 }
 
+export interface InputAttachmentConfig {
+    localRoots: string[]
+    privateOrigins: string[]
+}
+
 export interface Config {
     gatewayUrl: string
     gatewayKey: string
     commandAuthority: number
     maxResponseBytes: number
     artifactCache: ArtifactCacheConfig
+    inputAttachments?: InputAttachmentConfig
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -41,6 +47,12 @@ export const Config: Schema<Config> = Schema.object({
         .max(268435456)
         .default(32 * 1024 * 1024)
         .description('单个 Gateway HTTP 响应或 SSE 事件帧允许读取的最大字节数'),
+    inputAttachments: Schema.object({
+        localRoots: Schema.array(Schema.string()).default([])
+            .description('允许读取本地附件的专用目录；默认禁止 file URL。相对路径基于 Koishi 工作目录，目录必须已存在且由管理员控制；目录内所有文件均可被聊天附件读取'),
+        privateOrigins: Schema.array(Schema.string()).default([])
+            .description('允许访问内网附件服务的准确 HTTP(S) origin，例如 http://127.0.0.1:3000；不要包含路径，只添加可信附件服务')
+    }).description('输入附件来源限制'),
     artifactCache: Schema.object({
         enabled: Schema.boolean()
             .default(true)

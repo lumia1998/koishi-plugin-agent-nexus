@@ -2,6 +2,14 @@
 
 本文件记录 AgentNexus 面向使用者的重要变更。
 
+## [0.4.2] - 2026-10-12
+
+- 限制输入附件读取边界：默认禁止本地文件与内网 URL，仅在插件设置中明确允许的专用目录或准确 origin
+  可读取。公开 HTTP(S) 下载会检查全部 DNS 结果和每次重定向，并让连接使用已校验的地址，避免重定向或
+  DNS 变化绕过内网限制。普通文件读取前与读取中均检查大小，压缩响应限制解压后大小。
+- 本地适配器需配置 `inputAttachments.localRoots`；内网附件服务需配置
+  `inputAttachments.privateOrigins`。保留 data URI、公开网络附件及两个委派工具的附件上传流程。
+
 ## [0.4.1] - 2026-10-12
 
 - 工具短名归一：`deepseek*` 与单独的 `dsh` 统一映射为 `dsh`，`grok*` 统一映射为 `grok`。DeepSeek Harness

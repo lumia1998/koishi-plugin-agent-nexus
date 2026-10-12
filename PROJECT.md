@@ -48,6 +48,10 @@ interface Config {
     gatewayKey: string
     commandAuthority: number
     maxResponseBytes: number
+    inputAttachments?: {
+        localRoots: string[]
+        privateOrigins: string[]
+    }
 }
 ```
 
@@ -108,6 +112,9 @@ Agent inventory 必须保留 `protocol: "acp" | "a2a"`；Session 必须保留 `p
   未经签名的直链在浏览器中必然 401。
 - 二进制产物有 32 MiB 转存上限，并校验 base64 后写入 ChatLuna 临时文件。
 - 局域网部署时，`0.0.0.0` 只作为 Gateway 监听地址；插件连接真实 IP/域名。
+- 输入附件默认只读取 data URI 与公开 HTTP(S) 地址；逐跳校验 IP 并固定 DNS 连接地址。内网来源必须在
+  `inputAttachments.privateOrigins` 中显式允许；本地普通文件必须位于启动时固定的
+  `inputAttachments.localRoots` realpath 内，默认不允许本地文件读取。
 
 ## 发布门槛
 

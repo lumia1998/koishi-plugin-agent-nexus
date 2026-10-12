@@ -2,8 +2,6 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { Context, Service } from 'koishi'
 import path from 'path'
 import { Readable } from 'stream'
-import { fileURLToPath } from 'url'
-import { readFile as readBinaryFile } from 'fs/promises'
 import type {
     DelegationAgentConfig,
     GatewayRemoteConfig,
@@ -37,6 +35,7 @@ import { sendDelegationArtifacts } from './delegation/media'
 import { NexusGatewayProvider } from './providers'
 import { NexusGatewayClient } from './gateway'
 import { ArtifactCache, type CachedArtifact } from './artifacts/cache'
+import { InputAttachmentReader } from './attachments/reader'
 
 export class AgentNexusService extends Service {
     static readonly inject = ['chatluna', 'chatluna_storage']
@@ -56,6 +55,7 @@ export class AgentNexusService extends Service {
     private readonly dataPath: string
     private readonly artifactCache: ArtifactCache
     private readonly artifactCacheRelative: string
+    private readonly inputAttachmentReader: InputAttachmentReader
 
     constructor(
         ctx: Context,
@@ -65,6 +65,7 @@ export class AgentNexusService extends Service {
         this.gatewayRemote = createGatewayConnection(pluginConfig)
         this.gatewayClient = new NexusGatewayClient(pluginConfig.maxResponseBytes)
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
+        this.inputAttachmentReader = new InputAttachmentReader(ctx.baseDir, pluginConfig.inputAttachments)
         this.artifactCache = new ArtifactCache({
             root: path.join(this.dataPath, 'artifacts'),
             enabled: pluginConfig.artifactCache?.enabled !== false,
@@ -126,6 +127,7 @@ export class AgentNexusService extends Service {
 
     async start() {
         await this.loadConfig()
+        await this.inputAttachmentReader.init()
         this.running = true
         this.syncTools()
         await this.delegations.start()
@@ -373,7 +375,7 @@ export class AgentNexusService extends Service {
         const attachments: InputAttachment[] = []
         let total = 0
         for (const source of sources) {
-            const attachment = await loadInputAttachment(source)
+            const attachment = await loadInputAttachment(source, this.inputAttachmentReader)
             total += attachment.bytes.length
             if (total > MAX_DELEGATION_INPUT_BYTES) {
                 throw new Error('本次任务的图片/文件总大小超过 32 MB。')
@@ -797,7 +799,7 @@ function inputElement(value: any): InputAttachmentSource | undefined {
     }
 }
 
-async function loadInputAttachment(source: InputAttachmentSource): Promise<InputAttachment> {
+async function loadInputAttachment(source: InputAttachmentSource, reader: InputAttachmentReader): Promise<InputAttachment> {
     const parsed = parseDataUri(source.source)
     if (parsed) {
         assertInputAttachmentSize(parsed.bytes.length)
@@ -807,56 +809,13 @@ async function loadInputAttachment(source: InputAttachmentSource): Promise<Input
             bytes: parsed.bytes
         }
     }
-    let bytes: Uint8Array
-    if (source.source.startsWith('file://')) {
-        bytes = await readBinaryFile(fileURLToPath(source.source))
-    } else if (/^[a-z][a-z\d+.-]*:\/\//i.test(source.source)) {
-        const response = await fetch(source.source, {
-            signal: AbortSignal.timeout(30_000)
-        })
-        if (!response.ok || !response.body) {
-            throw new Error(`无法读取用户附件（HTTP ${response.status}）。`)
-        }
-        bytes = await readLimitedResponse(response, MAX_DELEGATION_INPUT_ATTACHMENT_BYTES)
-        source.mediaType = concreteMediaType(source.mediaType)
-            || normalizeMediaType(response.headers.get('content-type') || '')
-    } else {
-        throw new Error(`无法读取用户附件地址：${source.source}`)
-    }
+    const { bytes, mediaType } = await reader.read(source.source, MAX_DELEGATION_INPUT_ATTACHMENT_BYTES)
     assertInputAttachmentSize(bytes.length)
     return {
         name: source.name,
-        mediaType: source.mediaType || 'application/octet-stream',
+        mediaType: concreteMediaType(source.mediaType) || normalizeMediaType(mediaType || '') || 'application/octet-stream',
         bytes
     }
-}
-
-async function readLimitedResponse(response: Response, maxBytes: number) {
-    const declared = Number(response.headers.get('content-length'))
-    if (Number.isFinite(declared) && declared > maxBytes) {
-        throw new Error('用户附件超过 16 MB。')
-    }
-    const reader = response.body!.getReader()
-    const chunks: Uint8Array[] = []
-    let total = 0
-    try {
-        while (true) {
-            const { value, done } = await reader.read()
-            if (done) break
-            total += value.byteLength
-            if (total > maxBytes) throw new Error('用户附件超过 16 MB。')
-            chunks.push(value)
-        }
-    } finally {
-        reader.releaseLock()
-    }
-    const bytes = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-        bytes.set(chunk, offset)
-        offset += chunk.byteLength
-    }
-    return bytes
 }
 
 function parseDataUri(value: string) {
